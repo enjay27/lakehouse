@@ -1,0 +1,67 @@
+# The smoke gate (ADR-018): runs on a push to gate/smoke/<task> and nightly on main. Advisory:
+# its result is reported in the PR, it does not block a merge (ADR-019). kind with three nodes
+# and the pinned CNPG operator (ADR-017, ADR-029), the release install script, then a
+# one-instance PostgreSQL Cluster that must become Ready. Not a PR check, so auto-merge.yml does
+# not list it.
+name: Smoke
+
+on:
+  push:
+    branches: ["gate/smoke/**"]
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions: {}
+
+concurrency:
+  group: smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    env:
+      KUBE_CONTEXT: kind-lakehouse-gate
+      NS_CNPG_SYSTEM: cnpg-system
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: No release to upgrade from yet (ADR-021)
+        run: |
+          set -euo pipefail
+          tag=$(git tag --merged HEAD --list 'platform-*' --sort=-creatordate | head -n 1)
+          if [ -n "$tag" ]; then
+            echo "::error::release $tag exists; the upgrade from a tag (ADR-021) is not built yet"
+            exit 1
+          fi
+          echo "No release to upgrade from: fresh install (ADR-021)." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Tools at pinned versions
+        run: |
+          python3 gates/gate.py tools "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: kind cluster and the CNPG operator (gate only, ADR-029)
+        run: python3 gates/gate.py up
+
+      - name: Release install script
+        run: python3 install/release.py | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: A PostgreSQL Cluster becomes Ready
+        run: |
+          python3 gates/gate.py smoke-cnpg
+          echo "A one-instance CNPG Cluster became Ready." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: State of the cluster on failure
+        if: failure()
+        run: |
+          kubectl --context "$KUBE_CONTEXT" get nodes -o wide || true
+          kubectl --context "$KUBE_CONTEXT" get pods -A -o wide || true
+          kubectl --context "$KUBE_CONTEXT" -n gate-smoke get events --sort-by=.lastTimestamp || true

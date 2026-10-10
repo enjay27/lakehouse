@@ -1,7 +1,7 @@
-# The static gate (ADR-018): the scripts' tests, the ADR check (ADR-000), the repository check
-# (ADR-002, ADR-006), the CLAUDE.md limits and whitespace errors over the whole tree. Runs on
-# every push to claude/** and main, and on every PR. auto-merge.yml lists this workflow by
-# its name, "Static" (ADR-022).
+# The static gate (ADR-018): the tests of scripts/, gates/ and install/, the ADR check
+# (ADR-000), the repository check (ADR-002, ADR-006), the CLAUDE.md limits and whitespace
+# errors over the whole tree. Runs on every push to claude/** and main, and on every PR.
+# auto-merge.yml lists this workflow by its name, "Static" (ADR-022).
 name: Static
 
 on:
@@ -28,6 +28,10 @@ jobs:
           persist-credentials: false
       - name: Script tests
         run: python3 -m unittest discover -s scripts -v
+      - name: Gate and install script tests
+        run: |
+          python3 -m unittest discover -s gates -v
+          python3 -m unittest discover -s install -v
       - name: ADRs follow ADR-000
         run: python3 scripts/adr_check.py
       - name: Repository check
