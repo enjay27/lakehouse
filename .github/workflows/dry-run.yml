@@ -43,4 +43,6 @@ jobs:
         run: python3 gates/gate.py up
 
       - name: Install the last release, then this commit over it (ADR-021)
-        run: python3 gates/gate.py install | tee -a "$GITHUB_STEP_SUMMARY"
+        run: |
+          set -euo pipefail  # the default `bash -e` would let tee hide a failed install
+          python3 gates/gate.py install | tee -a "$GITHUB_STEP_SUMMARY"
