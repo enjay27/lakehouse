@@ -58,7 +58,8 @@ def operator_versions(deployments_json):
     return versions
 
 
-def kubectl(argv):
+def call(argv):
+    """Runs a command; (exit code, stdout or, on failure, stderr)."""
     result = subprocess.run(argv, capture_output=True, text=True, check=False)
     return result.returncode, result.stdout if result.returncode == 0 else result.stderr
 
@@ -90,7 +91,7 @@ def check_preconditions(env, run, supported):
 
 def main():
     env = load_env(ROOT, os.environ)
-    problems, notes = check_preconditions(env, kubectl, supported_versions())
+    problems, notes = check_preconditions(env, call, supported_versions())
     for line in problems or notes:
         print(line)
     return 1 if problems else 0
