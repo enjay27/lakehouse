@@ -1,6 +1,6 @@
 # ADR-022: Claude's PRs merge through an auto-merge workflow once every check on the head is green
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-10
 - **Related:** ADR-003, ADR-018, ADR-019
 
