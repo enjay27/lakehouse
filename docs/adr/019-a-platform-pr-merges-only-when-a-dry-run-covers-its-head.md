@@ -21,7 +21,7 @@ A job **gate-check** runs on every PR and is required. It:
 3. Otherwise finds the latest successful dry-run run on `gate/dry-run/<task>` (Actions API,
    `actions: read`) and its commit `X`.
 4. Passes only if `X` is an ancestor of the head and everything changed since `X` is
-   documentation (`*.md`, `.memory/**`).
+   documentation (`*.md`).
 5. Writes which commit and run it relied on to the job summary.
 
 ## Diagram
