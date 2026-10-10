@@ -1,13 +1,18 @@
 # Creates or updates this repository's labels from .github/labels.json (ADR-003): the state
-# labels sessions read and write. Runs when the file changes on main, or by hand. It only
-# adds and updates; a label removed from the file is deleted by hand. Not a PR check, so
-# auto-merge.yml does not list it.
+# labels sessions read and write. It only adds and updates; a label removed from the file is
+# deleted by hand. Not a PR check, so auto-merge.yml does not list it.
+# Runs after each successful Auto-merge run, because a merge made with GITHUB_TOKEN starts no
+# `push` run on main (ADR-022); on a push to main that changes the file (Kade's own merges);
+# or by hand. A workflow_run job checks out main, so it always syncs main's labels.json.
 name: Labels
 
 on:
   push:
     branches: [main]
     paths: [".github/labels.json", ".github/workflows/labels.yml"]
+  workflow_run:
+    workflows: ["Auto-merge"]
+    types: [completed]
   workflow_dispatch:
 
 permissions: {}
@@ -17,6 +22,7 @@ jobs:
     name: sync labels
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     permissions:
       contents: read
       issues: write  # create and update labels
