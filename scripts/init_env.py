@@ -8,7 +8,7 @@ Writing `.env`: starts from `.env.template` when `.env` does not exist, adds eve
 template has and `.env` lacks, and fills every empty credential this repository creates
 (GENERATED) with a new random value: 32 letters and digits, or 16 lowercase letters and digits
 for user names and client IDs. Credentials of other teams' services are never generated
-(ADR-023); the script lists the ones still empty, to be typed in by hand. A value already in
+(ADR-031); the script lists the ones still empty, to be typed in by hand. A value already in
 `.env` is never overwritten, so rerunning is safe. `.env` is written with mode 0600.
 
 Applying the Secrets: stops unless `KUBE_CONTEXT` and every value a Secret needs are set. Each
@@ -198,7 +198,7 @@ def main(argv):
           + f", added {len(added)} variables from {args.template}")
     by_hand = missing_by_hand(parse(text))
     if by_hand:
-        print(f"{args.env}: type into .env by hand: {', '.join(by_hand)} (ADR-023)")
+        print(f"{args.env}: type into .env by hand: {', '.join(by_hand)} (ADR-031)")
 
     if args.apply_secrets:
         apply_secrets(parse(text))
