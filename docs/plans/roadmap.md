@@ -94,6 +94,13 @@ operation. What follows is the list they cover.
 - gate-check first, before any platform file (done, PR #16); then ADR-030 (accepted), so
   auto-merge leaves PRs that change workflows or gate scripts, and drafts, to Kade
   ([#15](https://github.com/enjay27/lakehouse/issues/15)).
+- The kind gate, before any chart: three nodes on `kindest/node:v1.36.4`, CNPG 1.30.1 from
+  its pinned chart, `install/release.py` step 0, and a one-instance `Cluster` made Ready.
+  First runs passed on commit `0d3092a` on 2026-10-10: dry-run
+  [38060408982](https://github.com/enjay27/lakehouse/actions/runs/38060408982) (51 s), smoke
+  [38060408746](https://github.com/enjay27/lakehouse/actions/runs/38060408746) (1 min 52 s,
+  the `Cluster` Ready in 37 s). Left in P1: the release workflow; the image cache waits for
+  the first chart's images.
 - **Gate:** static, then dry-run and smoke on kind. **Linux:** `init_env.py --apply-secrets`
   ([#6](https://github.com/enjay27/lakehouse/issues/6)).
 
