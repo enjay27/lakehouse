@@ -1,0 +1,78 @@
+# lakehouse: Architecture Decision Records
+
+The decisions this repository is built from (ADR-001). Nothing outside `docs/adr/` is trusted
+until an ADR covering it is Accepted. See [ADR-000](000-adr-process-and-template.md) for how
+these records are written and changed.
+
+## Status legend
+
+| Status | Meaning |
+|---|---|
+| **Accepted** | Decided. Build on it. |
+| **Accepted (details proposed)** | The core decision is made; some details inside are still suggestions. |
+| **Proposed** | Suggested, not yet confirmed. Confirm, change, or reject before building on it. |
+| **Deferred** | Decided to decide later; recorded so nobody builds around an assumption. |
+| **Rejected** | Dropped. Kept for history so that it is not proposed again. |
+| **Superseded by ADR-NNN** | Replaced. Kept for history. |
+| **Amended by ADR-NNN** | Still in force, except the part that ADR-NNN replaces. Read both. |
+
+## System at a glance
+
+```mermaid
+flowchart LR
+    subgraph K8S["Kubernetes cluster (OrbStack, the Linux gate, or a target cluster)"]
+        subgraph ST["NS_STORAGE"]
+            MINIO["object storage"]
+        end
+        subgraph CP["NS_CATALOG_POLARIS"]
+            POL["Apache Polaris"] --> PGP[("PostgreSQL<br/>for Polaris")]
+        end
+        subgraph MON["NS_MONITORING"]
+            OS[("OpenSearch")]
+        end
+        FB["Fluent Bit<br/>every node"]
+        POL --> MINIO
+        FB --> OS
+    end
+    SUITE["suite: notebooks, pytest<br/>local, dev, prod"] -->|"REST, SQL"| POL
+    GH["GitHub Actions:<br/>static, dry-run, smoke, release"] -.->|"kind, 3 nodes"| K8S
+```
+
+## Index
+
+| # | Title | Status |
+|---|---|---|
+| **Process and repository** | | |
+| [000](000-adr-process-and-template.md) | ADR process and template | Proposed |
+| [001](001-the-repository-starts-from-its-decision-records.md) | The repository starts from its decision records; code enters only under an Accepted ADR | Proposed |
+| [002](002-the-repository-is-public-and-configuration-lives-in-env.md) | The repository is public; environment-specific configuration lives in `.env` | Proposed |
+| [003](003-state-lives-in-memory-md-and-the-pr-is-the-session-record.md) | State lives in `MEMORY.md`; the PR is the session record | Proposed |
+| **Environments and credentials** | | |
+| [004](004-releases-are-proven-on-linux-and-orbstack-is-for-development.md) | Releases are proven on Linux; OrbStack is for development; target clusters are never reached | Proposed |
+| [005](005-the-suite-runs-in-three-environments-with-guards.md) | The suite runs in three environments, each with its own guards | Proposed |
+| [006](006-credentials-are-never-committed.md) | Credentials are never committed; they become Kubernetes Secrets at install time | Proposed |
+| **Platform** | | |
+| [007](007-namespaces-by-service-type-named-in-env.md) | Namespaces are split by service type, and their names come from `.env` | Proposed |
+| [008](008-each-service-has-its-own-postgresql.md) | Each service has its own PostgreSQL, in the service's namespace | Proposed |
+| [009](009-the-iceberg-catalog-is-apache-polaris.md) | The Iceberg catalog is Apache Polaris, from a local chart at a pinned version | Proposed |
+| [010](010-postgresql-runs-ha-with-pgpool-from-the-bitnami-chart.md) | PostgreSQL runs as Bitnami `postgresql-ha` with Pgpool-II, wrapped in a local umbrella chart | Proposed |
+| [011](011-object-storage-is-minio.md) | Object storage is MinIO, from a local chart at a pinned release | Proposed |
+| [012](012-install-order-storage-then-databases-then-services.md) | Install order: storage, then each service's PostgreSQL, then the services, then monitoring | Proposed |
+| [013](013-logs-ship-to-opensearch-in-the-monitoring-namespace.md) | Logs ship with Fluent Bit to OpenSearch, which runs in the monitoring namespace | Proposed |
+| [014](014-polaris-writes-one-log-file-per-pod-for-an-hourly-batch.md) | Polaris writes one log file per pod, read by an hourly batch released separately | Proposed |
+| **Measurement and verification** | | |
+| [015](015-measurements-run-on-the-plain-upstream-schema.md) | Measurements run on the plain upstream Polaris schema; no custom indexes | Proposed |
+| [016](016-settings-are-verified-on-the-running-object.md) | A setting is verified on the running object against the chart default, never in the values file | Proposed |
+| **Gates and releases** | | |
+| [017](017-the-linux-gate-cluster-is-kind-with-three-nodes.md) | The Linux gate cluster is kind with three nodes on a GitHub-hosted runner | Proposed |
+| [018](018-dry-run-and-smoke-gates-run-from-gate-branches.md) | Dry-run and smoke gates run from throwaway `gate/*` branches on the PR's exact commit | Proposed |
+| [019](019-a-platform-pr-merges-only-when-a-dry-run-covers-its-head.md) | A platform PR merges only when a passing dry-run gate covers its head | Proposed |
+| [020](020-a-release-tag-is-created-only-by-the-release-workflow.md) | A release tag is created only by the release workflow, after the full Linux gate | Proposed |
+| [021](021-gates-upgrade-from-the-last-release-rebuilt-from-its-tag.md) | Gates upgrade from the last release, rebuilt from its tag; no machine snapshots | Proposed |
+
+## Not ADRs
+
+- **Measurements and their numbers:** `.memory/`, with their evidence.
+- **What is next:** `MEMORY.md` *Now* (ADR-003).
+- **How to run something:** runbooks, once they enter.
+- **Tuning values** (window sizes, caps, replica counts): values files and their comments.
