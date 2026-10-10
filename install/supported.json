@@ -1,0 +1,4 @@
+{
+  "cnpg_operator": ["1.30"],
+  "source": "ADR-029: a release states which CNPG operator versions it supports; 1.30 is the gate's pin (gates/pins.json)"
+}

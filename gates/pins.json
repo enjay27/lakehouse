@@ -1,0 +1,31 @@
+{
+  "kind": {
+    "version": "v0.33.0",
+    "url": "https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64",
+    "sha256": "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d",
+    "source": "kind-linux-amd64.sha256sum of the v0.33.0 release, read 2026-10-10"
+  },
+  "kubectl": {
+    "version": "v1.36.4",
+    "url": "https://dl.k8s.io/release/v1.36.4/bin/linux/amd64/kubectl",
+    "sha256": "8b8f088da2dab964f853b38464033b1be15ede2839eca751482357c45abdd05a",
+    "source": "kubectl.sha256 at dl.k8s.io, read 2026-10-10"
+  },
+  "helm": {
+    "version": "v4.3.0",
+    "url": "https://get.helm.sh/helm-v4.3.0-linux-amd64.tar.gz",
+    "sha256": "86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb",
+    "source": "helm-v4.3.0-linux-amd64.tar.gz.sha256sum at get.helm.sh, read 2026-10-10"
+  },
+  "node_image": {
+    "image": "kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed",
+    "source": "kind v0.33.0 release notes and Docker Hub agree, read 2026-10-10; Kubernetes 1.36 per docs/plans/roadmap.md"
+  },
+  "cnpg_chart": {
+    "version": "0.29.1",
+    "operator_version": "1.30.1",
+    "url": "https://github.com/cloudnative-pg/charts/releases/download/cloudnative-pg-v0.29.1/cloudnative-pg-0.29.1.tgz",
+    "sha256": "b53d3991fe84bcf38767e7702cae78666265427a127a26fff168ab4207d2b1df",
+    "source": "digest in https://cloudnative-pg.github.io/charts/index.yaml, matched by the archive, read 2026-10-10"
+  }
+}
