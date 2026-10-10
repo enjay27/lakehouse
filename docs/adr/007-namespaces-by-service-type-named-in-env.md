@@ -1,6 +1,6 @@
 # ADR-007: Namespaces are split by service type, and their names come from `.env`
 
-- **Status:** Accepted
+- **Status:** Amended by ADR-023
 - **Date:** 2026-10-10
 - **Related:** ADR-002, ADR-008, ADR-010, ADR-012
 

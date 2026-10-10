@@ -1,6 +1,6 @@
 # ADR-026: Polaris issues its own tokens and asks an OPA policy endpoint; principals are created by the catalog gateway
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-10
 - **Related:** ADR-006, ADR-009, ADR-023, ADR-027
 

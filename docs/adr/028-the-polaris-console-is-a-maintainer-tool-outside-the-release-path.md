@@ -1,6 +1,6 @@
 # ADR-028: The Polaris console is a maintainer tool, built from a pinned commit and kept off the release path
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-10
 - **Related:** ADR-009, ADR-017, ADR-023, ADR-026
 
