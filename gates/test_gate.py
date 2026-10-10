@@ -21,19 +21,29 @@ def sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def helm_tarball(binary=b"helm-binary"):
+def tarball(member, binary):
     out = io.BytesIO()
     with tarfile.open(fileobj=out, mode="w:gz") as tar:
-        info = tarfile.TarInfo("linux-amd64/helm")
+        info = tarfile.TarInfo(member)
         info.size = len(binary)
         tar.addfile(info, io.BytesIO(binary))
     return out.getvalue()
 
 
+HELM_TGZ = tarball("linux-amd64/helm", b"helm-binary")
+KUBECONFORM_TGZ = tarball("kubeconform", b"kubeconform-binary")
+BLOBS = {"https://k/kind": b"kind-binary", "https://k/kubectl": b"kubectl-binary",
+         "https://k/helm.tgz": HELM_TGZ, "https://k/kubeconform.tgz": KUBECONFORM_TGZ}
+TOOL_PINS = {"kind": {"url": "https://k/kind", "sha256": sha(b"kind-binary")},
+             "kubectl": {"url": "https://k/kubectl", "sha256": sha(b"kubectl-binary")},
+             "helm": {"url": "https://k/helm.tgz", "sha256": sha(HELM_TGZ)},
+             "kubeconform": {"url": "https://k/kubeconform.tgz", "sha256": sha(KUBECONFORM_TGZ)}}
+
+
 class Pins(unittest.TestCase):
     def test_the_committed_pins_are_complete(self):
         pins = gate.load_pins(os.path.join(HERE, "pins.json"))
-        for tool in ("kind", "kubectl", "helm", "cnpg_chart"):
+        for tool in ("kind", "kubectl", "helm", "kubeconform", "cnpg_chart"):
             with self.subTest(tool=tool):
                 self.assertRegex(pins[tool]["sha256"], r"^[0-9a-f]{64}$")
                 self.assertTrue(pins[tool]["url"].startswith("https://"))
@@ -61,26 +71,34 @@ class Fetch(unittest.TestCase):
 
 class Tools(unittest.TestCase):
     def test_tools_are_written_executable_after_their_hashes_match(self):
-        tarball = helm_tarball()
-        blobs = {"https://k/kind": b"kind-binary", "https://k/kubectl": b"kubectl-binary",
-                 "https://k/helm.tgz": tarball}
-        pins = {"kind": {"url": "https://k/kind", "sha256": sha(b"kind-binary")},
-                "kubectl": {"url": "https://k/kubectl", "sha256": sha(b"kubectl-binary")},
-                "helm": {"url": "https://k/helm.tgz", "sha256": sha(tarball)}}
         with tempfile.TemporaryDirectory() as d:
-            gate.tools(pins, d, get=blobs.__getitem__)
+            gate.tools(TOOL_PINS, d, get=BLOBS.__getitem__)
             for name, content in (("kind", b"kind-binary"), ("kubectl", b"kubectl-binary"),
-                                  ("helm", b"helm-binary")):
+                                  ("helm", b"helm-binary"),
+                                  ("kubeconform", b"kubeconform-binary")):
                 with self.subTest(tool=name):
                     path = os.path.join(d, name)
                     with open(path, "rb") as f:
                         self.assertEqual(f.read(), content)
                     self.assertTrue(os.access(path, os.X_OK))
 
+    def test_only_the_named_tools_are_fetched(self):
+        fetched = []
+
+        def get(url):
+            fetched.append(url)
+            return BLOBS[url]
+        with tempfile.TemporaryDirectory() as d:
+            gate.tools(TOOL_PINS, d, ["helm", "kubeconform"], get=get)
+            self.assertEqual(sorted(os.listdir(d)), ["helm", "kubeconform"])
+        self.assertEqual(fetched, ["https://k/helm.tgz", "https://k/kubeconform.tgz"])
+
+    def test_an_unknown_tool_is_refused(self):
+        with self.assertRaises(KeyError):
+            gate.tools(TOOL_PINS, "/nonexistent", ["kubeconfrom"], get=BLOBS.__getitem__)
+
     def test_a_bad_hash_writes_nothing(self):
-        pins = {"kind": {"url": "https://k/kind", "sha256": "0" * 64},
-                "kubectl": {"url": "https://k/kubectl", "sha256": "0" * 64},
-                "helm": {"url": "https://k/helm.tgz", "sha256": "0" * 64}}
+        pins = {name: {"url": pin["url"], "sha256": "0" * 64} for name, pin in TOOL_PINS.items()}
         with tempfile.TemporaryDirectory() as d:
             with self.assertRaises(ValueError):
                 gate.tools(pins, d, get=lambda u: b"x")
@@ -91,7 +109,7 @@ class Commands(unittest.TestCase):
     PINS = {"node_image": {"image": "kindest/node:v1.36.4@sha256:" + "a" * 64}}
 
     def test_up_creates_the_three_node_cluster_then_installs_cnpg(self):
-        create, helm = gate.up_commands(self.PINS, "/tmp/chart.tgz", "cnpg-system")
+        create, _, helm = gate.up_commands(self.PINS, "/tmp/chart.tgz", "cnpg-system")
         self.assertEqual(create[:4], ["kind", "create", "cluster", "--name"])
         self.assertEqual(create[create.index("--name") + 1], gate.CLUSTER)
         self.assertEqual(create[create.index("--image") + 1], self.PINS["node_image"]["image"])
@@ -101,16 +119,11 @@ class Commands(unittest.TestCase):
         self.assertEqual(helm[helm.index("--namespace") + 1], "cnpg-system")
         self.assertIn("--wait", helm)
 
-    def test_smoke_creates_waits_for_and_removes_a_cluster(self):
-        steps = gate.smoke_commands()
-        for argv, _ in steps:
-            self.assertEqual(argv[:3], ["kubectl", "--context", gate.CONTEXT])
-            self.assertIn("-n", argv)
-        verbs = [argv[argv.index("-n") + 2] for argv, _ in steps]
-        self.assertEqual(verbs, ["create", "apply", "wait", "delete"])
-        manifest = steps[1][1]
-        self.assertIn("kind: Cluster", manifest)
-        self.assertIn("instances: 1", manifest)
+    def test_up_lets_the_control_plane_take_pods_before_cnpg(self):
+        _, taint, _ = gate.up_commands(self.PINS, "/tmp/chart.tgz", "cnpg-system")
+        self.assertEqual(taint, ["kubectl", "--context", gate.CONTEXT, "taint", "nodes",
+                                 f"{gate.CLUSTER}-control-plane",
+                                 "node-role.kubernetes.io/control-plane:NoSchedule-"])
 
     def test_the_kind_config_has_one_control_plane_and_two_workers(self):
         with open(os.path.join(HERE, "kind.yaml"), encoding="utf-8") as f:
@@ -143,9 +156,122 @@ class Install(unittest.TestCase):
         self.assertEqual(commands, [self.THIS])
         self.assertIn("Fresh install", summary)
 
+    def test_dry_run_installs_the_release_then_dry_runs_this_commit_over_it(self):
+        commands, summary = gate.install_plan("platform-2026.10.10", "/tmp/prev", fresh=False,
+                                              dry_run=True)
+        self.assertEqual(commands[1], ["python3", "/tmp/prev/install/release.py"])
+        self.assertEqual(commands[2], self.THIS + ["--dry-run"])
+        self.assertIn("server-side dry-run", summary)
+
+    def test_dry_run_without_a_release_dry_runs_this_commit(self):
+        commands, summary = gate.install_plan(None, "/tmp/prev", fresh=False, dry_run=True)
+        self.assertEqual(commands, [self.THIS + ["--dry-run"]])
+        self.assertIn("No release to upgrade from", summary)
+
     def test_an_unknown_install_option_exits_2(self):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(gate.main(["gate.py", "install", "--upgrade"]), 2)
+
+
+TEMPLATE = """KUBE_CONTEXT=
+NS_CATALOG_POLARIS=catalog-polaris
+POLARIS_S3_ACCESS_KEY_ID=
+POLARIS_S3_SECRET_ACCESS_KEY=
+POLARIS_DB_PASSWORD=
+"""
+
+
+class GateEnv(unittest.TestCase):
+    def test_the_gate_context_and_the_stand_in_credentials_are_set(self):
+        env = gate.init_env.parse(gate.gate_env(TEMPLATE, gen=lambda name: f"gen-{name}"))
+        self.assertEqual(env["KUBE_CONTEXT"], gate.CONTEXT)
+        self.assertEqual(env["POLARIS_S3_ACCESS_KEY_ID"], "gen-POLARIS_S3_ACCESS_KEY_ID")
+        self.assertEqual(env["POLARIS_S3_SECRET_ACCESS_KEY"],
+                         "gen-POLARIS_S3_SECRET_ACCESS_KEY")
+
+    def test_everything_else_is_left_to_init_env(self):
+        env = gate.init_env.parse(gate.gate_env(TEMPLATE, gen=lambda name: "x"))
+        self.assertEqual(env["POLARIS_DB_PASSWORD"], "")
+        self.assertEqual(env["NS_CATALOG_POLARIS"], "catalog-polaris")
+
+    def test_the_committed_template_has_every_variable_the_gate_sets(self):
+        with open(os.path.join(HERE, "..", ".env.template"), encoding="utf-8") as f:
+            env = gate.init_env.parse(gate.gate_env(f.read()))
+        for name in gate.GATE_ENV_GENERATED + ("KUBE_CONTEXT",):
+            with self.subTest(name=name):
+                self.assertTrue(env[name])
+
+    def test_an_existing_env_file_is_never_overwritten(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, ".env")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("KUBE_CONTEXT=someone-elses\n")
+            with self.assertRaises(SystemExit):
+                gate.write_gate_env(path, TEMPLATE)
+            with open(path, encoding="utf-8") as f:
+                self.assertEqual(f.read(), "KUBE_CONTEXT=someone-elses\n")
+
+    def test_the_env_file_is_written_for_its_owner_only(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, ".env")
+            gate.write_gate_env(path, TEMPLATE)
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+
+
+IMAGE = "ghcr.io/cloudnative-pg/postgresql:16.15-1-minimal-trixie@sha256:" + "a" * 64
+VALUES = {"instances": 3, "image": IMAGE, "podAntiAffinityType": "required"}
+
+
+def cluster(instances=3, image=IMAGE, ready=3, anti="required"):
+    return {"spec": {"instances": instances, "imageName": image,
+                     "affinity": {"podAntiAffinityType": anti}},
+            "status": {"readyInstances": ready}}
+
+
+def pods(*nodes):
+    return {"items": [{"metadata": {"name": f"polaris-pg-{i + 1}"}, "spec": {"nodeName": n}}
+                      for i, n in enumerate(nodes)]}
+
+
+class PolarisPg(unittest.TestCase):
+    """The running Cluster against the chart's values (ADR-016)."""
+
+    def test_as_installed_passes_and_names_the_nodes(self):
+        problems, notes = gate.polaris_pg_problems(VALUES, cluster(), pods("a", "b", "c"))
+        self.assertEqual(problems, [])
+        self.assertIn("3 nodes", "\n".join(notes))
+
+    def test_a_different_instance_count_is_found(self):
+        problems, _ = gate.polaris_pg_problems(VALUES, cluster(instances=1, ready=1), pods("a"))
+        self.assertIn("instances", "\n".join(problems))
+
+    def test_a_different_image_is_found(self):
+        problems, _ = gate.polaris_pg_problems(VALUES, cluster(image="postgres:16"),
+                                               pods("a", "b", "c"))
+        self.assertIn("image", "\n".join(problems))
+
+    def test_instances_not_ready_are_found(self):
+        problems, _ = gate.polaris_pg_problems(VALUES, cluster(ready=2), pods("a", "b", "c"))
+        self.assertIn("ready", "\n".join(problems))
+
+    def test_a_different_anti_affinity_is_found(self):
+        problems, _ = gate.polaris_pg_problems(VALUES, cluster(anti="preferred"),
+                                               pods("a", "b", "c"))
+        self.assertIn("podAntiAffinityType", "\n".join(problems))
+
+    def test_two_instances_on_one_node_are_found(self):
+        problems, _ = gate.polaris_pg_problems(VALUES, cluster(), pods("a", "a", "c"))
+        self.assertIn("nodes", "\n".join(problems))
+
+    def test_the_check_reads_the_release_and_the_cluster_in_its_namespace(self):
+        commands = gate.polaris_pg_commands("catalog-polaris")
+        self.assertEqual([c[0] for c in commands], ["helm", "kubectl", "kubectl"])
+        for argv in commands:
+            self.assertEqual(argv[argv.index("-n") + 1], "catalog-polaris")
+            self.assertIn(gate.CONTEXT, argv)
+        self.assertIn("--all", commands[0])
+        self.assertIn("cluster/polaris-pg", commands[1])
+        self.assertIn("cnpg.io/cluster=polaris-pg,cnpg.io/podRole=instance", commands[2])
 
 
 def git(repo, *args):

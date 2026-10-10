@@ -101,6 +101,108 @@ class Preconditions(unittest.TestCase):
         self.assertTrue(problems)
 
 
+POLARIS_ENV = {**ENV, "NS_CATALOG_POLARIS": "catalog-polaris"}
+
+
+class FakeCalls:
+    """Answers step 1's kubectl and helm calls; records every call."""
+
+    def __init__(self, secret=True, helm=(0, ""), wait=(0, "")):
+        self.secret, self.helm, self.wait, self.calls = secret, helm, wait, []
+
+    def __call__(self, argv):
+        self.calls.append(argv)
+        if argv[0] == "helm":
+            return self.helm
+        if "secret" in argv:
+            return (0, "secret/polaris-db") if self.secret else (1, "NotFound")
+        if "wait" in argv:
+            return self.wait
+        raise AssertionError(f"unexpected call {argv}")
+
+
+class PolarisPostgres(unittest.TestCase):
+    def step(self, calls, env=POLARIS_ENV, dry_run=False):
+        return release.polaris_postgres(env, calls, dry_run=dry_run)
+
+    def test_installs_the_chart_then_waits_for_the_cluster(self):
+        calls = FakeCalls()
+        problems, notes = self.step(calls)
+        self.assertEqual(problems, [])
+        self.assertEqual([c[0] for c in calls.calls], ["kubectl", "helm", "kubectl"])
+        helm = calls.calls[1]
+        self.assertEqual(helm[:3], ["helm", "--kube-context", "kind-lakehouse-gate"])
+        self.assertEqual(helm[helm.index("-n") + 1], "catalog-polaris")
+        self.assertEqual(helm[helm.index("upgrade"):helm.index("upgrade") + 4],
+                         ["upgrade", "--install", "polaris-postgres", release.POLARIS_PG_CHART])
+        self.assertNotIn("--dry-run=server", helm)
+        wait = calls.calls[2]
+        self.assertIn("--for=condition=Ready", wait)
+        self.assertIn("cluster/polaris-pg", wait)
+        self.assertIn("polaris-pg", "\n".join(notes))
+
+    def test_every_call_names_the_context_and_the_namespace(self):
+        calls = FakeCalls()
+        self.step(calls)
+        for argv in calls.calls:
+            flag = "--kube-context" if argv[0] == "helm" else "--context"
+            self.assertEqual(argv[1:3], [flag, "kind-lakehouse-gate"])
+            self.assertEqual(argv[argv.index("-n") + 1], "catalog-polaris")
+
+    def test_the_chart_is_this_repositorys(self):
+        self.assertTrue(os.path.isfile(os.path.join(release.POLARIS_PG_CHART, "Chart.yaml")))
+
+    def test_dry_run_is_server_side_and_does_not_wait(self):
+        calls = FakeCalls()
+        problems, notes = self.step(calls, dry_run=True)
+        self.assertEqual(problems, [])
+        self.assertIn("--dry-run=server", calls.calls[1])
+        self.assertFalse(any("wait" in c for c in calls.calls))
+        self.assertIn("dry-run", "\n".join(notes))
+
+    def test_an_empty_namespace_stops_before_any_call(self):
+        calls = FakeCalls()
+        problems, _ = self.step(calls, env={**POLARIS_ENV, "NS_CATALOG_POLARIS": ""})
+        self.assertIn("NS_CATALOG_POLARIS", "\n".join(problems))
+        self.assertEqual(calls.calls, [])
+
+    def test_a_missing_secret_stops_before_helm_and_names_init_env(self):
+        calls = FakeCalls(secret=False)
+        problems, _ = self.step(calls)
+        self.assertIn("init_env.py --apply-secrets", "\n".join(problems))
+        self.assertFalse(any(c[0] == "helm" for c in calls.calls))
+
+    def test_a_failed_helm_stops_with_its_error(self):
+        problems, _ = self.step(FakeCalls(helm=(1, "admission webhook denied")))
+        self.assertIn("admission webhook denied", "\n".join(problems))
+
+    def test_a_cluster_that_never_gets_ready_stops(self):
+        problems, _ = self.step(FakeCalls(wait=(1, "timed out")))
+        self.assertIn("polaris-pg", "\n".join(problems))
+        self.assertIn("timed out", "\n".join(problems))
+
+
+class Steps(unittest.TestCase):
+    def test_step_0_problems_stop_before_step_1(self):
+        calls = []
+
+        def run(argv):
+            calls.append(argv)
+            return 1, "NotFound"
+        problems, _ = release.install(POLARIS_ENV, run, ["1.30"], dry_run=False)
+        self.assertIn(release.CNPG_CRD, "\n".join(problems))
+        self.assertTrue(all(c[0] == "kubectl" and "crd" in c for c in calls))
+
+    def test_both_steps_pass_in_order(self):
+        step0, step1 = FakeKubectl(), FakeCalls()
+
+        def run(argv):
+            return step0(argv) if "crd" in argv or "deployments" in argv else step1(argv)
+        problems, notes = release.install(POLARIS_ENV, run, ["1.30"], dry_run=False)
+        self.assertEqual(problems, [])
+        self.assertEqual([n.split(":")[0] for n in notes], ["Step 0", "Step 1"])
+
+
 class LoadEnv(unittest.TestCase):
     def test_env_file_then_environment_wins(self):
         with tempfile.TemporaryDirectory() as d:
@@ -124,6 +226,12 @@ class Main(unittest.TestCase):
                 env={"PATH": os.environ.get("PATH", ""), "KUBE_CONTEXT": ""}, check=False)
         self.assertEqual(result.returncode, 1)
         self.assertIn("KUBE_CONTEXT", result.stdout + result.stderr)
+
+
+    def test_an_unknown_option_exits_2(self):
+        result = subprocess.run([sys.executable, release.__file__, "--upgrade"],
+                                capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 2)
 
 
 if __name__ == "__main__":

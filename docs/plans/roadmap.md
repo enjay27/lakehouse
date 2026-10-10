@@ -117,6 +117,12 @@ source does not matter for operation. What follows is the list they cover.
 
 - The PostgreSQL `Cluster`, then the local Polaris chart (ADR-009). Settings are verified on
   the running object (ADR-016).
+- `charts/polaris-postgres` (2026-10-10): the `Cluster` polaris-pg, three instances with
+  required anti-affinity, installed by `install/release.py` step 1. The static gate renders
+  it, checks its values schema and runs kubeconform (v0.8.0, pinned) on CNPG's CRD from the
+  pinned chart, with PyYAML pinned by hash (Kade's choice). The gate's kind control-plane
+  takes pods, so three nodes hold the instances apart; the smoke gate checks them on the
+  running object instead of the one-instance scratch `Cluster`.
 - Bootstrap: the realm and root principal from Secrets (ADR-006), then a catalog on the S3
   endpoint (SeaweedFS stand-in on the gate, ADR-031).
 - Smoke tests through the Iceberg REST API, as an ordinary principal: create a namespace and
@@ -184,7 +190,7 @@ when Kade learns the target clusters' version.
 | Kubernetes (gate, kind) | 1.36 (`kindest/node:v1.36.4`) | Kade: latest stable; 1.37 exists, but CloudNativePG 1.30 supports 1.34–1.36 |
 | CloudNativePG operator (gate only, ADR-029) | 1.30.1 | latest; target unknown |
 | Polaris | 1.6.0 | Kade (ADR-009) |
-| PostgreSQL for Polaris | 16, 3 instances | Kade |
+| PostgreSQL for Polaris | 16 (CNPG image 16.15, by digest in `charts/polaris-postgres`), 3 instances, required anti-affinity | Kade |
 | Pooler for Polaris | none | open: Kade does not know (ADR-010) |
 | Datahub | v1.7.0 | Kade: latest |
 | PostgreSQL for Datahub | 16 | same as Polaris; target unknown |
