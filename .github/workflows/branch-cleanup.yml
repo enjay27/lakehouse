@@ -1,0 +1,69 @@
+# Deletes the branches that outlived their work (ADR-032): a merged `claude/*` branch still at
+# its PR's head commit, and `gate/dry-run/<task>` and `gate/smoke/<task>` once no other branch
+# and no open PR has that task. scripts/branch_cleanup.py decides; it is checked out from
+# main, never from a PR. Whatever it prints, this workflow deletes only `claude/` and `gate/`
+# names.
+# Runs when a PR closes, daily, and by hand. Auto-merge merges with GITHUB_TOKEN, which starts
+# no `pull_request` run, so the daily sweep is what cleans up after its merges.
+name: Branch cleanup
+
+on:
+  pull_request:
+    types: [closed]
+  schedule:
+    - cron: "41 3 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: branch-cleanup
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    name: delete merged and stale branches
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: >
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: write       # delete branches
+      pull-requests: read   # list the PRs
+    steps:
+      - name: Check out the cleanup script from main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          path: .cleanup
+          persist-credentials: false
+
+      - name: Delete the branches the script names
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$REPO/branches?per_page=100" \
+            --jq '.[] | {name, sha: .commit.sha}' | jq -s . > "$RUNNER_TEMP/branches.json"
+          gh api --paginate "repos/$REPO/pulls?state=all&per_page=100" \
+            --jq '.[] | {ref: .head.ref, sha: .head.sha, repo: .head.repo.full_name, state, merged: (.merged_at != null)}' \
+            | jq -s . > "$RUNNER_TEMP/prs.json"
+          python3 .cleanup/scripts/branch_cleanup.py \
+            "$RUNNER_TEMP/branches.json" "$RUNNER_TEMP/prs.json" "$REPO" > "$RUNNER_TEMP/delete.txt"
+          failed=0
+          while IFS= read -r name; do
+            case "$name" in
+              claude/*|gate/*)
+                if gh api -X DELETE "repos/$REPO/git/refs/heads/$name"; then
+                  echo "- deleted \`$name\`" | tee -a "$GITHUB_STEP_SUMMARY"
+                else
+                  echo "- could not delete \`$name\`" | tee -a "$GITHUB_STEP_SUMMARY"
+                  failed=1
+                fi ;;
+              *) echo "not a claude/ or gate/ branch; leaving $name" ;;
+            esac
+          done < "$RUNNER_TEMP/delete.txt"
+          if [ ! -s "$RUNNER_TEMP/delete.txt" ]; then echo "Nothing to delete." >> "$GITHUB_STEP_SUMMARY"; fi
+          exit "$failed"
