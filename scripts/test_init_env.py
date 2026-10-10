@@ -1,0 +1,235 @@
+"""Tests for init_env.py. Run: python3 -m unittest discover -s scripts"""
+
+import base64
+import contextlib
+import io
+import json
+import os
+import stat
+import sys
+import tempfile
+import unittest
+
+sys.path.insert(0, os.path.dirname(__file__))
+import init_env as ie  # noqa: E402
+
+TEMPLATE = """# Copy to .env.
+KUBE_CONTEXT=
+
+# Namespaces.
+NS_STORAGE=storage
+NS_CATALOG_POLARIS=catalog-polaris
+NS_MONITORING=monitoring
+
+# Credentials.
+MINIO_ROOT_USER=
+MINIO_ROOT_PASSWORD=
+POLARIS_DB_PASSWORD=
+POLARIS_ROOT_CLIENT_ID=
+POLARIS_ROOT_CLIENT_SECRET=
+OPENSEARCH_USER=
+OPENSEARCH_PASSWORD=
+"""
+CREDENTIALS = ["MINIO_ROOT_USER", "MINIO_ROOT_PASSWORD", "POLARIS_DB_PASSWORD",
+               "POLARIS_ROOT_CLIENT_ID", "POLARIS_ROOT_CLIENT_SECRET", "OPENSEARCH_USER",
+               "OPENSEARCH_PASSWORD"]
+
+
+def counter():
+    """A deterministic generator: NAME -> 'v<n>-NAME'."""
+    n = [0]
+
+    def gen(name):
+        n[0] += 1
+        return f"v{n[0]}-{name}"
+    return gen
+
+
+class Generate(unittest.TestCase):
+    def test_secrets_are_32_letters_and_digits(self):
+        for name in ("MINIO_ROOT_PASSWORD", "POLARIS_ROOT_CLIENT_SECRET", "SOME_TOKEN"):
+            with self.subTest(name=name):
+                self.assertRegex(ie.generate(name), r"^[A-Za-z0-9]{32}$")
+
+    def test_user_names_and_client_ids_are_16_lowercase_letters_and_digits(self):
+        for name in ("MINIO_ROOT_USER", "OPENSEARCH_USER", "POLARIS_ROOT_CLIENT_ID"):
+            with self.subTest(name=name):
+                self.assertRegex(ie.generate(name), r"^[a-z0-9]{16}$")
+
+    def test_every_call_differs(self):
+        values = {ie.generate("MINIO_ROOT_PASSWORD") for _ in range(50)}
+        self.assertEqual(len(values), 50)
+
+
+class Merge(unittest.TestCase):
+    def test_a_new_env_fills_every_credential_and_keeps_the_rest(self):
+        text, filled, added = ie.merge(TEMPLATE, None, counter())
+        self.assertEqual(filled, CREDENTIALS)
+        self.assertEqual(added, [])
+        env = ie.parse(text)
+        for name in CREDENTIALS:
+            self.assertTrue(env[name].endswith(name))
+        self.assertEqual(env["KUBE_CONTEXT"], "")
+        self.assertEqual(env["NS_STORAGE"], "storage")
+        self.assertIn("# Namespaces.", text.splitlines())
+
+    def test_an_existing_value_is_never_overwritten(self):
+        existing = TEMPLATE.replace("MINIO_ROOT_PASSWORD=", "MINIO_ROOT_PASSWORD=kept") \
+                           .replace("KUBE_CONTEXT=", "KUBE_CONTEXT=kind-gate") \
+                           .replace("NS_STORAGE=storage", "NS_STORAGE=objects")
+        text, filled, _ = ie.merge(TEMPLATE, existing, counter())
+        env = ie.parse(text)
+        self.assertEqual(env["MINIO_ROOT_PASSWORD"], "kept")
+        self.assertEqual(env["KUBE_CONTEXT"], "kind-gate")
+        self.assertEqual(env["NS_STORAGE"], "objects")
+        self.assertNotIn("MINIO_ROOT_PASSWORD", filled)
+        self.assertEqual(len(filled), len(CREDENTIALS) - 1)
+
+    def test_a_quoted_value_counts_and_empty_quotes_do_not(self):
+        existing = TEMPLATE.replace("OPENSEARCH_USER=", 'OPENSEARCH_USER="admin"') \
+                           .replace("OPENSEARCH_PASSWORD=", 'OPENSEARCH_PASSWORD=""')
+        text, filled, _ = ie.merge(TEMPLATE, existing, counter())
+        self.assertNotIn("OPENSEARCH_USER", filled)
+        self.assertIn("OPENSEARCH_PASSWORD", filled)
+        self.assertEqual(ie.parse(text)["OPENSEARCH_USER"], "admin")
+
+    def test_variables_missing_from_env_are_added_from_the_template(self):
+        existing = "KUBE_CONTEXT=kind-gate\nMINIO_ROOT_PASSWORD=kept\n"
+        text, filled, added = ie.merge(TEMPLATE, existing, counter())
+        env = ie.parse(text)
+        self.assertEqual(added, ["NS_STORAGE", "NS_CATALOG_POLARIS", "NS_MONITORING",
+                                 "MINIO_ROOT_USER", "POLARIS_DB_PASSWORD",
+                                 "POLARIS_ROOT_CLIENT_ID", "POLARIS_ROOT_CLIENT_SECRET",
+                                 "OPENSEARCH_USER", "OPENSEARCH_PASSWORD"])
+        self.assertEqual(env["NS_STORAGE"], "storage")
+        self.assertEqual(env["MINIO_ROOT_PASSWORD"], "kept")
+        self.assertTrue(env["POLARIS_DB_PASSWORD"].endswith("POLARIS_DB_PASSWORD"))
+        self.assertIn("POLARIS_DB_PASSWORD", filled)
+        self.assertTrue(text.startswith(existing))
+
+    def test_a_second_run_changes_nothing(self):
+        first, _, _ = ie.merge(TEMPLATE, None, counter())
+        second, filled, added = ie.merge(TEMPLATE, first, counter())
+        self.assertEqual((second, filled, added), (first, [], []))
+
+
+class WriteEnv(unittest.TestCase):
+    def test_env_is_written_readable_by_its_owner_only(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, ".env")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("old\n")
+            os.chmod(path, 0o644)
+            ie.write_env(path, "A=1\n")
+            self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+            with open(path, encoding="utf-8") as f:
+                self.assertEqual(f.read(), "A=1\n")
+
+
+def full_env():
+    env = ie.parse(ie.merge(TEMPLATE, None, counter())[0])
+    env["KUBE_CONTEXT"] = "kind-gate"
+    return env
+
+
+def decode(manifest):
+    secret = manifest["items"][1]
+    return {k: base64.b64decode(v).decode() for k, v in secret["data"].items()}
+
+
+class Manifests(unittest.TestCase):
+    def test_each_secret_goes_to_its_services_namespace_with_the_namespace_itself(self):
+        found = [(ns, m["items"][0]["kind"], m["items"][0]["metadata"]["name"],
+                  m["items"][1]["metadata"]["name"], m["items"][1]["metadata"]["namespace"])
+                 for ns, m in ie.manifests(full_env())]
+        self.assertEqual(found, [
+            ("storage", "Namespace", "storage", "minio-root", "storage"),
+            ("catalog-polaris", "Namespace", "catalog-polaris", "polaris-db", "catalog-polaris"),
+            ("catalog-polaris", "Namespace", "catalog-polaris", "polaris-root", "catalog-polaris"),
+            ("monitoring", "Namespace", "monitoring", "opensearch-admin", "monitoring"),
+        ])
+
+    def test_keys_and_values_come_from_env(self):
+        env = full_env()
+        by_name = {m["items"][1]["metadata"]["name"]: m for _, m in ie.manifests(env)}
+        self.assertEqual(decode(by_name["minio-root"]), {
+            "rootUser": env["MINIO_ROOT_USER"], "rootPassword": env["MINIO_ROOT_PASSWORD"]})
+        self.assertEqual(decode(by_name["polaris-db"]), {
+            "username": "polaris", "password": env["POLARIS_DB_PASSWORD"]})
+        self.assertEqual(by_name["polaris-db"]["items"][1]["type"], "kubernetes.io/basic-auth")
+        self.assertEqual(decode(by_name["polaris-root"]), {
+            "clientId": env["POLARIS_ROOT_CLIENT_ID"],
+            "clientSecret": env["POLARIS_ROOT_CLIENT_SECRET"]})
+        self.assertEqual(decode(by_name["opensearch-admin"]), {
+            "username": env["OPENSEARCH_USER"], "password": env["OPENSEARCH_PASSWORD"]})
+        self.assertEqual(by_name["minio-root"]["items"][1]["type"], "Opaque")
+
+
+class Problems(unittest.TestCase):
+    def test_a_complete_env_has_none(self):
+        self.assertEqual(ie.secret_problems(full_env()), [])
+
+    def test_an_empty_kube_context_stops_everything(self):
+        env = full_env()
+        env["KUBE_CONTEXT"] = ""
+        self.assertEqual(ie.secret_problems(env),
+                         ["KUBE_CONTEXT is empty: set your Linux test cluster's context in .env "
+                          "(ADR-004)"])
+
+    def test_an_empty_credential_or_namespace_is_named_not_shown(self):
+        env = full_env()
+        env["MINIO_ROOT_PASSWORD"] = ""
+        del env["NS_MONITORING"]
+        self.assertEqual(ie.secret_problems(env), [
+            "minio-root: MINIO_ROOT_PASSWORD is empty",
+            "opensearch-admin: NS_MONITORING is empty",
+        ])
+
+
+class ApplySecrets(unittest.TestCase):
+    def test_kubectl_names_the_context_and_namespace_and_reads_values_from_stdin(self):
+        env = full_env()
+        calls = []
+
+        def run(cmd, input, check):
+            calls.append((cmd, input, check))
+        ie.apply_secrets(env, run=run)
+        self.assertEqual([c[0] for c in calls], [
+            ["kubectl", "--context", "kind-gate", "apply", "--server-side",
+             "--field-manager=init-env", "-n", ns, "-f", "-"]
+            for ns in ("storage", "catalog-polaris", "catalog-polaris", "monitoring")])
+        self.assertTrue(all(check for _, _, check in calls))
+        argv = " ".join(" ".join(cmd) for cmd, _, _ in calls)
+        for name in CREDENTIALS:
+            self.assertNotIn(env[name], argv)
+        self.assertEqual(json.loads(calls[0][1])["kind"], "List")
+
+    def test_nothing_runs_when_there_is_a_problem(self):
+        env = full_env()
+        env["KUBE_CONTEXT"] = ""
+        calls = []
+        with self.assertRaises(SystemExit):
+            ie.apply_secrets(env, run=lambda *a, **k: calls.append(a))
+        self.assertEqual(calls, [])
+
+
+class Main(unittest.TestCase):
+    def test_main_writes_env_and_never_prints_a_value(self):
+        with tempfile.TemporaryDirectory() as d:
+            template, env_path = os.path.join(d, ".env.template"), os.path.join(d, ".env")
+            with open(template, "w", encoding="utf-8") as f:
+                f.write(TEMPLATE)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                status = ie.main(["--env", env_path, "--template", template])
+            self.assertEqual(status, 0)
+            with open(env_path, encoding="utf-8") as f:
+                env = ie.parse(f.read())
+            for name in CREDENTIALS:
+                self.assertTrue(env[name])
+                self.assertNotIn(env[name], out.getvalue())
+            self.assertIn("filled 7 credentials", out.getvalue())
+
+
+if __name__ == "__main__":
+    unittest.main()
