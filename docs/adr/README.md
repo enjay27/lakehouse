@@ -55,9 +55,9 @@ flowchart LR
 | [007](007-namespaces-by-service-type-named-in-env.md) | Namespaces are split by service type, and their names come from `.env` | Proposed |
 | [008](008-each-service-has-its-own-postgresql.md) | Each service has its own PostgreSQL, in the service's namespace | Proposed |
 | [009](009-the-iceberg-catalog-is-apache-polaris.md) | The Iceberg catalog is Apache Polaris, from a local chart at a pinned version | Proposed |
-| [010](010-postgresql-runs-ha-with-pgpool-from-the-bitnami-chart.md) | PostgreSQL runs as Bitnami `postgresql-ha` with Pgpool-II, wrapped in a local umbrella chart | Proposed |
+| [010](010-postgresql-runs-on-the-cloudnativepg-operator.md) | PostgreSQL runs on the CloudNativePG operator, one `Cluster` per service | Proposed |
 | [011](011-object-storage-is-minio.md) | Object storage is MinIO, from a local chart at a pinned release | Proposed |
-| [012](012-install-order-storage-then-databases-then-services.md) | Install order: storage, then each service's PostgreSQL, then the services, then monitoring | Proposed |
+| [012](012-install-order-operators-first-then-storage-services-monitoring.md) | Install order: operators, storage, then each service's PostgreSQL and the service, then monitoring | Proposed |
 | [013](013-logs-ship-to-opensearch-in-the-monitoring-namespace.md) | Logs ship with Fluent Bit to OpenSearch, which runs in the monitoring namespace | Proposed |
 | [014](014-polaris-writes-one-log-file-per-pod-for-an-hourly-batch.md) | Polaris writes one log file per pod, read by an hourly batch released separately | Proposed |
 | **Measurement and verification** | | |

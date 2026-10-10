@@ -19,8 +19,8 @@ same whether the block was applied or ignored.
 - **`helm lint` is not a render.** Every chart change is also rendered (`helm template` in the
   static gate, a server-side dry-run in the dry-run gate).
 - **Every chart that enters comes with assertions on its rendered output** for the values that
-  matter (replicas, resources, credentials from Secrets, nesting of subchart values), so an
-  ignored block fails CI.
+  matter (replicas, resources, credentials from Secrets, nesting of subchart values, CNPG `Cluster`
+  fields), so an ignored block fails CI.
 - **Turning on configuration that has never run is a change, not a fix**, and is gated as one.
 
 ## Diagram

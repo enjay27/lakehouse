@@ -15,7 +15,7 @@ while the PR runs only the static gate.
 
 | Level | Runs on | What | Blocks merge |
 |---|---|---|---|
-| **static** | every push to `claude/**`, every PR | lint, `helm template`, kubeconform, rendered-output assertions (ADR-016), unit tests, repository checks | yes |
+| **static** | every push to `claude/**`, every PR | lint, `helm template`, kubeconform with the CRD schemas in use (CNPG), rendered-output assertions (ADR-016), unit tests, repository checks | yes |
 | **dry-run** | push to `gate/dry-run/<task>` | kind (ADR-017); install the last release (ADR-021); server-side dry-run of the upgrade | yes, through ADR-019, for platform changes |
 | **smoke** | push to `gate/smoke/<task>`; nightly on `main` | kind; install the last release; real upgrade; wait for readiness; smoke tests | no; reported in the PR |
 

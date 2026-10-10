@@ -24,10 +24,10 @@ What weighs here:
 
 - **One PostgreSQL per service**, installed in that service's namespace (ADR-007), with its
   own credentials (ADR-006). No service connects to another service's PostgreSQL.
-- **One way to deploy them all:** the same chart (ADR-010), with values per service; a
+- **One way to deploy them all:** a CloudNativePG `Cluster` per service (ADR-010); a
   PostgreSQL is part of its service's release order (ADR-012).
-- **Size per environment, not per decision:** HA (three instances and a pooler) where the
-  target clusters run HA; a single instance where an environment cannot afford it (a local
+- **Size per environment, not per decision:** three instances where the target clusters run
+  three; a single instance where an environment cannot afford it (a local
   laptop, the CI smoke gate), declared in that environment's values and named in the gate's
   summary.
 
@@ -56,5 +56,4 @@ flowchart LR
 - Each new service's ADR names its PostgreSQL's version and size.
 - The CI gate may not fit several HA PostgreSQLs; the smoke gate runs the non-measured ones
   as single instances and says so.
-- An operator that declares a PostgreSQL per namespace becomes more attractive as services
-  are added; that is ADR-010's question.
+- Adding a service's PostgreSQL is one `Cluster` resource, not another chart release.

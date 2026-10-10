@@ -2,7 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-10-10
-- **Related:** ADR-002, ADR-008, ADR-012
+- **Related:** ADR-002, ADR-008, ADR-010, ADR-012
 
 ## Context
 
@@ -16,6 +16,7 @@ repository (ADR-002). Kade's direction (2026-10-10): namespaces by service type,
 
 | Variable (`.env`) | Default | Holds |
 |---|---|---|
+| `NS_CNPG_SYSTEM` | `cnpg-system` | The CloudNativePG operator (ADR-010) |
 | `NS_STORAGE` | `storage` | Object storage (ADR-011) |
 | `NS_CATALOG_POLARIS` | `catalog-polaris` | Apache Polaris and its own PostgreSQL (ADR-008, ADR-009) |
 | `NS_CATALOG_DATAHUB` | `catalog-datahub` | DataHub and its own PostgreSQL, when DataHub enters under its own ADR |
