@@ -4,8 +4,12 @@ Ported from stella-rain/.github scripts/test_auto_merge_gate.py at 144d317
 (MIT License, Copyright (c) 2026 Kade).
 """
 
+import contextlib
+import io
+import json
 import os
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -75,6 +79,48 @@ class CommitStatuses(unittest.TestCase):
     def test_no_statuses_ignores_the_pending_default(self):
         # GitHub reports "pending" when a commit has no statuses at all.
         self.assertEqual(gate.decide([run("eol")], NO_STATUSES), "merge")
+
+
+class RequiredChecks(unittest.TestCase):
+    """ADR-022: once gate-check exists, the merge requires it by name, so a check that has
+    not started yet cannot be skipped."""
+
+    def test_a_required_check_not_reported_yet_waits(self):
+        runs = [run("static")]
+        self.assertEqual(gate.decide(runs, NO_STATUSES, required=["gate-check"]), "wait")
+
+    def test_all_required_checks_green_merges(self):
+        runs = [run("static"), run("gate-check")]
+        self.assertEqual(gate.decide(runs, NO_STATUSES, required=["gate-check"]), "merge")
+
+    def test_a_failure_still_stops_while_a_required_check_is_missing(self):
+        runs = [run("static", conclusion="failure")]
+        self.assertEqual(gate.decide(runs, NO_STATUSES, required=["gate-check"]), "stop")
+
+    def test_a_skipped_required_check_does_not_count(self):
+        runs = [run("static"), run("gate-check", conclusion="skipped")]
+        self.assertEqual(gate.decide(runs, NO_STATUSES, required=["gate-check"]), "wait")
+
+
+class CommandLine(unittest.TestCase):
+    def main(self, *args):
+        with tempfile.TemporaryDirectory() as d:
+            runs = os.path.join(d, "runs.json")
+            status = os.path.join(d, "status.json")
+            with open(runs, "w", encoding="utf-8") as f:
+                json.dump([run("static")], f)
+            with open(status, "w", encoding="utf-8") as f:
+                json.dump(NO_STATUSES, f)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                code = gate.main(["auto_merge_gate.py", *args, runs, status])
+            return code, out.getvalue().strip()
+
+    def test_without_require_merges(self):
+        self.assertEqual(self.main(), (0, "merge"))
+
+    def test_require_names_a_check_to_wait_for(self):
+        self.assertEqual(self.main("--require", "gate-check"), (0, "wait"))
 
 
 def ref(owner, name, number):

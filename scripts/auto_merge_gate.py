@@ -4,13 +4,16 @@ Reads the commit's check runs and its combined commit status (as the GitHub REST
 them) and prints one word:
 
 - `merge`: every check run has finished green (success, neutral or skipped), at least one
-  succeeded, and no commit status is pending or failed;
-- `wait`: something is still running, or nothing has reported yet;
+  succeeded, every required check succeeded, and no commit status is pending or failed;
+- `wait`: something is still running, nothing has reported yet, or a required check has not
+  succeeded (not started yet, or skipped);
 - `stop`: something failed; a person looks at it.
 
-Usage: python3 auto_merge_gate.py CHECK_RUNS_JSON COMBINED_STATUS_JSON
+Usage: python3 auto_merge_gate.py [--require NAME]... CHECK_RUNS_JSON COMBINED_STATUS_JSON
 CHECK_RUNS_JSON is a JSON array of check runs; COMBINED_STATUS_JSON is the object from
-`GET /repos/{repo}/commits/{sha}/status`. Prints names and conclusions only, never titles.
+`GET /repos/{repo}/commits/{sha}/status`. `--require NAME` names a check run that must have
+succeeded, so a check that has not started yet cannot be skipped (ADR-022: gate-check).
+Prints names and conclusions only, never titles.
 
 After a merge: python3 auto_merge_gate.py --issues-to-close REFS_JSON OWNER/REPO
 REFS_JSON is the PR's `closingIssuesReferences` (from `gh pr view --json`); prints the
@@ -27,7 +30,7 @@ import sys
 GREEN = {"success", "neutral", "skipped"}
 
 
-def decide(check_runs, combined_status):
+def decide(check_runs, combined_status, required=()):
     waiting = False
     for check in check_runs:
         if check.get("status") != "completed":
@@ -40,7 +43,8 @@ def decide(check_runs, combined_status):
             return "stop"
         if state != "success":
             waiting = True
-    if waiting or not any(c.get("conclusion") == "success" for c in check_runs):
+    succeeded = {c.get("name") for c in check_runs if c.get("conclusion") == "success"}
+    if waiting or not succeeded or not set(required) <= succeeded:
         return "wait"
     return "merge"
 
@@ -64,17 +68,24 @@ def main(argv):
         for number in issues_to_close(refs, argv[3]):
             print(number)
         return 0
-    if len(argv) != 3:
+    required = []
+    args = argv[1:]
+    while len(args) >= 2 and args[0] == "--require":
+        required.append(args[1])
+        args = args[2:]
+    if len(args) != 2:
         print(__doc__.strip().splitlines()[0], file=sys.stderr)
         return 2
-    with open(argv[1], encoding="utf-8") as f:
+    with open(args[0], encoding="utf-8") as f:
         check_runs = json.load(f)
-    with open(argv[2], encoding="utf-8") as f:
+    with open(args[1], encoding="utf-8") as f:
         combined_status = json.load(f)
     for check in check_runs:
         print(f"check: {check.get('name')}: {check.get('status')} {check.get('conclusion')}",
               file=sys.stderr)
-    print(decide(check_runs, combined_status))
+    for name in required:
+        print(f"required: {name}", file=sys.stderr)
+    print(decide(check_runs, combined_status, required))
     return 0
 
 
