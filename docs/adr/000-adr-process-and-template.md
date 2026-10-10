@@ -1,6 +1,6 @@
 # ADR-000: ADR process and template
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-10
 
 ## Context

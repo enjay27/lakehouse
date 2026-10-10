@@ -1,6 +1,6 @@
 # ADR-013: Logs ship with Fluent Bit to OpenSearch, which runs in the monitoring namespace
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-10
 - **Related:** ADR-007, ADR-012, ADR-014
 

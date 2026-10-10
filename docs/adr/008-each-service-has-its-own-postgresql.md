@@ -1,6 +1,6 @@
 # ADR-008: Each service has its own PostgreSQL, in the service's namespace
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-10
 - **Related:** ADR-004, ADR-007, ADR-010, ADR-015
 

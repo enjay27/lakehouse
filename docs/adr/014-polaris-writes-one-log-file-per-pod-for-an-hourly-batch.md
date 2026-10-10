@@ -1,6 +1,6 @@
 # ADR-014: Polaris writes one log file per pod, read by an hourly batch released separately
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-10
 - **Related:** ADR-004, ADR-009, ADR-013
 

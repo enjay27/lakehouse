@@ -1,6 +1,6 @@
 # ADR-011: Object storage is MinIO, from a local chart at a pinned release
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-10
 - **Related:** ADR-007, ADR-009, ADR-012
 

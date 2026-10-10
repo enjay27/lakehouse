@@ -1,6 +1,6 @@
 # ADR-001: The repository starts from its decision records; code enters only under an Accepted ADR
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-10
 - **Related:** ADR-000, ADR-002
 
