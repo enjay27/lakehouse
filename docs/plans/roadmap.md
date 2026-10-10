@@ -58,22 +58,23 @@ Each phase lists its ADRs, PRs, gate, and what only a Linux test cluster can ver
 
 ### P0: realign the decisions to this scope (ADRs only)
 
-**Done:** ADR-023 to ADR-028, accepted by Kade on 2026-10-10. Kade's choices: Datahub's PostgreSQL
-moves to CNPG now, its Kafka is the official image with one broker, Polaris stays at 1.6.0,
-Polaris uses the OPA authorizer, and the console's image source does not matter for
-operation. What follows is the list they cover.
+**Done:** ADR-023 (since superseded by ADR-031) to ADR-028, accepted by Kade on 2026-10-10.
+Kade's choices: Datahub's PostgreSQL moves to CNPG now, its Kafka is the official image with
+one broker, Polaris stays at 1.6.0, Polaris uses the OPA authorizer, and the console's image
+source does not matter for operation. What follows is the list they cover.
 
 - **Amend or supersede the ADRs written for a wider scope:**
   - ADR-007: namespaces only for what is built here; endpoints of other teams' services go in
     `.env`.
-  - Object storage becomes an external S3 endpoint, with MinIO only as the gate's stand-in
-    (ADR-023).
-  - The install order without storage and monitoring (ADR-023; restated in full by ADR-029).
+  - Object storage becomes an external S3 endpoint, with SeaweedFS only as the gate's
+    stand-in (ADR-031).
+  - The install order without storage and monitoring (restated in full by ADR-029).
   - Fluent Bit and OpenSearch belong to the observability team; this repository delivers the
     log files ADR-014 describes, in a documented format (ADR-024).
   - ADR-014: its open question (sharing the log volume across nodes) is answered before the
     batch is built.
-  - ADR-017: the gate installs stand-ins (MinIO, Fluent Bit) that are never released.
+  - ADR-017: the gate installs stand-ins (SeaweedFS, Fluent Bit) that are never released
+    (ADR-031).
   - ADR-006: `init_env.py` drops the `minio-root` and `opensearch-admin` Secrets and gains
     Datahub's.
 - **New ADRs:**
@@ -109,7 +110,7 @@ operation. What follows is the list they cover.
 - The PostgreSQL `Cluster`, then the local Polaris chart (ADR-009). Settings are verified on
   the running object (ADR-016).
 - Bootstrap: the realm and root principal from Secrets (ADR-006), then a catalog on the S3
-  endpoint (MinIO stand-in on the gate).
+  endpoint (SeaweedFS stand-in on the gate, ADR-031).
 - Smoke tests through the Iceberg REST API, as an ordinary principal: create a namespace and
   a table, write, read, and check that a principal without a grant is refused.
 - The console from `apache/polaris-tools`. If no image is published, it is built from a
@@ -201,7 +202,5 @@ when Kade learns the target clusters' version.
   Linux test cluster.
 - [#9](https://github.com/enjay27/lakehouse/issues/9): versions pinned above; the pooler and the
   CPU architecture are still open (Kade).
-- MinIO no longer publishes images (checked 2026-10-10); ADR-031 (Proposed) makes SeaweedFS
-  the S3 stand-in. The stand-ins enter in P2.
 - ADR-014: how the log volume is shared across nodes; decided before the log batch is built
   (P2).

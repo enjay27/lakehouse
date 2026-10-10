@@ -1,6 +1,6 @@
 # ADR-023: Other teams' services are interfaces in `.env`, with stand-ins only on the gate
 
-- **Status:** Amended by ADR-029
+- **Status:** Superseded by ADR-031
 - **Date:** 2026-10-10
 - **Related:** ADR-002, ADR-006, ADR-007, ADR-011, ADR-012, ADR-017
 
