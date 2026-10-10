@@ -71,7 +71,7 @@ flowchart LR
 | [021](021-gates-upgrade-from-the-last-release-rebuilt-from-its-tag.md) | Gates upgrade from the last release, rebuilt from its tag; no machine snapshots | Accepted |
 | [022](022-claude-prs-merge-through-the-auto-merge-workflow.md) | Claude's PRs merge through an auto-merge workflow once every check on the head is green | Amended by ADR-030 |
 | **Scope and integration** | | |
-| [023](023-other-teams-services-are-interfaces-with-stand-ins-on-the-gate.md) | Other teams' services are interfaces in `.env`, with stand-ins only on the gate | Amended by ADR-029 |
+| [023](023-other-teams-services-are-interfaces-with-stand-ins-on-the-gate.md) | Other teams' services are interfaces in `.env`, with stand-ins only on the gate | Superseded by ADR-031 |
 | [024](024-the-log-batch-hands-processed-files-to-the-observability-teams-fluent-bit.md) | The log batch hands processed files to the observability team's Fluent Bit | Accepted |
 | [025](025-datahub-with-postgresql-on-cnpg-a-small-kafka-and-a-small-opensearch.md) | Datahub runs with PostgreSQL on CloudNativePG, a single-broker Kafka and a small OpenSearch | Accepted |
 | [026](026-polaris-issues-its-own-tokens-and-asks-an-opa-policy-endpoint.md) | Polaris issues its own tokens and asks an OPA policy endpoint; principals are created by the catalog gateway | Accepted |
@@ -79,7 +79,7 @@ flowchart LR
 | [028](028-the-polaris-console-is-a-maintainer-tool-outside-the-release-path.md) | The Polaris console is a maintainer tool, built from a pinned commit and kept off the release path | Accepted |
 | [029](029-the-cnpg-operator-belongs-to-the-operator-team-installed-here-only-on-the-gate.md) | The CloudNativePG operator belongs to the operator team; this repository installs it only on the gate and test clusters | Accepted |
 | [030](030-auto-merge-leaves-prs-that-change-the-merge-rules-or-the-checks-to-kade.md) | Auto-merge leaves PRs that change the merge rules or the checks to Kade | Accepted |
-| [031](031-other-teams-services-are-interfaces-stand-ins-only-on-the-gate-seaweedfs-for-s3.md) | Other teams' services are interfaces in `.env`; stand-ins only on the gate, SeaweedFS for S3 | Proposed |
+| [031](031-other-teams-services-are-interfaces-stand-ins-only-on-the-gate-seaweedfs-for-s3.md) | Other teams' services are interfaces in `.env`; stand-ins only on the gate, SeaweedFS for S3 | Accepted |
 
 ## Not ADRs
 

@@ -1,6 +1,6 @@
 # ADR-031: Other teams' services are interfaces in `.env`; stand-ins only on the gate, SeaweedFS for S3
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-10
 - **Related:** ADR-002, ADR-006, ADR-007, ADR-011, ADR-017, ADR-023, ADR-026, ADR-029
 

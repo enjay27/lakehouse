@@ -2,7 +2,7 @@
 
 The catalog services of an Iceberg lakehouse on Kubernetes: Apache Polaris and Datahub, each
 with its own stores, and the suite that measures them. Object storage, observability and SSO
-are provided by other teams' services, configured in `.env` (ADR-023). The plan to the first
+are provided by other teams' services, configured in `.env` (ADR-031). The plan to the first
 release is [`docs/plans/roadmap.md`](docs/plans/roadmap.md).
 
 **This repository starts from its decision records.** Nothing else here is trusted until an

@@ -3,7 +3,7 @@
 Apache Polaris and Datahub on Kubernetes, each with its own stores (PostgreSQL on
 CloudNativePG; Datahub's Kafka and OpenSearch), and the suite that measures them. Object
 storage, observability, SSO and the catalog gateway are other teams' services, reached through
-`.env`, with stand-ins on the gate (ADR-023). Public repository (ADR-002).
+`.env`, with stand-ins on the gate (ADR-031). Public repository (ADR-002).
 
 ## Decisions first (ADR-000, ADR-001)
 
