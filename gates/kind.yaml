@@ -1,0 +1,8 @@
+# The gate cluster (ADR-017): one control-plane and two workers. The node image is pinned in
+# gates/pins.json and passed with --image.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+  - role: worker
+  - role: worker
