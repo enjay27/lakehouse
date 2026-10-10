@@ -3,6 +3,8 @@
 Ported from stella-rain/app scripts/test_adr_check.py at ebd1081.
 """
 
+import contextlib
+import io
 import os
 import sys
 import tempfile
@@ -177,14 +179,15 @@ class Citations(AdrCase):
 
     def test_every_living_document_is_checked(self):
         self.chain()
-        for path in ["CLAUDE.md", ".claude/rules/r.md", ".claude/skills/s/SKILL.md",
-                     "docs/setup/run.md"]:
+        for path in ["README.md", "CLAUDE.md", ".claude/rules/r.md",
+                     ".claude/skills/s/SKILL.md", "docs/plans/plan.md"]:
             self.write(path, "See ADR-002.\n", base=self.root)
         self.assertEqual(sorted(self.citation_errors()), sorted([
             ".claude/rules/r.md:1: cites superseded ADR-002; cite ADR-003",
             ".claude/skills/s/SKILL.md:1: cites superseded ADR-002; cite ADR-003",
             "CLAUDE.md:1: cites superseded ADR-002; cite ADR-003",
-            "docs/setup/run.md:1: cites superseded ADR-002; cite ADR-003"]))
+            "README.md:1: cites superseded ADR-002; cite ADR-003",
+            "docs/plans/plan.md:1: cites superseded ADR-002; cite ADR-003"]))
 
     def test_index_text_is_checked_but_its_rows_are_not(self):
         self.chain()
@@ -193,7 +196,7 @@ class Citations(AdrCase):
 
     def test_a_line_that_also_names_the_adr_in_force_passes(self):
         self.chain()
-        self.write("docs/setup/run.md", "Setup for ADR-003 (the bridge of ADR-001).\n",
+        self.write("docs/plans/run.md", "Setup for ADR-003 (the bridge of ADR-001).\n",
                    base=self.root)
         self.assertEqual(self.citation_errors(), [])
 
@@ -205,9 +208,20 @@ class Citations(AdrCase):
     def test_adrs_and_other_files_are_not_checked(self):
         self.chain()
         self.write("docs/other.md", "ADR-001\n", base=self.root)
+        self.write("docs/setup/run.md", "ADR-001\n", base=self.root)
         self.write("005-later.md", adr("005", "Later", body="Replaces ADR-001.\n"))
         self.index_rows.append("| [005](005-later.md) | Later | Accepted |")
         self.assertEqual(self.citation_errors(), [])
+
+
+class Main(AdrCase):
+    def test_a_passing_set_reports_this_repositorys_adr_000(self):
+        self.add("000-process.md", "Process")
+        self.errors()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            status = ac.main(["adr_check.py", self.dir])
+        self.assertEqual((status, out.getvalue()), (0, "ADRs follow ADR-000\n"))
 
 
 class RealRepository(unittest.TestCase):

@@ -1,4 +1,4 @@
-"""Checks the ADRs in docs/adr against the ADR-048 rules that a script can check.
+"""Checks the ADRs in docs/adr against the ADR-000 rules that a script can check.
 
 - File names are `NNN-kebab-case.md`; numbers are unique and sequential from 000.
 - The first line is `# ADR-NNN: Title` with the file's number.
@@ -6,8 +6,9 @@
   line whose ADRs exist (Related is optional); `Superseded by ADR-NNN` names an existing ADR;
   `Amended by ADR-NNN` names an existing ADR whose Related line lists the amended one.
 - README.md has one row per ADR with the same title and status, and no row for a missing file.
-- Living documents cite no superseded ADR: README.md outside its index rows, CLAUDE.md,
-  .claude/, docs/plans/ and docs/setup/. A line that also names the ADR now in force passes.
+- Living documents cite no superseded ADR (ADR-000 rule 9): the index outside its rows, the
+  root README.md, CLAUDE.md, .claude/ and docs/plans/. A line that also names the ADR now in
+  force passes.
 
 Whether a decision needs a Mermaid diagram is a judgement; the `adr` skill asks for it.
 
@@ -26,8 +27,8 @@ STATUSES = {"Accepted", "Accepted (details proposed)", "Proposed", "Deferred", "
 SUPERSEDED_RE = re.compile(r"^Superseded by ADR-(\d{3})$")
 AMENDED_RE = re.compile(r"^Amended by ADR-(\d{3})$")
 CITE_RE = re.compile(r"ADR-(\d{3})\b")
-LIVING_FILES = ["CLAUDE.md"]
-LIVING_DIRS = [".claude", os.path.join("docs", "plans"), os.path.join("docs", "setup")]
+LIVING_FILES = ["README.md", "CLAUDE.md"]
+LIVING_DIRS = [".claude", os.path.join("docs", "plans")]
 DATE_RE = re.compile(r"^- \*\*Date:\*\* \d{4}-\d{2}-\d{2}$")
 ROW_RE = re.compile(r"^\|\s*\[(\d{3})\]\(([^)]+)\)\s*\|\s*(.*?)\s*\|\s*(.*?)\s*\|\s*$")
 
@@ -202,7 +203,7 @@ def main(argv):
     for e in errors:
         print(e)
     if not errors:
-        print("ADRs follow ADR-048")
+        print("ADRs follow ADR-000")
     return 1 if errors else 0
 
 
