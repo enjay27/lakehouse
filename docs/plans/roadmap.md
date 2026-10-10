@@ -106,7 +106,10 @@ source does not matter for operation. What follows is the list they cover.
 - The release flow (ADR-033, accepted on 2026-10-10; Kade created `rc` and its ruleset and
   the `platform-*` tag ruleset): the gates upgrade from the latest release the commit
   contains; `release-gate.yml` gates a PR from `main` into `rc`; `release.yml` tags the `rc`
-  commit after reading that gate. The image cache waits for the first chart's images.
+  commit after reading that gate. Gates on commit `608bc73` (2026-10-10, no tag yet, so a
+  fresh install): dry-run [38067420439](https://github.com/enjay27/lakehouse/actions/runs/38067420439),
+  smoke [38067420520](https://github.com/enjay27/lakehouse/actions/runs/38067420520). The image
+  cache waits for the first chart's images.
 - **Gate:** static, then dry-run and smoke on kind. **Linux:** `init_env.py --apply-secrets`
   ([#6](https://github.com/enjay27/lakehouse/issues/6)).
 
