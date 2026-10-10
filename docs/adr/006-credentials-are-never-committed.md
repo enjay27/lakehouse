@@ -1,6 +1,6 @@
 # ADR-006: Credentials are never committed; an init-env script generates them per clone and creates the Secrets
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-10
 - **Related:** ADR-002, ADR-005, ADR-017
 

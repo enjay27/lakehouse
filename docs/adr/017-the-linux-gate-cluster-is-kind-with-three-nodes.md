@@ -1,6 +1,6 @@
 # ADR-017: The Linux gate cluster is kind with three nodes on a GitHub-hosted runner
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-10
 - **Related:** ADR-002, ADR-004, ADR-018, ADR-021
 

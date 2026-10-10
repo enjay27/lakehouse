@@ -1,6 +1,6 @@
 # ADR-009: The Iceberg catalog is Apache Polaris, from a local chart at a pinned version
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-10
 - **Related:** ADR-007, ADR-008, ADR-011, ADR-015, ADR-018, ADR-021
 

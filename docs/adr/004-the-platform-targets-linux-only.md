@@ -1,6 +1,6 @@
 # ADR-004: The platform targets Linux only; releases are proven on the Linux gate; target clusters are never reached
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-10
 - **Related:** ADR-002, ADR-017, ADR-020
 

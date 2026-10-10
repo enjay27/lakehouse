@@ -1,6 +1,6 @@
 # ADR-016: A setting is verified on the running object against the chart default, never in the values file
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-10
 - **Related:** ADR-010, ADR-017, ADR-018
 
