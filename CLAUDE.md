@@ -29,8 +29,10 @@ storage, observability, SSO and the catalog gateway are other teams' services, r
 | `scripts/claude_md_check.py` | This file at most 100 lines; `.claude/rules/*.md` at most 80 with `paths:` |
 | `scripts/auto_merge_gate.py` | Merge, wait or stop from a head's checks, drafts and paths (ADR-022, ADR-030) |
 | `scripts/gate_check.py` | gate-check: platform files need a dry-run covering the head (ADR-019) |
+| `gates/` | The kind gate: pinned tools and node image, the cluster, CNPG on the gate only (ADR-017, ADR-029) |
+| `install/release.py` | Installs a release in ADR-029's order; today step 0, the CNPG precondition |
 | `scripts/init_env.py` | init-env: `.env` with credentials per clone; `--apply-secrets` (ADR-006) |
-| `.github/workflows/` | `static.yml`, `gate-check.yml` (ADR-019), `auto-merge.yml` (ADR-022), `labels.yml` |
+| `.github/workflows/` | `static.yml`, `gate-check.yml` (ADR-019), `dry-run.yml`, `smoke.yml` (ADR-018), `auto-merge.yml` (ADR-022), `labels.yml` |
 | `.github/labels.json` | The state labels, synced by `labels.yml` (ADR-003) |
 | `.env.template` | Every per-environment variable, credentials empty (ADR-002) |
 
@@ -38,7 +40,7 @@ storage, observability, SSO and the catalog gateway are other teams' services, r
 
 | Part | Gate |
 |---|---|
-| `scripts/` | `python3 -m unittest discover -s scripts` |
+| `scripts/`, `gates/`, `install/` | `python3 -m unittest discover -s <dir>` for each |
 | `docs/adr/`, living documents | `python3 scripts/adr_check.py` |
 | Everything tracked | `python3 scripts/repo_check.py`; `git diff --check $(git hash-object -t tree /dev/null) HEAD` |
 | `CLAUDE.md`, `.claude/` | `python3 scripts/claude_md_check.py` |
@@ -47,8 +49,9 @@ storage, observability, SSO and the catalog gateway are other teams' services, r
 CI runs all of these as the **static** gate on every push to `claude/**` and every PR
 (ADR-018). **gate-check** runs on every PR (ADR-019): a PR changing `charts/`, `images/`,
 `install/`, `gates/` or the gate workflows needs a passing dry-run on `gate/dry-run/<task>`
-covering its head. Charts, the dry-run and smoke gates on kind (ADR-017, ADR-018) and
-releases (ADR-020, ADR-021) arrive with the first platform PR.
+covering its head: push the PR's commit to `gate/dry-run/<task>` and `gate/smoke/<task>`
+(ADR-018); kind needs Docker, so sessions read those runs. Charts arrive in P2, releases
+(ADR-020, ADR-021) in P7.
 
 ## Environments and clusters (ADR-004, ADR-005)
 
