@@ -91,6 +91,9 @@ operation. What follows is the list they cover.
 - The CloudNativePG operator on the gate and test clusters only, at the pinned version; on
   the target clusters it is the operator team's, and a release only checks it is present
   (ADR-029, accepted by Kade on 2026-10-10).
+- gate-check first, before any platform file; then an ADR amending ADR-022 so auto-merge
+  leaves PRs that change workflows or gate scripts to Kade
+  ([#15](https://github.com/enjay27/lakehouse/issues/15)).
 - **Gate:** static, then dry-run and smoke on kind. **Linux:** `init_env.py --apply-secrets`
   ([#6](https://github.com/enjay27/lakehouse/issues/6)).
 
