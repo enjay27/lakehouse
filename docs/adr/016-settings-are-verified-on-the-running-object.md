@@ -42,4 +42,4 @@ flowchart LR
 ## Consequences
 
 - Each chart PR carries a small test of its rendered output.
-- Kade's checks on OrbStack and the smoke gate query running objects, not files.
+- Kade's checks on a Linux test cluster and the smoke gate query running objects, not files.

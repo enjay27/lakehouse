@@ -55,7 +55,7 @@ flowchart LR
 
 ## Alternatives considered
 
-- **Bitnami `postgresql-ha` with Pgpool-II** (the archive): proven on OrbStack, but frozen
+- **Bitnami `postgresql-ha` with Pgpool-II** (the archive): proven on one development node, but frozen
   images, a nesting trap that once ran unnoticed for months, and not what the target clusters
   run.
 - **Bitnami with current images:** depends on Bitnami's paid catalog.

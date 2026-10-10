@@ -8,7 +8,7 @@
 
 Polaris needs S3-compatible storage for the Iceberg warehouse, and workflow tools need it for
 artifacts. The archive runs MinIO from a local chart (`charts/minio/`, image
-`RELEASE.2024-01-01T16-36-33Z`) on OrbStack. MinIO has since changed how its community
+`RELEASE.2024-01-01T16-36-33Z`) on a single development node. MinIO has since changed how its community
 edition is distributed; the image source must be checked before the chart enters.
 
 ## Decision

@@ -20,7 +20,7 @@ these records are written and changed.
 
 ```mermaid
 flowchart LR
-    subgraph K8S["Kubernetes cluster (OrbStack, the Linux gate, or a target cluster)"]
+    subgraph K8S["Kubernetes cluster (a Linux test cluster, the Linux gate, or a target cluster)"]
         subgraph ST["NS_STORAGE"]
             MINIO["object storage"]
         end
@@ -48,9 +48,9 @@ flowchart LR
 | [002](002-the-repository-is-public-and-configuration-lives-in-env.md) | The repository is public; environment-specific configuration lives in `.env` | Proposed |
 | [003](003-state-lives-in-memory-md-and-the-pr-is-the-session-record.md) | State lives in `MEMORY.md`; the PR is the session record | Proposed |
 | **Environments and credentials** | | |
-| [004](004-releases-are-proven-on-linux-and-orbstack-is-for-development.md) | Releases are proven on Linux; OrbStack is for development; target clusters are never reached | Proposed |
+| [004](004-the-platform-targets-linux-only.md) | The platform targets Linux only; releases are proven on the Linux gate; target clusters are never reached | Proposed |
 | [005](005-the-suite-runs-in-three-environments-with-guards.md) | The suite runs in three environments, each with its own guards | Proposed |
-| [006](006-credentials-are-never-committed.md) | Credentials are never committed; they become Kubernetes Secrets at install time | Proposed |
+| [006](006-credentials-are-never-committed.md) | Credentials are never committed; an init-env script generates them per clone and creates the Secrets | Proposed |
 | **Platform** | | |
 | [007](007-namespaces-by-service-type-named-in-env.md) | Namespaces are split by service type, and their names come from `.env` | Proposed |
 | [008](008-each-service-has-its-own-postgresql.md) | Each service has its own PostgreSQL, in the service's namespace | Proposed |

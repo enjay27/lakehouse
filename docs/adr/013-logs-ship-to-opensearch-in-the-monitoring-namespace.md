@@ -9,7 +9,7 @@
 The archive ships container logs with one Fluent Bit DaemonSet into **OpenSearch 3.5.0**, in
 three tiers: all container logs, Polaris's logs, and a Polaris audit report (schema v6),
 with index templates and ISM policies kept in the repository. VictoriaLogs was used before
-and removed on 2026-09-18. OpenSearch ran in Docker on the Mac, **outside the cluster and
+and removed on 2026-09-18. OpenSearch ran in Docker on a workstation, **outside the cluster and
 outside the repository**, so neither the gate nor a target cluster could reproduce it. Two
 operational lessons are recorded: a Fluent Bit Lua change needs a restart (no hot reload),
 and keyword fields must be queried as `.keyword`.
