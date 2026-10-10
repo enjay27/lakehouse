@@ -1,0 +1,60 @@
+# gate-check (ADR-019): a PR that changes platform files passes only when a passing dry-run on
+# gate/dry-run/<task> covers its head (ADR-018). Runs on every PR. auto-merge.yml lists this
+# workflow by its name, "Gate check", and requires its check `gate-check` by name (ADR-022).
+# The rule, scripts/gate_check.py, is checked out from main, never from the PR, so a PR cannot
+# change the rule that judges it; until main has the script (the PR that adds it) the PR's
+# copy runs. A PR that edits this file still runs its own copy of the workflow.
+name: Gate check
+
+on:
+  pull_request:
+
+permissions: {}
+
+concurrency:
+  group: gate-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  gate-check:
+    name: gate-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read  # the dry-run runs on gate/dry-run/<task>
+    steps:
+      - name: Check out the PR head with its history
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          path: pr
+          persist-credentials: false
+
+      - name: Check out the gate script from main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          path: .gate
+          persist-credentials: false
+
+      - name: A passing dry-run covers the head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_BRANCH: ${{ github.head_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          script=.gate/scripts/gate_check.py
+          if [ ! -f "$script" ]; then
+            echo "main has no gate_check.py yet; running the PR's copy"
+            script=pr/scripts/gate_check.py
+          fi
+          gate_branch=$(python3 "$script" --gate-branch "$HEAD_BRANCH")
+          gh api -X GET "repos/$REPO/actions/runs" -f branch="$gate_branch" -f status=success \
+            -F per_page=100 > "$RUNNER_TEMP/runs.json"
+          python3 "$script" "$HEAD_BRANCH" "$BASE_SHA" "$HEAD_SHA" "$RUNNER_TEMP/runs.json" pr \
+            | tee -a "$GITHUB_STEP_SUMMARY"

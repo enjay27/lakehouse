@@ -28,8 +28,9 @@ storage, observability, SSO and the catalog gateway are other teams' services, r
 | `scripts/repo_check.py` | No env file, key file, secret pattern or CRLF in what git tracks (ADR-002, ADR-006) |
 | `scripts/claude_md_check.py` | This file at most 100 lines; `.claude/rules/*.md` at most 80 with `paths:` |
 | `scripts/auto_merge_gate.py` | Merge, wait or stop from a head's checks (ADR-022) |
+| `scripts/gate_check.py` | gate-check: platform files need a dry-run covering the head (ADR-019) |
 | `scripts/init_env.py` | init-env: `.env` with credentials per clone; `--apply-secrets` (ADR-006) |
-| `.github/workflows/` | `static.yml` (static gate), `auto-merge.yml` (ADR-022), `labels.yml` |
+| `.github/workflows/` | `static.yml`, `gate-check.yml` (ADR-019), `auto-merge.yml` (ADR-022), `labels.yml` |
 | `.github/labels.json` | The state labels, synced by `labels.yml` (ADR-003) |
 | `.env.template` | Every per-environment variable, credentials empty (ADR-002) |
 
@@ -44,8 +45,10 @@ storage, observability, SSO and the catalog gateway are other teams' services, r
 | `init_env.py --apply-secrets` | Needs a Linux test cluster: label the issue `cmd:verify-needs-linux` |
 
 CI runs all of these as the **static** gate on every push to `claude/**` and every PR
-(ADR-018). Charts, the dry-run and smoke gates on kind (ADR-017 to ADR-019) and releases
-(ADR-020, ADR-021) arrive with the first platform PR.
+(ADR-018). **gate-check** runs on every PR (ADR-019): a PR changing `charts/`, `images/`,
+`install/`, `gates/` or the gate workflows needs a passing dry-run on `gate/dry-run/<task>`
+covering its head. Charts, the dry-run and smoke gates on kind (ADR-017, ADR-018) and
+releases (ADR-020, ADR-021) arrive with the first platform PR.
 
 ## Environments and clusters (ADR-004, ADR-005)
 

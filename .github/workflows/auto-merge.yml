@@ -3,7 +3,10 @@
 # check workflow below completes; scripts/auto_merge_gate.py merges only when every check on
 # the PR's head commit is green. Anything else is left for a person: a failed or cancelled
 # check, another branch prefix, a fork, a stale run, a PR into any other branch.
-# Add each new PR check workflow's name to `workflows:` in the PR that adds it.
+# Add each new PR check workflow's name to `workflows:` in the PR that adds it. The merge also
+# requires the checks `static` and `gate-check` (ADR-019) by name: with two workflows starting
+# this one, either may finish before the other has started, and a check not started yet must
+# not be skipped.
 # `workflow_run` workflows are read from main, and the gate script is checked out from main,
 # never from the PR: a change to either acts only after its own merge. Merges use
 # GITHUB_TOKEN, so they start no `push` run on main; the PR's own runs are the gate.
@@ -12,7 +15,7 @@ name: Auto-merge
 
 on:
   workflow_run:
-    workflows: ["Static"]
+    workflows: ["Static", "Gate check"]
     types: [completed]
 
 permissions: {}
@@ -63,7 +66,8 @@ jobs:
             --jq '.check_runs[] | {name, status, conclusion}' | jq -s . > "$RUNNER_TEMP/check-runs.json"
           gh api "repos/$REPO/commits/$RUN_SHA/status" \
             --jq '{state, total_count}' > "$RUNNER_TEMP/status.json"
-          verdict=$(python3 .gate/scripts/auto_merge_gate.py "$RUNNER_TEMP/check-runs.json" "$RUNNER_TEMP/status.json")
+          verdict=$(python3 .gate/scripts/auto_merge_gate.py --require static --require gate-check \
+                      "$RUNNER_TEMP/check-runs.json" "$RUNNER_TEMP/status.json")
           echo "PR #$number at $RUN_SHA: $verdict"
           if [ "$verdict" != merge ]; then exit 0; fi
           # --match-head-commit refuses the merge if a push landed since the checks were read.
