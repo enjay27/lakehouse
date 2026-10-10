@@ -1,0 +1,169 @@
+# Roadmap: publishing the lakehouse platform
+
+- **Date:** 2026-10-10
+- **Status:** plan. This is not a decision. Each item enters through its own ADR and PR
+  (ADR-001); this file is updated when a phase starts or finishes.
+
+## Scope
+
+This repository builds, gates and releases the services in the first column. The services in
+the second column belong to other teams. Here they are only interfaces, configured in `.env`
+(ADR-002), with stand-ins on the gate cluster that are never released.
+
+| Built and released here | Interfaces to other teams' services |
+|---|---|
+| **Apache Polaris** (ADR-009), with its own PostgreSQL on CloudNativePG (ADR-008, ADR-010) | **Object storage**, S3-compatible: the Iceberg warehouse and backups |
+| **Polaris console** (`apache/polaris-tools` `console/`) | **Observability**: Fluent Bit, OpenSearch, Prometheus, Grafana |
+| **The Polaris log batch** (ADR-014): processed log files ready for Fluent Bit | **ETL**: Spark, Flink, the shared Kafka |
+| **Datahub**, with its own PostgreSQL (Pgpool and PostgreSQL-HA for now), a small Kafka and a small OpenSearch used by Datahub only | **Query clients**: Trino, Iceberg clients, per-user StarRocks |
+| | **SSO**: Keycloak |
+| | **The catalog gateway**: Polaris's authorizer and wrapper API, built elsewhere |
+
+Out of scope: each user's Spark cluster, because it calls neither Polaris nor Datahub.
+
+## How callers reach Polaris and Datahub
+
+```mermaid
+flowchart LR
+    U["user"] -->|"SSO login"| KC["SSO provider"]
+    U --> RB["StarRocks runner"]
+    RB -->|"user id from the SSO token;<br/>asks for a principal"| GW["catalog gateway<br/>(root credential)"]
+    GW -->|"management API:<br/>create principal, grants"| POL["Polaris"]
+    RB -->|"principal credential<br/>from a Secret"| SR["user's StarRocks<br/>Iceberg client"]
+    SR -->|"client credentials;<br/>catalog API"| POL
+    EXT["external services"] --> GW
+    POL --> PG[("PostgreSQL<br/>CNPG")]
+    POL -->|"warehouse"| S3[("object storage")]
+    POL -.->|"original logs"| LB["log batch"]
+    LB -.->|"processed files"| FB["Fluent Bit"] --> OS[("OpenSearch")]
+    DH["Datahub"] -->|"ingests metadata"| POL
+    DH --> DPG[("PostgreSQL-HA")]
+    DH --> DK[("Kafka")]
+    DH --> DOS[("OpenSearch")]
+```
+
+- **Polaris issues its own tokens.** Each StarRocks Iceberg client authenticates to Polaris
+  with its own principal's client ID and secret. Polaris RBAC on catalogs, namespaces and
+  tables decides what it may do.
+- **Principals are created by the catalog gateway**, which holds the root credential, when the
+  StarRocks runner asks for one. The runner finds a user's credential by the user ID in their
+  SSO token.
+- **Exchanging an SSO token for a Polaris token is experimental** (P4). It is never on the
+  release path until its ADR is Accepted.
+
+## Phases
+
+Each phase lists its ADRs, PRs, gate, and what only a Linux test cluster can verify
+(`cmd:verify-needs-linux` issues).
+
+### P0: realign the decisions to this scope (ADRs only)
+
+- **Amend or supersede the ADRs written for a wider scope:**
+  - ADR-007: namespaces only for what is built here; endpoints of other teams' services go in
+    `.env`.
+  - ADR-011: object storage becomes an external S3 endpoint; MinIO only as the gate's stand-in.
+  - ADR-012: the install order without storage and monitoring.
+  - ADR-013: Fluent Bit and OpenSearch belong to the observability team; this repository
+    delivers the log files ADR-014 describes and a documented format.
+  - ADR-014: its open question (sharing the log volume across nodes) is answered before the
+    batch is built.
+  - ADR-017: the gate installs stand-ins (MinIO, Fluent Bit) that are never released.
+  - ADR-006: `init_env.py` drops the `minio-root` and `opensearch-admin` Secrets and gains
+    Datahub's.
+- **Amend ADR-008 for Datahub:** its PostgreSQL stays on Pgpool and PostgreSQL-HA until a
+  later move to CNPG (P3).
+- **New ADRs:**
+  - Datahub and its PostgreSQL, Kafka and OpenSearch;
+  - the contract with other teams' services (S3, metrics, log files, SSO);
+  - Polaris authentication and principal provisioning, as above;
+  - network policies: which callers may reach which port;
+  - the Polaris console: chart, and image source.
+- **Gate:** static (ADR checker). Kade accepts each ADR.
+
+### P1: the gates and the foundation
+
+- The kind gate with dry-run and smoke workflows (ADR-017, ADR-018), gate-check (ADR-019),
+  and the release workflow (ADR-020, ADR-021). The first release has nothing to upgrade from.
+- The CloudNativePG operator at the target clusters' version. Whether a release includes it
+  waits on [#8](https://github.com/enjay27/lakehouse/issues/8); versions wait on
+  [#9](https://github.com/enjay27/lakehouse/issues/9).
+- **Gate:** static, then dry-run and smoke on kind. **Linux:** `init_env.py --apply-secrets`
+  ([#6](https://github.com/enjay27/lakehouse/issues/6)).
+
+### P2: Polaris 1.6.0 and its console
+
+- The PostgreSQL `Cluster`, then the local Polaris chart (ADR-009). Settings are verified on
+  the running object (ADR-016).
+- Bootstrap: the realm and root principal from Secrets (ADR-006), then a catalog on the S3
+  endpoint (MinIO stand-in on the gate).
+- Smoke tests through the Iceberg REST API, as an ordinary principal: create a namespace and
+  a table, write, read, and check that a principal without a grant is refused.
+- The console from `apache/polaris-tools`. If no image is published, it is built from a
+  pinned commit in the job (ADR-017).
+- The log batch (ADR-014) and its output format for Fluent Bit (P0's ADR-013 amendment). A
+  stand-in Fluent Bit on the gate proves the hand-off.
+- **Gate:** dry-run and smoke. **Linux:** the release installed on a test cluster.
+
+### P3: Datahub
+
+- Its PostgreSQL (Pgpool and PostgreSQL-HA, per the ADR-008 amendment), a small Kafka and a
+  small OpenSearch, all in `NS_CATALOG_DATAHUB`, then Datahub itself.
+- Datahub ingests Polaris's catalog with its own read-only principal.
+- Its own login through SSO, against a stand-in on the gate.
+- A later item, with its own ADR: Datahub's PostgreSQL moves to CNPG, with a data migration.
+- **Gate:** dry-run and smoke, including one ingestion run.
+
+### P4: callers and their contracts
+
+- One contract test per caller class against the gate's Polaris and Datahub. They use the
+  caller's protocol and a principal like the one it uses in production. Classes:
+  - the catalog gateway: the management API;
+  - StarRocks' Iceberg client: the catalog API, one principal per user;
+  - the others confirmed in [#10](https://github.com/enjay27/lakehouse/issues/10).
+- Network policies from P0's ADR.
+- The experimental token exchange (an SSO token for a Polaris token for the same principal):
+  a spike behind its own ADR, never on the release path.
+
+### P5: hooks for the observability team
+
+- Metrics endpoints for Polaris (management port 8182) and Datahub, and the scrape
+  configuration the other team's Prometheus needs.
+- Log files and their format as P0 documents them. No dashboards of our own.
+
+### P6: measurements
+
+- The suite (ADR-005) measures Polaris catalog latency and throughput on the plain upstream
+  schema (ADR-015). Results go to `docs/measurements/`, with the versions measured (ADR-003).
+
+### P7: first release, then upgrades
+
+- `v1.0.0` through the release workflow (ADR-020), with release notes and runbooks for
+  installing and upgrading.
+- The Polaris 1.7.0 upgrade as its own PR (ADR-009), gated from the last release (ADR-021).
+
+## Risks to verify
+
+- **Bitnami images.** As recalled, not yet checked: Bitnami stopped publishing free, updated
+  images in 2025 and moved the old ones to a frozen legacy repository. PostgreSQL-HA with
+  Pgpool is usually Bitnami's chart, and Datahub's prerequisites chart has used Bitnami charts
+  for Kafka. If this holds, Datahub's database and Kafka would run on images without security
+  fixes. That argues for moving Datahub to CNPG sooner, and for choosing the Kafka source with
+  care. To verify at the start of P0.
+- **Root credential concentration.** The catalog gateway creates every principal with
+  Polaris's root credential. P0's authentication ADR should check whether Polaris RBAC allows
+  a narrower principal for provisioning, and use it if so.
+- **Three levels of `workflow_run`.** Static → Auto-merge → Labels is GitHub's limit, so a new
+  workflow cannot chain after Labels.
+
+## Open items
+
+- [#6](https://github.com/enjay27/lakehouse/issues/6): `init_env.py --apply-secrets` on a
+  Linux test cluster.
+- [#8](https://github.com/enjay27/lakehouse/issues/8): who installs the CNPG operator on the
+  target clusters (Kade).
+- [#9](https://github.com/enjay27/lakehouse/issues/9): the target clusters' versions and counts
+  (Kade).
+- [#10](https://github.com/enjay27/lakehouse/issues/10): the external callers to confirm
+  (Kade).
+- ADR-014: how the log volume is shared across nodes; decided in P0.
+- The console's image source; decided in P0.
