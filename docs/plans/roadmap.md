@@ -194,5 +194,7 @@ when Kade learns the target clusters' version.
   Linux test cluster.
 - [#9](https://github.com/enjay27/lakehouse/issues/9): versions pinned above; the pooler and the
   CPU architecture are still open (Kade).
+- MinIO no longer publishes images (checked 2026-10-10); ADR-031 (Proposed) makes SeaweedFS
+  the S3 stand-in. The stand-ins enter in P2.
 - ADR-014: how the log volume is shared across nodes; decided before the log batch is built
   (P2).
