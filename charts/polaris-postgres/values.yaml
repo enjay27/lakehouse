@@ -1,0 +1,25 @@
+# Defaults are the target clusters' (docs/plans/roadmap.md, pinned versions); an environment
+# that cannot afford them overrides sizes only (ADR-008, ADR-017). values.schema.json refuses
+# unknown keys, so a misspelt value fails instead of being ignored (ADR-016).
+
+# Three instances, as on the target clusters (#9). CNPG's default is one.
+instances: 3
+
+# CNPG's PostgreSQL 16 image, pinned by tag and digest (ADR-010); the digest is the multi-arch
+# index, read from ghcr.io on 2026-10-10.
+image: ghcr.io/cloudnative-pg/postgresql:16.15-202610050823-minimal-trixie@sha256:37a7225a2577af6e7e274b50b278f89dcdaf7c2cf005a66402872f6ed39d58e3
+
+# `required`: two instances never share a node, so losing a node loses one copy at most. It
+# needs as many schedulable nodes as instances. CNPG's default is `preferred`.
+podAntiAffinityType: required
+
+storage:
+  size: 10Gi
+  # Empty: the cluster's default StorageClass.
+  storageClass: ""
+
+# The database Polaris uses, owned by the user of the `polaris-db` Secret (basic-auth),
+# created by scripts/init_env.py --apply-secrets (ADR-006).
+database: polaris
+owner: polaris
+credentialsSecret: polaris-db

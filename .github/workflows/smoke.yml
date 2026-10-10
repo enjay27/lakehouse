@@ -1,8 +1,9 @@
 # The smoke gate (ADR-018): runs on a push to gate/smoke/<task> and nightly on main. Advisory:
 # its result is reported in the PR, it does not block a merge (ADR-019). kind with three nodes
-# and the pinned CNPG operator (ADR-017, ADR-029), the latest release tag installed from its
-# checkout and this commit's release over it (ADR-021), or with `fresh` this commit's alone,
-# then a one-instance PostgreSQL Cluster that must become Ready. The release gate calls it
+# and the pinned CNPG operator (ADR-017, ADR-029), the gate's Secrets (ADR-006), the latest
+# release tag installed from its checkout and this commit's release over it (ADR-021), or with
+# `fresh` this commit's alone; then the running Cluster polaris-pg is checked against its
+# values, its three instances on three nodes (ADR-016). The release gate calls it
 # twice on every PR into rc, upgrade and fresh (ADR-033). Not a PR check into main, so
 # auto-merge.yml does not list it.
 name: Smoke
@@ -35,6 +36,7 @@ jobs:
     env:
       KUBE_CONTEXT: kind-lakehouse-gate
       NS_CNPG_SYSTEM: cnpg-system
+      NS_CATALOG_POLARIS: catalog-polaris
     steps:
       - uses: actions/checkout@v7
         with:
@@ -49,6 +51,9 @@ jobs:
       - name: kind cluster and the CNPG operator (gate only, ADR-029)
         run: python3 gates/gate.py up
 
+      - name: The gate's Secrets (ADR-006)
+        run: python3 gates/gate.py secrets
+
       - name: Install the last release, then this commit over it (ADR-021)
         env:
           FRESH: ${{ inputs.fresh }}
@@ -60,14 +65,15 @@ jobs:
             python3 gates/gate.py install | tee -a "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: A PostgreSQL Cluster becomes Ready
+      - name: The running Cluster polaris-pg matches its values (ADR-016)
         run: |
-          python3 gates/gate.py smoke-cnpg
-          echo "A one-instance CNPG Cluster became Ready." >> "$GITHUB_STEP_SUMMARY"
+          set -euo pipefail
+          python3 gates/gate.py check-polaris-pg | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: State of the cluster on failure
         if: failure()
         run: |
           kubectl --context "$KUBE_CONTEXT" get nodes -o wide || true
           kubectl --context "$KUBE_CONTEXT" get pods -A -o wide || true
-          kubectl --context "$KUBE_CONTEXT" -n gate-smoke get events --sort-by=.lastTimestamp || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_POLARIS" get cluster,pods,pvc -o wide || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_POLARIS" get events --sort-by=.lastTimestamp || true

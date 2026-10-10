@@ -30,8 +30,9 @@ storage, observability, SSO and the catalog gateway are other teams' services, r
 | `scripts/auto_merge_gate.py` | Merge, wait or stop from a head's checks, drafts and paths (ADR-022, ADR-030) |
 | `scripts/gate_check.py` | gate-check: platform files need a dry-run covering the head (ADR-019) |
 | `scripts/branch_cleanup.py` | Which merged `claude/*` and stale `gate/*` branches to delete (ADR-032) |
-| `gates/` | The kind gate: pinned tools and node image, the cluster, CNPG on the gate only (ADR-017, ADR-029) |
-| `install/` | `release.py` installs a release in ADR-029's order (today step 0, the CNPG precondition); `release_tag.py` names tags, reads the release gate, writes notes (ADR-033) |
+| `gates/` | The kind gate: pinned tools and node image, the cluster, CNPG on the gate only, the gate's Secrets (ADR-017, ADR-029) |
+| `charts/` | Local charts, `polaris-postgres` first (ADR-010); tests render each, check its values schema, run kubeconform on CNPG's CRD (ADR-016) |
+| `install/` | `release.py` installs a release in ADR-029's order (step 0 the CNPG precondition, step 1 Polaris's PostgreSQL); `release_tag.py` names tags, reads the release gate, writes notes (ADR-033) |
 | `scripts/init_env.py` | init-env: `.env` with credentials per clone; `--apply-secrets` (ADR-006) |
 | `.github/workflows/` | `static.yml`, `gate-check.yml` (ADR-019), `dry-run.yml`, `smoke.yml` (ADR-018), `auto-merge.yml` (ADR-022), `branch-cleanup.yml` (ADR-032), `release-gate.yml`, `release.yml` (ADR-033), `labels.yml` |
 | `.github/labels.json` | The state labels, synced by `labels.yml` (ADR-003) |
@@ -41,18 +42,17 @@ storage, observability, SSO and the catalog gateway are other teams' services, r
 
 | Part | Gate |
 |---|---|
-| `scripts/`, `gates/`, `install/` | `python3 -m unittest discover -s <dir>` for each |
+| `scripts/`, `gates/`, `install/`, `charts/` | `python3 -m unittest discover -s <dir>` for each; `charts/` needs `gates/gate.py tools BIN_DIR helm kubeconform` and `charts/requirements.txt` |
 | `docs/adr/`, living documents | `python3 scripts/adr_check.py` |
 | Everything tracked | `python3 scripts/repo_check.py`; `git diff --check $(git hash-object -t tree /dev/null) HEAD` |
 | `CLAUDE.md`, `.claude/` | `python3 scripts/claude_md_check.py` |
 | `init_env.py --apply-secrets` | Needs a Linux test cluster: label the issue `cmd:verify-needs-linux` |
 
-CI runs all of these as the **static** gate on every push to `claude/**` and every PR
-(ADR-018). **gate-check** runs on every PR into `main` (ADR-019): a PR changing `charts/`, `images/`,
-`install/`, `gates/` or the gate workflows needs a passing dry-run on `gate/dry-run/<task>`
-covering its head: push the PR's commit to `gate/dry-run/<task>` and `gate/smoke/<task>`
-(ADR-018); kind needs Docker, so sessions read those runs. Charts arrive in P2, releases
-(ADR-033, ADR-021) in P7.
+CI runs all of these as the **static** gate on every push to `claude/**` and every PR (ADR-018).
+**gate-check** runs on every PR into `main` (ADR-019): a PR changing `charts/`, `images/`,
+`install/`, `gates/` or the gate workflows needs a passing dry-run covering its head: push the
+PR's commit to `gate/dry-run/<task>` and `gate/smoke/<task>` (ADR-018); kind needs Docker, so
+sessions read those runs.
 
 ## Environments and clusters (ADR-004, ADR-005)
 

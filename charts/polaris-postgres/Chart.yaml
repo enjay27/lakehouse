@@ -1,0 +1,9 @@
+# The PostgreSQL of Apache Polaris (ADR-008, ADR-010): one CloudNativePG `Cluster`, installed by
+# install/release.py step 1 before Polaris (ADR-029). The CNPG operator is a precondition,
+# never part of this chart.
+apiVersion: v2
+name: polaris-postgres
+description: PostgreSQL for Apache Polaris, one CloudNativePG Cluster
+type: application
+version: 0.1.0
+appVersion: "16.15"

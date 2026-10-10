@@ -1,5 +1,6 @@
 # The gate cluster (ADR-017): one control-plane and two workers. The node image is pinned in
-# gates/pins.json and passed with --image.
+# gates/pins.json and passed with --image. `gate.py up` removes the control-plane's NoSchedule
+# taint, so all three nodes take pods and three PostgreSQL instances run on three nodes.
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:

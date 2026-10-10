@@ -1,0 +1,28 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  # install/release.py waits for this name (POLARIS_PG).
+  name: polaris-pg
+  labels:
+    app.kubernetes.io/name: polaris-postgres
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+    helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
+spec:
+  instances: {{ .Values.instances }}
+  imageName: {{ .Values.image | quote }}
+  affinity:
+    enablePodAntiAffinity: true
+    podAntiAffinityType: {{ .Values.podAntiAffinityType }}
+    topologyKey: kubernetes.io/hostname
+  bootstrap:
+    initdb:
+      database: {{ .Values.database }}
+      owner: {{ .Values.owner }}
+      secret:
+        name: {{ .Values.credentialsSecret }}
+  storage:
+    size: {{ .Values.storage.size }}
+    {{- with .Values.storage.storageClass }}
+    storageClass: {{ . }}
+    {{- end }}

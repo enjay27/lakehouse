@@ -1,9 +1,10 @@
 # The dry-run gate (ADR-018): runs on a push to gate/dry-run/<task>, the same commit a session
 # opens its PR from. gate-check (ADR-019) looks for a successful run of this workflow, by its
 # path, on that branch. kind with three nodes and the pinned CNPG operator (ADR-017, ADR-029),
-# then the latest release the commit contains (gates/gate.py released_tags), installed from
-# a checkout of its tag, and this commit's release over it (ADR-021); with no tag, this
-# commit's alone. The release gate calls it on every PR into rc (ADR-033). Not a PR check
+# then the gate's Secrets (gates/gate.py secrets, ADR-006), the latest release the commit
+# contains (gates/gate.py released_tags), installed from a checkout of its tag, and a
+# server-side dry-run of this commit's release over it (ADR-021); with no tag, this commit's
+# alone. The release gate calls it on every PR into rc (ADR-033). Not a PR check
 # into main, so auto-merge.yml does not list it.
 name: Dry-run
 
@@ -28,6 +29,7 @@ jobs:
     env:
       KUBE_CONTEXT: kind-lakehouse-gate
       NS_CNPG_SYSTEM: cnpg-system
+      NS_CATALOG_POLARIS: catalog-polaris
     steps:
       - uses: actions/checkout@v7
         with:
@@ -42,7 +44,10 @@ jobs:
       - name: kind cluster and the CNPG operator (gate only, ADR-029)
         run: python3 gates/gate.py up
 
-      - name: Install the last release, then this commit over it (ADR-021)
+      - name: The gate's Secrets (ADR-006)
+        run: python3 gates/gate.py secrets
+
+      - name: Install the last release, then dry-run this commit over it (ADR-021)
         run: |
           set -euo pipefail  # the default `bash -e` would let tee hide a failed install
-          python3 gates/gate.py install | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 gates/gate.py install --dry-run | tee -a "$GITHUB_STEP_SUMMARY"
