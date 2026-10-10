@@ -88,9 +88,9 @@ operation. What follows is the list they cover.
 
 - The kind gate with dry-run and smoke workflows (ADR-017, ADR-018), gate-check (ADR-019),
   and the release workflow (ADR-020, ADR-021). The first release has nothing to upgrade from.
-- The CloudNativePG operator at the target clusters' version. Whether a release includes it
-  waits on [#8](https://github.com/enjay27/lakehouse/issues/8); versions wait on
-  [#9](https://github.com/enjay27/lakehouse/issues/9).
+- The CloudNativePG operator on the gate and test clusters only, at the pinned version; on
+  the target clusters it is the operator team's, and a release only checks it is present
+  (ADR-029, Proposed; [#8](https://github.com/enjay27/lakehouse/issues/8)).
 - **Gate:** static, then dry-run and smoke on kind. **Linux:** `init_env.py --apply-secrets`
   ([#6](https://github.com/enjay27/lakehouse/issues/6)).
 
@@ -124,7 +124,15 @@ operation. What follows is the list they cover.
   caller's protocol and a principal like the one it uses in production. Classes:
   - the catalog gateway: the management API;
   - StarRocks' Iceberg client: the catalog API, one principal per user;
-  - the others confirmed in [#10](https://github.com/enjay27/lakehouse/issues/10).
+  - Trino, through its Iceberg REST catalog connector;
+  - Spark and Flink ETL jobs writing Iceberg tables;
+  - a Kafka Connect Iceberg sink on the ETL Kafka;
+  - table maintenance jobs (compaction, snapshot expiry, orphan-file cleanup);
+  - Prometheus, scraping Polaris's management port and Datahub's metrics;
+  - Datahub's callers: Spark and Flink lineage, an orchestrator that emits lineage or runs
+    ingestion, data-quality and BI tools reading its API, and SSO for its login.
+- Datahub ingests from Polaris only (Kade, [#10](https://github.com/enjay27/lakehouse/issues/10)).
+  Notebooks do not call Polaris.
 - Network policies from P0's ADR.
 - The experimental token exchange (an SSO token for a Polaris token for the same principal):
   a spike behind its own ADR, never on the release path.
@@ -146,6 +154,25 @@ operation. What follows is the list they cover.
   installing and upgrading.
 - The Polaris 1.7.0 upgrade as its own PR (ADR-009), gated from the last release (ADR-021).
 
+## Pinned versions
+
+Chosen on 2026-10-10 ([#9](https://github.com/enjay27/lakehouse/issues/9)). Each value moves
+into its chart's values when the chart enters; a pin whose source is "target unknown" moves
+when Kade learns the target clusters' version.
+
+| Item | Pin | Source |
+|---|---|---|
+| Kubernetes (gate, kind) | 1.36 (`kindest/node:v1.36.4`) | Kade: latest stable; 1.37 exists, but CloudNativePG 1.30 supports 1.34–1.36 |
+| CloudNativePG operator (gate only, ADR-029) | 1.30.1 | latest; target unknown |
+| Polaris | 1.6.0 | Kade (ADR-009) |
+| PostgreSQL for Polaris | 16, 3 instances | Kade |
+| Pooler for Polaris | none | open: Kade does not know (ADR-010) |
+| Datahub | v1.7.0 | Kade: latest |
+| PostgreSQL for Datahub | 16 | same as Polaris; target unknown |
+| Kafka (`apache/kafka`) | 4.3.1 | latest stable; target unknown |
+| OpenSearch (Datahub) | 2.19.6 | latest 2.x, the line Datahub's chart uses; target unknown |
+| CPU architecture | `x86_64` | assumed (ADR-017); open |
+
 ## Risks to verify
 
 - **Bitnami images: confirmed, and resolved by ADR-025.** Checked on 2026-10-10 in the
@@ -162,11 +189,9 @@ operation. What follows is the list they cover.
 
 - [#6](https://github.com/enjay27/lakehouse/issues/6): `init_env.py --apply-secrets` on a
   Linux test cluster.
-- [#8](https://github.com/enjay27/lakehouse/issues/8): who installs the CNPG operator on the
-  target clusters (Kade).
-- [#9](https://github.com/enjay27/lakehouse/issues/9): the target clusters' versions and counts
-  (Kade).
-- [#10](https://github.com/enjay27/lakehouse/issues/10): the external callers to confirm
-  (Kade).
-- ADR-014: how the log volume is shared across nodes; decided in P0.
-- The console's image source; decided in P0.
+- [#8](https://github.com/enjay27/lakehouse/issues/8): answered (the operator team runs CNPG);
+  closes when ADR-029 is accepted.
+- [#9](https://github.com/enjay27/lakehouse/issues/9): versions pinned above; the pooler and the
+  CPU architecture are still open (Kade).
+- ADR-014: how the log volume is shared across nodes; decided before the log batch is built
+  (P2).
