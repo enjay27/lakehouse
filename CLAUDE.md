@@ -20,6 +20,7 @@ Fluent Bit and OpenSearch) and the suite that measures it. Public repository (AD
 | Path | What |
 |---|---|
 | `docs/adr/` | Decisions and their index |
+| `docs/plans/roadmap.md` | The plan to the first release: scope, phases P0 to P7, open items |
 | `docs/measurements/` | Measurements, with evidence and the versions measured, once the first is taken (ADR-003) |
 | `scripts/adr_check.py` | ADR-000 checks: names, numbers, headers, index rows, citations |
 | `scripts/repo_check.py` | No env file, key file, secret pattern or CRLF in what git tracks (ADR-002, ADR-006) |
