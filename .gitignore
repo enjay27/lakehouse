@@ -1,0 +1,8 @@
+# The real environment file holds credentials and local names; only .env.template is
+# committed (ADR-002, ADR-006).
+.env
+.env.*
+!.env.template
+
+# macOS Finder files
+.DS_Store

@@ -1,0 +1,2 @@
+# Line endings: LF in the repository and in every working copy, whatever core.autocrlf says.
+* text=auto eol=lf
