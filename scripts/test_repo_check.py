@@ -62,7 +62,7 @@ class EnvFiles(RepoCase):
     def test_a_credential_with_a_value_in_the_template_fails_without_printing_it(self):
         self.write(".env.template", "# comment\nNS_STORAGE=storage\nMINIO_ROOT_PASSWORD=hunter2\n"
                    "POLARIS_ROOT_CLIENT_ID=root\nOPENSEARCH_USER=admin\nAPI_TOKEN=x\n"
-                   "SOME_KEY=y\nPOLARIS_ROOT_CLIENT_SECRET=  \n")
+                   "SOME_KEY=y\nPOLARIS_ROOT_CLIENT_SECRET=  \nPOLARIS_S3_ACCESS_KEY_ID=z\n")
         errors = self.errors()
         self.assertEqual(errors, [
             ".env.template:3: MINIO_ROOT_PASSWORD has a value; credentials stay empty (ADR-006)",
@@ -70,6 +70,8 @@ class EnvFiles(RepoCase):
             ".env.template:5: OPENSEARCH_USER has a value; credentials stay empty (ADR-006)",
             ".env.template:6: API_TOKEN has a value; credentials stay empty (ADR-006)",
             ".env.template:7: SOME_KEY has a value; credentials stay empty (ADR-006)",
+            ".env.template:9: POLARIS_S3_ACCESS_KEY_ID has a value; credentials stay empty "
+            "(ADR-006)",
         ])
         self.assertNotIn("hunter2", "\n".join(errors))
 

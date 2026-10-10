@@ -21,7 +21,7 @@ import sys
 TEMPLATE = ".env.template"
 KEY_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".jks", ".keystore")
 KEY_NAMES = {"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"}
-CREDENTIAL_RE = re.compile(r"(USER|PASSWORD|SECRET|TOKEN|KEY|CLIENT_ID)$")
+CREDENTIAL_RE = re.compile(r"(USER|PASSWORD|SECRET|TOKEN|KEY|KEY_ID|CLIENT_ID)$")
 ASSIGNMENT_RE = re.compile(r"^([A-Z_][A-Z0-9_]*)=(.*)$")
 SECRET_PATTERNS = [
     ("private key block", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),

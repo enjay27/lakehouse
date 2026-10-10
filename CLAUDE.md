@@ -1,7 +1,9 @@
 # lakehouse
 
-An Iceberg lakehouse on Kubernetes (MinIO, Apache Polaris, PostgreSQL on CloudNativePG,
-Fluent Bit and OpenSearch) and the suite that measures it. Public repository (ADR-002).
+Apache Polaris and Datahub on Kubernetes, each with its own stores (PostgreSQL on
+CloudNativePG; Datahub's Kafka and OpenSearch), and the suite that measures them. Object
+storage, observability, SSO and the catalog gateway are other teams' services, reached through
+`.env`, with stand-ins on the gate (ADR-023). Public repository (ADR-002).
 
 ## Decisions first (ADR-000, ADR-001)
 

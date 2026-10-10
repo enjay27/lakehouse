@@ -1,6 +1,6 @@
 # ADR-025: Datahub runs with PostgreSQL on CloudNativePG, a single-broker Kafka and a small OpenSearch
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-10
 - **Related:** ADR-007, ADR-008, ADR-010, ADR-023, ADR-026
 

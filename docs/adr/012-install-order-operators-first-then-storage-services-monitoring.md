@@ -1,6 +1,6 @@
 # ADR-012: Install order: operators, storage, then each service's PostgreSQL and the service, then monitoring
 
-- **Status:** Accepted
+- **Status:** Amended by ADR-023
 - **Date:** 2026-10-10
 - **Related:** ADR-007, ADR-008, ADR-009, ADR-010, ADR-011, ADR-013
 

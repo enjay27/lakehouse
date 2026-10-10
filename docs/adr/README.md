@@ -52,31 +52,31 @@ flowchart LR
 | [005](005-the-suite-runs-in-three-environments-with-guards.md) | The suite runs in three environments, each with its own guards | Accepted |
 | [006](006-credentials-are-never-committed.md) | Credentials are never committed; an init-env script generates them per clone and creates the Secrets | Accepted |
 | **Platform** | | |
-| [007](007-namespaces-by-service-type-named-in-env.md) | Namespaces are split by service type, and their names come from `.env` | Accepted |
+| [007](007-namespaces-by-service-type-named-in-env.md) | Namespaces are split by service type, and their names come from `.env` | Amended by ADR-023 |
 | [008](008-each-service-has-its-own-postgresql.md) | Each service has its own PostgreSQL, in the service's namespace | Accepted |
 | [009](009-the-iceberg-catalog-is-apache-polaris.md) | The Iceberg catalog is Apache Polaris, from a local chart at a pinned version | Accepted |
 | [010](010-postgresql-runs-on-the-cloudnativepg-operator.md) | PostgreSQL runs on the CloudNativePG operator, one `Cluster` per service | Accepted |
-| [011](011-object-storage-is-minio.md) | Object storage is MinIO, from a local chart at a pinned release | Accepted |
-| [012](012-install-order-operators-first-then-storage-services-monitoring.md) | Install order: operators, storage, then each service's PostgreSQL and the service, then monitoring | Accepted |
-| [013](013-logs-ship-to-opensearch-in-the-monitoring-namespace.md) | Logs ship with Fluent Bit to OpenSearch, which runs in the monitoring namespace | Accepted |
+| [011](011-object-storage-is-minio.md) | Object storage is MinIO, from a local chart at a pinned release | Superseded by ADR-023 |
+| [012](012-install-order-operators-first-then-storage-services-monitoring.md) | Install order: operators, storage, then each service's PostgreSQL and the service, then monitoring | Amended by ADR-023 |
+| [013](013-logs-ship-to-opensearch-in-the-monitoring-namespace.md) | Logs ship with Fluent Bit to OpenSearch, which runs in the monitoring namespace | Superseded by ADR-024 |
 | [014](014-polaris-writes-one-log-file-per-pod-for-an-hourly-batch.md) | Polaris writes one log file per pod, read by an hourly batch released separately | Accepted |
 | **Measurement and verification** | | |
 | [015](015-measurements-run-on-the-plain-upstream-schema.md) | Measurements run on the plain upstream Polaris schema; no custom indexes | Accepted |
 | [016](016-settings-are-verified-on-the-running-object.md) | A setting is verified on the running object against the chart default, never in the values file | Accepted |
 | **Gates and releases** | | |
-| [017](017-the-linux-gate-cluster-is-kind-with-three-nodes.md) | The Linux gate cluster is kind with three nodes on a GitHub-hosted runner | Accepted |
+| [017](017-the-linux-gate-cluster-is-kind-with-three-nodes.md) | The Linux gate cluster is kind with three nodes on a GitHub-hosted runner | Amended by ADR-023 |
 | [018](018-dry-run-and-smoke-gates-run-from-gate-branches.md) | Dry-run and smoke gates run from throwaway `gate/*` branches on the PR's exact commit | Accepted |
 | [019](019-a-platform-pr-merges-only-when-a-dry-run-covers-its-head.md) | A platform PR merges only when a passing dry-run gate covers its head | Accepted |
 | [020](020-a-release-tag-is-created-only-by-the-release-workflow.md) | A release tag is created only by the release workflow, after the full Linux gate | Accepted |
 | [021](021-gates-upgrade-from-the-last-release-rebuilt-from-its-tag.md) | Gates upgrade from the last release, rebuilt from its tag; no machine snapshots | Accepted |
 | [022](022-claude-prs-merge-through-the-auto-merge-workflow.md) | Claude's PRs merge through an auto-merge workflow once every check on the head is green | Accepted |
 | **Scope and integration** | | |
-| [023](023-other-teams-services-are-interfaces-with-stand-ins-on-the-gate.md) | Other teams' services are interfaces in `.env`, with stand-ins only on the gate | Proposed |
-| [024](024-the-log-batch-hands-processed-files-to-the-observability-teams-fluent-bit.md) | The log batch hands processed files to the observability team's Fluent Bit | Proposed |
-| [025](025-datahub-with-postgresql-on-cnpg-a-small-kafka-and-a-small-opensearch.md) | Datahub runs with PostgreSQL on CloudNativePG, a single-broker Kafka and a small OpenSearch | Proposed |
-| [026](026-polaris-issues-its-own-tokens-and-asks-an-opa-policy-endpoint.md) | Polaris issues its own tokens and asks an OPA policy endpoint; principals are created by the catalog gateway | Proposed |
-| [027](027-ingress-is-denied-by-default-and-allowed-per-caller.md) | Ingress to this repository's namespaces is denied by default and allowed per caller | Proposed |
-| [028](028-the-polaris-console-is-a-maintainer-tool-outside-the-release-path.md) | The Polaris console is a maintainer tool, built from a pinned commit and kept off the release path | Proposed |
+| [023](023-other-teams-services-are-interfaces-with-stand-ins-on-the-gate.md) | Other teams' services are interfaces in `.env`, with stand-ins only on the gate | Accepted |
+| [024](024-the-log-batch-hands-processed-files-to-the-observability-teams-fluent-bit.md) | The log batch hands processed files to the observability team's Fluent Bit | Accepted |
+| [025](025-datahub-with-postgresql-on-cnpg-a-small-kafka-and-a-small-opensearch.md) | Datahub runs with PostgreSQL on CloudNativePG, a single-broker Kafka and a small OpenSearch | Accepted |
+| [026](026-polaris-issues-its-own-tokens-and-asks-an-opa-policy-endpoint.md) | Polaris issues its own tokens and asks an OPA policy endpoint; principals are created by the catalog gateway | Accepted |
+| [027](027-ingress-is-denied-by-default-and-allowed-per-caller.md) | Ingress to this repository's namespaces is denied by default and allowed per caller | Accepted |
+| [028](028-the-polaris-console-is-a-maintainer-tool-outside-the-release-path.md) | The Polaris console is a maintainer tool, built from a pinned commit and kept off the release path | Accepted |
 
 ## Not ADRs
 
