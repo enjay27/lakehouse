@@ -88,7 +88,7 @@ source does not matter for operation. What follows is the list they cover.
 ### P1: the gates and the foundation
 
 - The kind gate with dry-run and smoke workflows (ADR-017, ADR-018), gate-check (ADR-019),
-  and the release workflow (ADR-020, ADR-021). The first release has nothing to upgrade from.
+  and the release workflow (ADR-033, ADR-021). The first release has nothing to upgrade from.
 - The CloudNativePG operator on the gate and test clusters only, at the pinned version; on
   the target clusters it is the operator team's, and a release only checks it is present
   (ADR-029, accepted by Kade on 2026-10-10).
@@ -161,7 +161,7 @@ source does not matter for operation. What follows is the list they cover.
 
 ### P7: first release, then upgrades
 
-- `v1.0.0` through the release workflow (ADR-020), with release notes and runbooks for
+- `v1.0.0` through the release workflow (ADR-033), with release notes and runbooks for
   installing and upgrading.
 - The Polaris 1.7.0 upgrade as its own PR (ADR-009), gated from the last release (ADR-021).
 

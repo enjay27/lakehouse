@@ -52,7 +52,7 @@ CI runs all of these as the **static** gate on every push to `claude/**` and eve
 `install/`, `gates/` or the gate workflows needs a passing dry-run on `gate/dry-run/<task>`
 covering its head: push the PR's commit to `gate/dry-run/<task>` and `gate/smoke/<task>`
 (ADR-018); kind needs Docker, so sessions read those runs. Charts arrive in P2, releases
-(ADR-020, ADR-021) in P7.
+(ADR-033, ADR-021) in P7.
 
 ## Environments and clusters (ADR-004, ADR-005)
 
