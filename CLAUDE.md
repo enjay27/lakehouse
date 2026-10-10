@@ -27,7 +27,7 @@ storage, observability, SSO and the catalog gateway are other teams' services, r
 | `scripts/adr_check.py` | ADR-000 checks: names, numbers, headers, index rows, citations |
 | `scripts/repo_check.py` | No env file, key file, secret pattern or CRLF in what git tracks (ADR-002, ADR-006) |
 | `scripts/claude_md_check.py` | This file at most 100 lines; `.claude/rules/*.md` at most 80 with `paths:` |
-| `scripts/auto_merge_gate.py` | Merge, wait or stop from a head's checks (ADR-022) |
+| `scripts/auto_merge_gate.py` | Merge, wait or stop from a head's checks, drafts and paths (ADR-022, ADR-030) |
 | `scripts/gate_check.py` | gate-check: platform files need a dry-run covering the head (ADR-019) |
 | `scripts/init_env.py` | init-env: `.env` with credentials per clone; `--apply-secrets` (ADR-006) |
 | `.github/workflows/` | `static.yml`, `gate-check.yml` (ADR-019), `auto-merge.yml` (ADR-022), `labels.yml` |
@@ -79,14 +79,16 @@ releases (ADR-020, ADR-021) arrive with the first platform PR.
 - The PR is the session record: *What changed and why*, *Verified*, *NOT VERIFIED*, *Wrong
   turns*, and `Closes #N`.
 
-## Version control (ADR-022)
+## Version control (ADR-022, ADR-030)
 
 - Sessions work on `claude/<task>`, one task per PR, from an up-to-date `main`.
 - `auto-merge.yml` merges a `claude/*` PR once every check on its head is green, deletes the
   branch and closes its `Closes #N` issues. GitHub's auto-merge setting is not used. A new
   check workflow is added to its `workflows:` list in the same PR.
-- `auto-merge.yml` is read from `main`: a change to it acts only after its own merge, which
-  Kade makes by hand. Kade's own branches are merged by hand.
+- It never merges a draft, nor a PR that changes `.github/workflows/`,
+  `scripts/auto_merge_gate.py` or `scripts/gate_check.py` (ADR-030): open such a PR as a
+  draft that says Kade merges it by hand. `auto-merge.yml` is read from `main`, so a change
+  to it acts only after its own merge. Kade's own branches are merged by hand.
 
 ## Overrides of global rules
 
