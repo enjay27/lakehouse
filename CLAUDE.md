@@ -25,7 +25,9 @@ Fluent Bit and OpenSearch) and the suite that measures it. Public repository (AD
 | `scripts/repo_check.py` | No env file, key file, secret pattern or CRLF in what git tracks (ADR-002, ADR-006) |
 | `scripts/claude_md_check.py` | This file at most 100 lines; `.claude/rules/*.md` at most 80 with `paths:` |
 | `scripts/auto_merge_gate.py` | Merge, wait or stop from a head's checks (ADR-022) |
-| `.github/workflows/` | `static.yml` (static gate), `auto-merge.yml` (ADR-022) |
+| `scripts/init_env.py` | init-env: `.env` with credentials per clone; `--apply-secrets` (ADR-006) |
+| `.github/workflows/` | `static.yml` (static gate), `auto-merge.yml` (ADR-022), `labels.yml` |
+| `.github/labels.json` | The state labels, synced by `labels.yml` (ADR-003) |
 | `.env.template` | Every per-environment variable, credentials empty (ADR-002) |
 
 ## Gates
@@ -36,6 +38,7 @@ Fluent Bit and OpenSearch) and the suite that measures it. Public repository (AD
 | `docs/adr/`, living documents | `python3 scripts/adr_check.py` |
 | Everything tracked | `python3 scripts/repo_check.py`; `git diff --check $(git hash-object -t tree /dev/null) HEAD` |
 | `CLAUDE.md`, `.claude/` | `python3 scripts/claude_md_check.py` |
+| `init_env.py --apply-secrets` | Needs a Linux test cluster: label the issue `cmd:verify-needs-linux` |
 
 CI runs all of these as the **static** gate on every push to `claude/**` and every PR
 (ADR-018). Charts, the dry-run and smoke gates on kind (ADR-017 to ADR-019) and releases
@@ -56,7 +59,8 @@ CI runs all of these as the **static** gate on every push to `claude/**` and eve
   or roles, credentials (not even examples), `.env`, keys. Issues, PRs and Actions logs are
   public too; write findings about real environments in neutral terms.
 - Per-environment values live in `.env` (gitignored), from `.env.template`. Credentials are
-  generated per clone by `init-env` and reach charts only as Kubernetes Secrets.
+  generated per clone by `python3 scripts/init_env.py`; `--apply-secrets` creates the
+  Kubernetes Secrets, the only way credentials reach charts.
 - A credential that reaches a commit is rotated; pushed history is never rewritten.
 
 ## State (ADR-003)

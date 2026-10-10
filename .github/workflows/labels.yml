@@ -1,0 +1,39 @@
+# Creates or updates this repository's labels from .github/labels.json (ADR-003): the state
+# labels sessions read and write. Runs when the file changes on main, or by hand. It only
+# adds and updates; a label removed from the file is deleted by hand. Not a PR check, so
+# auto-merge.yml does not list it.
+name: Labels
+
+on:
+  push:
+    branches: [main]
+    paths: [".github/labels.json", ".github/workflows/labels.yml"]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  sync:
+    name: sync labels
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write  # create and update labels
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Create or update each label
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          jq -c '.[]' .github/labels.json | while read -r label; do
+            name=$(jq -r .name <<<"$label")
+            gh label create "$name" --repo "$REPO" --force \
+              --color "$(jq -r .color <<<"$label")" \
+              --description "$(jq -r .description <<<"$label")"
+            echo "synced $name"
+          done

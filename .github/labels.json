@@ -1,0 +1,17 @@
+[
+  {
+    "name": "cmd:status-now",
+    "color": "C5DEF5",
+    "description": "In progress now (ADR-003)"
+  },
+  {
+    "name": "cmd:verify-not-verified",
+    "color": "FBCA04",
+    "description": "Done, but a check could not run; the issue names it (ADR-003)"
+  },
+  {
+    "name": "cmd:verify-needs-linux",
+    "color": "D93F0B",
+    "description": "Needs a Linux test cluster with cluster access (ADR-003, ADR-004)"
+  }
+]
