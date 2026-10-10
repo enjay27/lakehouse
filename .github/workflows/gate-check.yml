@@ -1,5 +1,6 @@
 # gate-check (ADR-019): a PR that changes platform files passes only when a passing dry-run on
-# gate/dry-run/<task> covers its head (ADR-018). Runs on every PR. auto-merge.yml lists this
+# gate/dry-run/<task> covers its head (ADR-018). Runs on every PR except those into rc, whose
+# release gate runs the dry-run itself (ADR-033). auto-merge.yml lists this
 # workflow by its name, "Gate check", and requires its check `gate-check` by name (ADR-022).
 # The rule, scripts/gate_check.py, is checked out from main, never from the PR, so a PR cannot
 # change the rule that judges it; until main has the script (the PR that adds it) the PR's
@@ -8,6 +9,7 @@ name: Gate check
 
 on:
   pull_request:
+    branches-ignore: [rc]
 
 permissions: {}
 

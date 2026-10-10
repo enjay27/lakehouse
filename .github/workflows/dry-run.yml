@@ -1,19 +1,21 @@
 # The dry-run gate (ADR-018): runs on a push to gate/dry-run/<task>, the same commit a session
 # opens its PR from. gate-check (ADR-019) looks for a successful run of this workflow, by its
 # path, on that branch. kind with three nodes and the pinned CNPG operator (ADR-017, ADR-029),
-# then the release install script. Until the first release tag there is nothing to upgrade
-# from (ADR-021); a tag stops the run until the upgrade path is built. Not a PR check, so
-# auto-merge.yml does not list it.
+# then the latest release the commit contains (gates/gate.py released_tags), installed from
+# a checkout of its tag, and this commit's release over it (ADR-021); with no tag, this
+# commit's alone. The release gate calls it on every PR into rc (ADR-033). Not a PR check
+# into main, so auto-merge.yml does not list it.
 name: Dry-run
 
 on:
   push:
     branches: ["gate/dry-run/**"]
+  workflow_call:
 
 permissions: {}
 
 concurrency:
-  group: dry-run-${{ github.ref }}
+  group: dry-run-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -32,16 +34,6 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: No release to upgrade from yet (ADR-021)
-        run: |
-          set -euo pipefail
-          tag=$(git tag --merged HEAD --list 'platform-*' --sort=-creatordate | head -n 1)
-          if [ -n "$tag" ]; then
-            echo "::error::release $tag exists; the upgrade from a tag (ADR-021) is not built yet"
-            exit 1
-          fi
-          echo "No release to upgrade from: fresh install (ADR-021)." >> "$GITHUB_STEP_SUMMARY"
-
       - name: Tools at pinned versions
         run: |
           python3 gates/gate.py tools "$RUNNER_TEMP/bin"
@@ -50,5 +42,7 @@ jobs:
       - name: kind cluster and the CNPG operator (gate only, ADR-029)
         run: python3 gates/gate.py up
 
-      - name: Release install script
-        run: python3 install/release.py | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Install the last release, then this commit over it (ADR-021)
+        run: |
+          set -euo pipefail  # the default `bash -e` would let tee hide a failed install
+          python3 gates/gate.py install | tee -a "$GITHUB_STEP_SUMMARY"

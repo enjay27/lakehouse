@@ -1,9 +1,11 @@
 """Tests for gate.py. Run: python3 -m unittest discover -s gates"""
 
+import contextlib
 import hashlib
 import io
 import json
 import os
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -114,6 +116,76 @@ class Commands(unittest.TestCase):
         with open(os.path.join(HERE, "kind.yaml"), encoding="utf-8") as f:
             roles = [line.split(":", 1)[1].strip() for line in f if "role:" in line]
         self.assertEqual(roles, ["control-plane", "worker", "worker"])
+
+
+class Install(unittest.TestCase):
+    ROOT = os.path.dirname(HERE)
+    THIS = ["python3", os.path.join(os.path.dirname(HERE), "install", "release.py")]
+
+    def test_with_a_release_installs_it_from_its_tag_then_this_commit(self):
+        commands, summary = gate.install_plan("platform-2026.10.10", "/tmp/prev", fresh=False)
+        self.assertEqual(commands, [
+            ["git", "-C", self.ROOT, "worktree", "add", "--detach", "/tmp/prev",
+             "platform-2026.10.10"],
+            ["python3", "/tmp/prev/install/release.py"],
+            self.THIS,
+        ])
+        self.assertIn("platform-2026.10.10", summary)
+        self.assertIn("ADR-021", summary)
+
+    def test_without_a_release_installs_this_commit_and_says_so(self):
+        commands, summary = gate.install_plan(None, "/tmp/prev", fresh=False)
+        self.assertEqual(commands, [self.THIS])
+        self.assertEqual(summary, "No release to upgrade from: fresh install (ADR-021).")
+
+    def test_fresh_ignores_the_release(self):
+        commands, summary = gate.install_plan("platform-2026.10.10", "/tmp/prev", fresh=True)
+        self.assertEqual(commands, [self.THIS])
+        self.assertIn("Fresh install", summary)
+
+    def test_an_unknown_install_option_exits_2(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(gate.main(["gate.py", "install", "--upgrade"]), 2)
+
+
+def git(repo, *args):
+    return subprocess.run(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                          capture_output=True, text=True, check=True).stdout.strip()
+
+
+class ReleasedTags(unittest.TestCase):
+    """main -> rc -> tag (ADR-033): a tag sits on an rc merge commit that main never contains."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = r = self.tmp.name
+        git(r, "init", "-q", "-b", "main")
+        git(r, "commit", "-q", "--allow-empty", "-m", "base")
+        git(r, "branch", "rc")
+        git(r, "commit", "-q", "--allow-empty", "-m", "tested on main")
+        git(r, "checkout", "-q", "rc")
+        git(r, "merge", "-q", "--no-ff", "-m", "candidate", "main")
+        git(r, "tag", "platform-2026.10.10")
+        git(r, "checkout", "-q", "main")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_a_later_main_commit_includes_the_release_it_was_tested_as(self):
+        git(self.repo, "commit", "-q", "--allow-empty", "-m", "later on main")
+        self.assertEqual(gate.released_tags(self.repo), ["platform-2026.10.10"])
+
+    def test_a_commit_on_rc_includes_the_tag_itself(self):
+        git(self.repo, "checkout", "-q", "rc")
+        self.assertEqual(gate.released_tags(self.repo), ["platform-2026.10.10"])
+
+    def test_a_commit_older_than_the_released_one_does_not(self):
+        git(self.repo, "checkout", "-q", "main~1")
+        self.assertEqual(gate.released_tags(self.repo), [])
+
+    def test_no_tags_gives_none(self):
+        git(self.repo, "tag", "-d", "platform-2026.10.10")
+        self.assertEqual(gate.released_tags(self.repo), [])
 
 
 if __name__ == "__main__":
