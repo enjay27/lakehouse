@@ -68,7 +68,7 @@ operation. What follows is the list they cover.
     `.env`.
   - Object storage becomes an external S3 endpoint, with MinIO only as the gate's stand-in
     (ADR-023).
-  - ADR-012: the install order without storage and monitoring.
+  - The install order without storage and monitoring (ADR-023; restated in full by ADR-029).
   - Fluent Bit and OpenSearch belong to the observability team; this repository delivers the
     log files ADR-014 describes, in a documented format (ADR-024).
   - ADR-014: its open question (sharing the log volume across nodes) is answered before the
@@ -90,7 +90,7 @@ operation. What follows is the list they cover.
   and the release workflow (ADR-020, ADR-021). The first release has nothing to upgrade from.
 - The CloudNativePG operator on the gate and test clusters only, at the pinned version; on
   the target clusters it is the operator team's, and a release only checks it is present
-  (ADR-029, Proposed; [#8](https://github.com/enjay27/lakehouse/issues/8)).
+  (ADR-029, accepted by Kade on 2026-10-10).
 - **Gate:** static, then dry-run and smoke on kind. **Linux:** `init_env.py --apply-secrets`
   ([#6](https://github.com/enjay27/lakehouse/issues/6)).
 
@@ -189,8 +189,6 @@ when Kade learns the target clusters' version.
 
 - [#6](https://github.com/enjay27/lakehouse/issues/6): `init_env.py --apply-secrets` on a
   Linux test cluster.
-- [#8](https://github.com/enjay27/lakehouse/issues/8): answered (the operator team runs CNPG);
-  closes when ADR-029 is accepted.
 - [#9](https://github.com/enjay27/lakehouse/issues/9): versions pinned above; the pooler and the
   CPU architecture are still open (Kade).
 - ADR-014: how the log volume is shared across nodes; decided before the log batch is built

@@ -1,6 +1,6 @@
 # ADR-010: PostgreSQL runs on the CloudNativePG operator, one `Cluster` per service
 
-- **Status:** Accepted
+- **Status:** Amended by ADR-029
 - **Date:** 2026-10-10
 - **Related:** ADR-004, ADR-007, ADR-008, ADR-012, ADR-016
 
