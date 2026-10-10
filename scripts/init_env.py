@@ -5,10 +5,11 @@ Kubernetes Secrets from it.
     python3 scripts/init_env.py --apply-secrets    # also create or update the Secrets
 
 Writing `.env`: starts from `.env.template` when `.env` does not exist, adds every variable the
-template has and `.env` lacks, and fills every empty credential variable (the names
-repo_check.py treats as credentials) with a new random value: 32 letters and digits, or 16
-lowercase letters and digits for user names and client IDs. A value already in `.env` is never
-overwritten, so rerunning is safe. `.env` is written with mode 0600.
+template has and `.env` lacks, and fills every empty credential this repository creates
+(GENERATED) with a new random value: 32 letters and digits, or 16 lowercase letters and digits
+for user names and client IDs. Credentials of other teams' services are never generated
+(ADR-023); the script lists the ones still empty, to be typed in by hand. A value already in
+`.env` is never overwritten, so rerunning is safe. `.env` is written with mode 0600.
 
 Applying the Secrets: stops unless `KUBE_CONTEXT` and every value a Secret needs are set. Each
 Secret is applied with its Namespace by `kubectl --context $KUBE_CONTEXT apply --server-side
@@ -37,19 +38,26 @@ SECRET_ALPHABET = string.ascii_letters + string.digits
 IDENTITY_ALPHABET = string.ascii_lowercase + string.digits
 ADDED_COMMENT = "# Added from .env.template by scripts/init_env.py"
 
+# Credentials this repository creates, so init-env generates them (ADR-006, ADR-026).
+GENERATED = {"POLARIS_DB_PASSWORD", "POLARIS_ROOT_CLIENT_ID", "POLARIS_ROOT_CLIENT_SECRET",
+             "POLARIS_TOKEN_SIGNING_KEY", "DATAHUB_DB_PASSWORD"}
+
 # A Secret: its name, the .env variable naming its namespace (ADR-007), its type, the keys
 # filled from .env variables, and keys with fixed values.
 Secret = namedtuple("Secret", "name namespace_var type from_env fixed")
 SECRETS = [
-    Secret("minio-root", "NS_STORAGE", "Opaque",
-           {"rootUser": "MINIO_ROOT_USER", "rootPassword": "MINIO_ROOT_PASSWORD"}, {}),
     Secret("polaris-db", "NS_CATALOG_POLARIS", "kubernetes.io/basic-auth",
            {"password": "POLARIS_DB_PASSWORD"}, {"username": "polaris"}),
     Secret("polaris-root", "NS_CATALOG_POLARIS", "Opaque",
            {"clientId": "POLARIS_ROOT_CLIENT_ID", "clientSecret": "POLARIS_ROOT_CLIENT_SECRET"},
            {}),
-    Secret("opensearch-admin", "NS_MONITORING", "Opaque",
-           {"username": "OPENSEARCH_USER", "password": "OPENSEARCH_PASSWORD"}, {}),
+    Secret("polaris-token-signing", "NS_CATALOG_POLARIS", "Opaque",
+           {"signingKey": "POLARIS_TOKEN_SIGNING_KEY"}, {}),
+    Secret("polaris-s3", "NS_CATALOG_POLARIS", "Opaque",
+           {"accessKeyId": "POLARIS_S3_ACCESS_KEY_ID",
+            "secretAccessKey": "POLARIS_S3_SECRET_ACCESS_KEY"}, {}),
+    Secret("datahub-db", "NS_CATALOG_DATAHUB", "kubernetes.io/basic-auth",
+           {"password": "DATAHUB_DB_PASSWORD"}, {"username": "datahub"}),
 ]
 
 
@@ -86,7 +94,7 @@ def merge(template_text, env_text, gen=generate):
     lines = []
     for line in (template_text if env_text is None else env_text).splitlines():
         m = ASSIGNMENT_RE.match(line.strip())
-        if m and CREDENTIAL_RE.search(m.group(1)) and not unquote(m.group(2)):
+        if m and m.group(1) in GENERATED and not unquote(m.group(2)):
             line = f"{m.group(1)}={gen(m.group(1))}"
             filled.append(m.group(1))
         lines.append(line)
@@ -98,12 +106,18 @@ def merge(template_text, env_text, gen=generate):
             continue
         if not added:
             lines += ["", ADDED_COMMENT]
-        if CREDENTIAL_RE.search(name) and not value:
+        if name in GENERATED and not value:
             value = gen(name)
             filled.append(name)
         lines.append(f"{name}={value}")
         added.append(name)
     return "\n".join(lines) + "\n", filled, added
+
+
+def missing_by_hand(env):
+    """Empty credentials that are not generated: other teams' services, typed by hand."""
+    return [name for name, value in env.items()
+            if CREDENTIAL_RE.search(name) and name not in GENERATED and not value]
 
 
 def write_env(path, text):
@@ -182,6 +196,9 @@ def main(argv):
     print(f"{args.env}: filled {len(filled)} credentials"
           + (f" ({', '.join(filled)})" if filled else "")
           + f", added {len(added)} variables from {args.template}")
+    by_hand = missing_by_hand(parse(text))
+    if by_hand:
+        print(f"{args.env}: type into .env by hand: {', '.join(by_hand)} (ADR-023)")
 
     if args.apply_secrets:
         apply_secrets(parse(text))
