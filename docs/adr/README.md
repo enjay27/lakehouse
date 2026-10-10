@@ -70,6 +70,13 @@ flowchart LR
 | [020](020-a-release-tag-is-created-only-by-the-release-workflow.md) | A release tag is created only by the release workflow, after the full Linux gate | Accepted |
 | [021](021-gates-upgrade-from-the-last-release-rebuilt-from-its-tag.md) | Gates upgrade from the last release, rebuilt from its tag; no machine snapshots | Accepted |
 | [022](022-claude-prs-merge-through-the-auto-merge-workflow.md) | Claude's PRs merge through an auto-merge workflow once every check on the head is green | Accepted |
+| **Scope and integration** | | |
+| [023](023-other-teams-services-are-interfaces-with-stand-ins-on-the-gate.md) | Other teams' services are interfaces in `.env`, with stand-ins only on the gate | Proposed |
+| [024](024-the-log-batch-hands-processed-files-to-the-observability-teams-fluent-bit.md) | The log batch hands processed files to the observability team's Fluent Bit | Proposed |
+| [025](025-datahub-with-postgresql-on-cnpg-a-small-kafka-and-a-small-opensearch.md) | Datahub runs with PostgreSQL on CloudNativePG, a single-broker Kafka and a small OpenSearch | Proposed |
+| [026](026-polaris-issues-its-own-tokens-and-asks-an-opa-policy-endpoint.md) | Polaris issues its own tokens and asks an OPA policy endpoint; principals are created by the catalog gateway | Proposed |
+| [027](027-ingress-is-denied-by-default-and-allowed-per-caller.md) | Ingress to this repository's namespaces is denied by default and allowed per caller | Proposed |
+| [028](028-the-polaris-console-is-a-maintainer-tool-outside-the-release-path.md) | The Polaris console is a maintainer tool, built from a pinned commit and kept off the release path | Proposed |
 
 ## Not ADRs
 
