@@ -122,7 +122,11 @@ source does not matter for operation. What follows is the list they cover.
   it, checks its values schema and runs kubeconform (v0.8.0, pinned) on CNPG's CRD from the
   pinned chart, with PyYAML pinned by hash (Kade's choice). The gate's kind control-plane
   takes pods, so three nodes hold the instances apart; the smoke gate checks them on the
-  running object instead of the one-instance scratch `Cluster`.
+  running object instead of the one-instance scratch `Cluster`. Gates on commit `20190c2`
+  (2026-10-10), both upgrading from `platform-2026.10.10`: dry-run
+  [38073559912](https://github.com/enjay27/lakehouse/actions/runs/38073559912), smoke
+  [38073559994](https://github.com/enjay27/lakehouse/actions/runs/38073559994) (the `Cluster`
+  Ready in 1 min 32 s, three instances on three nodes).
 - Bootstrap: the realm and root principal from Secrets (ADR-006), then a catalog on the S3
   endpoint (SeaweedFS stand-in on the gate, ADR-031).
 - Smoke tests through the Iceberg REST API, as an ordinary principal: create a namespace and
