@@ -1,0 +1,62 @@
+# The release gate (ADR-033): every check a release candidate must pass, on a PR from main into
+# rc. Kade merges such a PR by hand, with a merge commit; the rc ruleset requires these checks
+# by name, and the release workflow reads them on the PR's head before it tags:
+#   "the head is main", "dry-run / dry-run", "smoke upgrade / smoke", "smoke fresh / smoke",
+#   and "static" from static.yml, which runs on every PR.
+# install/release_tag.py REQUIRED_CHECKS holds the same five names.
+# `the head is main` fails at once for any other head; the gates wait for it, so a wrong head
+# costs no kind cluster. A skipped job counts as passed, so the ruleset requires it too.
+# The called gates test the PR's merge result. gate-check skips PRs into rc (ADR-033), and
+# auto-merge acts only on claude/* heads into main (ADR-022).
+name: Release gate
+
+on:
+  pull_request:
+    branches: [rc]
+
+permissions: {}
+
+concurrency:
+  group: release-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  head-is-main:
+    name: the head is main
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Only main, from this repository, may be merged into rc
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          if [ "$HEAD_REPO" != "$GITHUB_REPOSITORY" ] || [ "$HEAD_REF" != main ]; then
+            echo "::error::rc takes pull requests from main of this repository only (ADR-033); a fix goes to main first."
+            exit 1
+          fi
+
+  dry-run:
+    name: dry-run
+    needs: head-is-main
+    uses: ./.github/workflows/dry-run.yml
+    permissions:
+      contents: read
+
+  smoke-upgrade:
+    name: smoke upgrade
+    needs: head-is-main
+    uses: ./.github/workflows/smoke.yml
+    with:
+      fresh: false
+    permissions:
+      contents: read
+
+  smoke-fresh:
+    name: smoke fresh
+    needs: head-is-main
+    uses: ./.github/workflows/smoke.yml
+    with:
+      fresh: true
+    permissions:
+      contents: read

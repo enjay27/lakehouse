@@ -1,0 +1,110 @@
+# The release (ADR-033): Kade starts it by hand on rc. It runs no cluster. For the head commit
+# of rc it finds the PR from main that was merged as that commit, and tags the commit only if
+#   - every release-gate check (install/release_tag.py REQUIRED_CHECKS) succeeded on that PR's
+#     head commit,
+#   - the rc commit's tree is that head's tree, so the tag names what the gate tested,
+#   - the commit carries no platform-* tag yet.
+# The tag is platform-YYYY.MM.DD (.N for a later release the same day), created with a GitHub
+# release whose notes list the versions, the gate's checks and the commits since the last
+# release. Only the tagging job can write; the platform-* ruleset keeps tags from moving or
+# being deleted. Claude sessions start this workflow only when Kade asks.
+name: Release
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: the release gate passed
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read  # the PR merged as the rc commit
+      checks: read         # the release gate's checks on its head
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      notes: ${{ steps.check.outputs.notes }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Read the release gate of the rc commit
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != refs/heads/rc ]; then
+            echo "::error::a release is made from rc only (ADR-033); this run is on $GITHUB_REF"
+            exit 1
+          fi
+          commit=$GITHUB_SHA
+          if [ -n "$(git tag --points-at "$commit" --list 'platform-*')" ]; then
+            echo "::error::$commit is already released: $(git tag --points-at "$commit" --list 'platform-*')"
+            exit 1
+          fi
+          gh api "repos/$REPO/commits/$commit/pulls" > "$RUNNER_TEMP/pulls.json"
+          pr=$(jq -c --arg c "$commit" \
+                 '[.[] | select(.base.ref == "rc" and .head.ref == "main" and .merge_commit_sha == $c)][0]' \
+                 "$RUNNER_TEMP/pulls.json")
+          if [ "$pr" = null ]; then
+            echo "::error::$commit is not the merge of a PR from main into rc (ADR-033)"
+            exit 1
+          fi
+          head=$(jq -r .head.sha <<<"$pr")
+          url=$(jq -r .html_url <<<"$pr")
+          if [ "$(git rev-parse "$commit^{tree}")" != "$(git rev-parse "$head^{tree}")" ]; then
+            echo "::error::rc at $commit differs from the tested head $head of $url"
+            exit 1
+          fi
+          gh api --paginate "repos/$REPO/commits/$head/check-runs?per_page=100" \
+            --jq '.check_runs[] | {name, status, conclusion, html_url}' | jq -s . > "$RUNNER_TEMP/checks.json"
+          if ! python3 install/release_tag.py verify "$RUNNER_TEMP/checks.json" > "$RUNNER_TEMP/problems.txt"; then
+            echo "::error::the release gate did not pass on $head ($url): $(paste -sd ';' "$RUNNER_TEMP/problems.txt")"
+            exit 1
+          fi
+          # shellcheck disable=SC2046  # tag names have no spaces
+          previous=$(python3 install/release_tag.py previous $(git tag --merged "$commit" --list 'platform-*'))
+          # shellcheck disable=SC2046
+          tag=$(python3 install/release_tag.py next "$(date -u +%F)" $(git tag --list 'platform-*'))
+          if [ -n "$previous" ]; then
+            git log --no-merges --format='%h %s' "$previous..$commit" > "$RUNNER_TEMP/log.txt"
+          else
+            : > "$RUNNER_TEMP/log.txt"
+          fi
+          python3 install/release_tag.py notes "$tag" "$commit" "${previous:--}" "$url" \
+            "$RUNNER_TEMP/checks.json" "$RUNNER_TEMP/log.txt" > "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md" >> "$GITHUB_STEP_SUMMARY"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "notes=$(base64 -w0 "$RUNNER_TEMP/notes.md")" >> "$GITHUB_OUTPUT"
+
+  tag:
+    name: tag and GitHub release
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write  # create the tag and the release
+    steps:
+      - name: Create the tag and the release on the rc commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ needs.check.outputs.tag }}
+          NOTES: ${{ needs.check.outputs.notes }}
+        run: |
+          set -euo pipefail
+          base64 -d <<<"$NOTES" > "$RUNNER_TEMP/notes.md"
+          gh release create "$TAG" --repo "$REPO" --target "$GITHUB_SHA" --title "$TAG" \
+            --notes-file "$RUNNER_TEMP/notes.md"
+          echo "Released $TAG at $GITHUB_SHA." >> "$GITHUB_STEP_SUMMARY"

@@ -88,7 +88,8 @@ source does not matter for operation. What follows is the list they cover.
 ### P1: the gates and the foundation
 
 - The kind gate with dry-run and smoke workflows (ADR-017, ADR-018), gate-check (ADR-019),
-  and the release workflow (ADR-033, ADR-021). The first release has nothing to upgrade from.
+  and the release flow `main` → `rc` → tag (ADR-033, ADR-021). The first release has nothing
+  to upgrade from.
 - The CloudNativePG operator on the gate and test clusters only, at the pinned version; on
   the target clusters it is the operator team's, and a release only checks it is present
   (ADR-029, accepted by Kade on 2026-10-10).
@@ -100,8 +101,12 @@ source does not matter for operation. What follows is the list they cover.
   First runs passed on commit `0d3092a` on 2026-10-10: dry-run
   [38060408982](https://github.com/enjay27/lakehouse/actions/runs/38060408982) (51 s), smoke
   [38060408746](https://github.com/enjay27/lakehouse/actions/runs/38060408746) (1 min 52 s,
-  the `Cluster` Ready in 37 s). Left in P1: the release workflow; the image cache waits for
-  the first chart's images.
+  the `Cluster` Ready in 37 s).
+- Branch cleanup (ADR-032, PR #24): its first run deleted the merged branch on 2026-10-10.
+- The release flow (ADR-033, accepted on 2026-10-10; Kade created `rc` and its ruleset and
+  the `platform-*` tag ruleset): the gates upgrade from the latest release the commit
+  contains; `release-gate.yml` gates a PR from `main` into `rc`; `release.yml` tags the `rc`
+  commit after reading that gate. The image cache waits for the first chart's images.
 - **Gate:** static, then dry-run and smoke on kind. **Linux:** `init_env.py --apply-secrets`
   ([#6](https://github.com/enjay27/lakehouse/issues/6)).
 
@@ -161,8 +166,8 @@ source does not matter for operation. What follows is the list they cover.
 
 ### P7: first release, then upgrades
 
-- `v1.0.0` through the release workflow (ADR-033), with release notes and runbooks for
-  installing and upgrading.
+- The first release with Polaris and Datahub, `main` → `rc` → `platform-YYYY.MM.DD`
+  (ADR-033), with release notes and runbooks for installing and upgrading.
 - The Polaris 1.7.0 upgrade as its own PR (ADR-009), gated from the last release (ADR-021).
 
 ## Pinned versions

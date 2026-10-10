@@ -31,9 +31,9 @@ storage, observability, SSO and the catalog gateway are other teams' services, r
 | `scripts/gate_check.py` | gate-check: platform files need a dry-run covering the head (ADR-019) |
 | `scripts/branch_cleanup.py` | Which merged `claude/*` and stale `gate/*` branches to delete (ADR-032) |
 | `gates/` | The kind gate: pinned tools and node image, the cluster, CNPG on the gate only (ADR-017, ADR-029) |
-| `install/release.py` | Installs a release in ADR-029's order; today step 0, the CNPG precondition |
+| `install/` | `release.py` installs a release in ADR-029's order (today step 0, the CNPG precondition); `release_tag.py` names tags, reads the release gate, writes notes (ADR-033) |
 | `scripts/init_env.py` | init-env: `.env` with credentials per clone; `--apply-secrets` (ADR-006) |
-| `.github/workflows/` | `static.yml`, `gate-check.yml` (ADR-019), `dry-run.yml`, `smoke.yml` (ADR-018), `auto-merge.yml` (ADR-022), `branch-cleanup.yml` (ADR-032), `labels.yml` |
+| `.github/workflows/` | `static.yml`, `gate-check.yml` (ADR-019), `dry-run.yml`, `smoke.yml` (ADR-018), `auto-merge.yml` (ADR-022), `branch-cleanup.yml` (ADR-032), `release-gate.yml`, `release.yml` (ADR-033), `labels.yml` |
 | `.github/labels.json` | The state labels, synced by `labels.yml` (ADR-003) |
 | `.env.template` | Every per-environment variable, credentials empty (ADR-002) |
 
@@ -48,7 +48,7 @@ storage, observability, SSO and the catalog gateway are other teams' services, r
 | `init_env.py --apply-secrets` | Needs a Linux test cluster: label the issue `cmd:verify-needs-linux` |
 
 CI runs all of these as the **static** gate on every push to `claude/**` and every PR
-(ADR-018). **gate-check** runs on every PR (ADR-019): a PR changing `charts/`, `images/`,
+(ADR-018). **gate-check** runs on every PR into `main` (ADR-019): a PR changing `charts/`, `images/`,
 `install/`, `gates/` or the gate workflows needs a passing dry-run on `gate/dry-run/<task>`
 covering its head: push the PR's commit to `gate/dry-run/<task>` and `gate/smoke/<task>`
 (ADR-018); kind needs Docker, so sessions read those runs. Charts arrive in P2, releases
@@ -83,17 +83,17 @@ covering its head: push the PR's commit to `gate/dry-run/<task>` and `gate/smoke
 - The PR is the session record: *What changed and why*, *Verified*, *NOT VERIFIED*, *Wrong
   turns*, and `Closes #N`.
 
-## Version control (ADR-022, ADR-030)
+## Version control (ADR-022, ADR-030, ADR-033)
 
 - Sessions work on `claude/<task>`, one task per PR, from an up-to-date `main`.
-- `auto-merge.yml` merges a `claude/*` PR once every check on its head is green, deletes the
-  branch and closes its `Closes #N` issues. GitHub's auto-merge setting is not used. A new
-  check workflow is added to its `workflows:` list in the same PR.
-- It never merges a draft, nor a PR that changes `.github/workflows/`,
-  `scripts/auto_merge_gate.py` or `scripts/gate_check.py` (ADR-030): open such a PR as a
-  draft that says Kade merges it by hand. `auto-merge.yml` is read from `main`, so a change
-  to it acts only after its own merge. Kade's own branches are merged by hand.
+- `auto-merge.yml` (not GitHub's setting) merges a green `claude/*` PR, deletes the branch and
+  closes its `Closes #N` issues; a new check workflow joins its `workflows:` list in that PR.
+  It never merges a draft, nor a PR changing `.github/workflows/`, `scripts/auto_merge_gate.py`
+  or `scripts/gate_check.py` (ADR-030): open those as drafts Kade merges by hand. It is read
+  from `main`, so a change to it acts after its own merge. Kade's branches merge by hand.
 - `branch-cleanup.yml` deletes merged `claude/*` branches and their `gate/*` branches (ADR-032).
+- Releases (ADR-033): a PR from `main` into `rc`, gated by `release-gate.yml`, merged by Kade;
+  `release.yml` on `rc` tags it. Sessions open such a PR or run a release only when asked.
 
 ## Overrides of global rules
 
