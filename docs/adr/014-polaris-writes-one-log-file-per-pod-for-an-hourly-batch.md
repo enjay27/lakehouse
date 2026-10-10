@@ -1,6 +1,6 @@
 # ADR-014: Polaris writes one log file per pod, read by an hourly batch released separately
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-10
 - **Related:** ADR-004, ADR-009, ADR-013
 
@@ -11,7 +11,7 @@ batch job that builds the audit report. Two findings are recorded there:
 
 - **One shared file lost data:** with two Polaris pods writing one file under rotation, 44.5 %
   of lines were lost in a measured run; one file per pod (`polaris-<pod>.log`) lost none.
-- **The volume is `ReadWriteOnce`**, chosen because OrbStack is one node. On a multi-node
+- **The volume is `ReadWriteOnce`**, chosen because the archive's cluster was one node. On a multi-node
   cluster, a Polaris pod or the batch job scheduled on another node cannot attach it (ADR-004).
   Never run on more than one node.
 

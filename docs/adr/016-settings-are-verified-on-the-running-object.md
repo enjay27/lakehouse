@@ -1,6 +1,6 @@
 # ADR-016: A setting is verified on the running object against the chart default, never in the values file
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-10
 - **Related:** ADR-010, ADR-017, ADR-018
 
@@ -42,4 +42,4 @@ flowchart LR
 ## Consequences
 
 - Each chart PR carries a small test of its rendered output.
-- Kade's checks on OrbStack and the smoke gate query running objects, not files.
+- Kade's checks on a Linux test cluster and the smoke gate query running objects, not files.

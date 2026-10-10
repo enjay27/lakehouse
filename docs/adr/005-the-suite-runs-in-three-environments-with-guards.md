@@ -1,6 +1,6 @@
 # ADR-005: The suite runs in three environments, each with its own guards
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-10
 - **Related:** ADR-002, ADR-006
 

@@ -1,6 +1,6 @@
 # ADR-002: The repository is public; environment-specific configuration lives in `.env`
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-10
 - **Related:** ADR-001, ADR-006, ADR-007, ADR-017
 

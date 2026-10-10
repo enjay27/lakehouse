@@ -1,6 +1,6 @@
 # ADR-020: A release tag is created only by the release workflow, after the full Linux gate
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-10
 - **Related:** ADR-004, ADR-017, ADR-018, ADR-021
 
@@ -37,7 +37,8 @@ flowchart LR
 
 ## Alternatives considered
 
-- **Kade tags by hand after an OrbStack check:** OrbStack is not the release target (ADR-004).
+- **Kade tags by hand after a check on a test cluster:** what a tag means would depend on that
+  day's check, and no record would show what was proven (ADR-004).
 - **Semantic versions:** a set of charts with independent upstream versions promises no API.
 - **A release per merge:** a tag per PR, most of them documentation.
 

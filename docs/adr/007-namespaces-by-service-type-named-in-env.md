@@ -1,6 +1,6 @@
 # ADR-007: Namespaces are split by service type, and their names come from `.env`
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-10
 - **Related:** ADR-002, ADR-008, ADR-010, ADR-012
 
@@ -27,8 +27,7 @@ repository (ADR-002). Kade's direction (2026-10-10): namespaces by service type,
   relies on the context's default namespace.
 - Cross-namespace traffic uses full service DNS names; which namespaces may talk to which is
   written into the service's ADR, so network policies can follow later.
-- A local cluster may keep other names (Kade's OrbStack runs the archive's namespace until it
-  is rebuilt): only `.env` changes.
+- A cluster that needs other names changes only `.env`.
 
 ## Diagram
 

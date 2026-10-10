@@ -1,6 +1,6 @@
 # ADR-021: Gates upgrade from the last release, rebuilt from its tag; no machine snapshots
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-10
 - **Related:** ADR-017, ADR-018, ADR-020
 
