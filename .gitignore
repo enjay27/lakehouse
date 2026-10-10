@@ -6,3 +6,6 @@
 
 # macOS Finder files
 .DS_Store
+
+# Python bytecode from running the scripts and their tests
+__pycache__/

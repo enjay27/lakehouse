@@ -46,7 +46,7 @@ flowchart LR
 | [000](000-adr-process-and-template.md) | ADR process and template | Accepted |
 | [001](001-the-repository-starts-from-its-decision-records.md) | The repository starts from its decision records; code enters only under an Accepted ADR | Accepted |
 | [002](002-the-repository-is-public-and-configuration-lives-in-env.md) | The repository is public; environment-specific configuration lives in `.env` | Accepted |
-| [003](003-state-lives-in-labelled-issues-and-the-pr-is-the-session-record.md) | State lives in labelled issues of this repository; the PR is the session record | Proposed |
+| [003](003-state-lives-in-labelled-issues-and-the-pr-is-the-session-record.md) | State lives in labelled issues of this repository; the PR is the session record | Accepted |
 | **Environments and credentials** | | |
 | [004](004-the-platform-targets-linux-only.md) | The platform targets Linux only; releases are proven on the Linux gate; target clusters are never reached | Accepted |
 | [005](005-the-suite-runs-in-three-environments-with-guards.md) | The suite runs in three environments, each with its own guards | Accepted |
@@ -69,6 +69,7 @@ flowchart LR
 | [019](019-a-platform-pr-merges-only-when-a-dry-run-covers-its-head.md) | A platform PR merges only when a passing dry-run gate covers its head | Accepted |
 | [020](020-a-release-tag-is-created-only-by-the-release-workflow.md) | A release tag is created only by the release workflow, after the full Linux gate | Accepted |
 | [021](021-gates-upgrade-from-the-last-release-rebuilt-from-its-tag.md) | Gates upgrade from the last release, rebuilt from its tag; no machine snapshots | Accepted |
+| [022](022-claude-prs-merge-through-the-auto-merge-workflow.md) | Claude's PRs merge through an auto-merge workflow once every check on the head is green | Proposed |
 
 ## Not ADRs
 

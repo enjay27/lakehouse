@@ -1,0 +1,38 @@
+# The static gate (ADR-018): the scripts' tests, the ADR check (ADR-000), the repository check
+# (ADR-002, ADR-006), the CLAUDE.md limits and whitespace errors over the whole tree. Runs on
+# every push to claude/** and main, and on every PR. auto-merge.yml lists this workflow by
+# its name, "Static" (ADR-022).
+name: Static
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+
+permissions: {}
+
+concurrency:
+  group: static-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static:
+    name: static
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Script tests
+        run: python3 -m unittest discover -s scripts -v
+      - name: ADRs follow ADR-000
+        run: python3 scripts/adr_check.py
+      - name: Repository check
+        run: python3 scripts/repo_check.py
+      - name: CLAUDE.md limits
+        run: python3 scripts/claude_md_check.py
+      - name: Whitespace errors
+        run: git diff --check "$(git hash-object -t tree /dev/null)" HEAD
