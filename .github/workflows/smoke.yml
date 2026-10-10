@@ -1,8 +1,10 @@
 # The smoke gate (ADR-018): runs on a push to gate/smoke/<task> and nightly on main. Advisory:
 # its result is reported in the PR, it does not block a merge (ADR-019). kind with three nodes
-# and the pinned CNPG operator (ADR-017, ADR-029), the release install script, then a
-# one-instance PostgreSQL Cluster that must become Ready. Not a PR check, so auto-merge.yml does
-# not list it.
+# and the pinned CNPG operator (ADR-017, ADR-029), the latest release tag installed from its
+# checkout and this commit's release over it (ADR-021), or with `fresh` this commit's alone,
+# then a one-instance PostgreSQL Cluster that must become Ready. The release gate calls it
+# twice on every PR into rc, upgrade and fresh (ADR-033). Not a PR check into main, so
+# auto-merge.yml does not list it.
 name: Smoke
 
 on:
@@ -10,11 +12,17 @@ on:
     branches: ["gate/smoke/**"]
   schedule:
     - cron: "17 3 * * *"
+  workflow_call:
+    inputs:
+      fresh:
+        description: Install this commit alone, ignoring the last release.
+        type: boolean
+        default: false
 
 permissions: {}
 
 concurrency:
-  group: smoke-${{ github.ref }}
+  group: smoke-${{ github.workflow }}-${{ github.ref }}-${{ inputs.fresh }}
   cancel-in-progress: true
 
 jobs:
@@ -33,16 +41,6 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: No release to upgrade from yet (ADR-021)
-        run: |
-          set -euo pipefail
-          tag=$(git tag --merged HEAD --list 'platform-*' --sort=-creatordate | head -n 1)
-          if [ -n "$tag" ]; then
-            echo "::error::release $tag exists; the upgrade from a tag (ADR-021) is not built yet"
-            exit 1
-          fi
-          echo "No release to upgrade from: fresh install (ADR-021)." >> "$GITHUB_STEP_SUMMARY"
-
       - name: Tools at pinned versions
         run: |
           python3 gates/gate.py tools "$RUNNER_TEMP/bin"
@@ -51,8 +49,16 @@ jobs:
       - name: kind cluster and the CNPG operator (gate only, ADR-029)
         run: python3 gates/gate.py up
 
-      - name: Release install script
-        run: python3 install/release.py | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Install the last release, then this commit over it (ADR-021)
+        env:
+          FRESH: ${{ inputs.fresh }}
+        run: |
+          set -euo pipefail
+          if [ "$FRESH" = true ]; then
+            python3 gates/gate.py install --fresh | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            python3 gates/gate.py install | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: A PostgreSQL Cluster becomes Ready
         run: |

@@ -8,11 +8,15 @@
                   gate has no operator team (ADR-029); a release never installs it.
   smoke-cnpg      creates a one-instance PostgreSQL `Cluster` in a scratch namespace, waits
                   until it is Ready, then deletes the namespace: the operator works.
+  install [--fresh]
+                  installs the latest release HEAD contains (released_tags) from a checkout of
+                  its tag, then this commit's release over it (ADR-021); with no tag, or with
+                  --fresh, only this commit's release. Prints which it did first.
 
 Every kubectl and helm call names the gate's context and a namespace. Nothing here reaches any
 cluster but the kind cluster it creates (ADR-017).
 
-Usage: python3 gates/gate.py tools BIN_DIR | up | smoke-cnpg
+Usage: python3 gates/gate.py tools BIN_DIR | up | smoke-cnpg | install [--fresh]
 """
 
 import hashlib
@@ -26,6 +30,9 @@ import tempfile
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+sys.path.insert(0, os.path.join(ROOT, "install"))
+import release_tag  # noqa: E402
 CLUSTER = "lakehouse-gate"
 CONTEXT = f"kind-{CLUSTER}"
 SMOKE_NAMESPACE = "gate-smoke"
@@ -93,6 +100,37 @@ def smoke_commands():
     ]
 
 
+def install_plan(previous, previous_dir, fresh):
+    """The commands that install a release on the gate, and the line that says which."""
+    this = ["python3", os.path.join(ROOT, "install", "release.py")]
+    if fresh:
+        return [this], "Fresh install of this commit, as asked."
+    if not previous:
+        return [this], "No release to upgrade from: fresh install (ADR-021)."
+    return [
+        ["git", "-C", ROOT, "worktree", "add", "--detach", previous_dir, previous],
+        ["python3", os.path.join(previous_dir, "install", "release.py")],
+        this,
+    ], f"Upgrade: {previous} installed from its tag, then this commit over it (ADR-021)."
+
+
+def _git(repo, *args):
+    return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, check=False)
+
+
+def released_tags(repo=ROOT):
+    """The release tags whose content HEAD contains.
+
+    A tag sits on an `rc` merge commit that `main` never contains (ADR-033), so a tag counts
+    when it is an ancestor of HEAD (a commit on `rc`) or when its second parent, the `main`
+    commit the release gate tested, is (a commit on `main` or a gate branch).
+    """
+    tags = _git(repo, "tag", "--list", "platform-*").stdout.split()
+    return [t for t in tags
+            if _git(repo, "merge-base", "--is-ancestor", t, "HEAD").returncode == 0
+            or _git(repo, "merge-base", "--is-ancestor", f"{t}^2", "HEAD").returncode == 0]
+
+
 def run(argv, stdin=None):
     print("+ " + " ".join(argv), flush=True)
     subprocess.run(argv, input=stdin, text=True, check=True)
@@ -116,6 +154,14 @@ def main(argv):
     if len(argv) == 2 and argv[1] == "smoke-cnpg":
         for command, stdin in smoke_commands():
             run(command, stdin)
+        return 0
+    if argv[1:] in (["install"], ["install", "--fresh"]):
+        with tempfile.TemporaryDirectory() as d:
+            commands, summary = install_plan(release_tag.previous(released_tags()),
+                                             os.path.join(d, "previous"), len(argv) == 3)
+            print(summary, flush=True)
+            for command in commands:
+                run(command)
         return 0
     print(__doc__.strip().splitlines()[-1], file=sys.stderr)
     return 2

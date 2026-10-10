@@ -1,6 +1,6 @@
 # ADR-020: A release tag is created only by the release workflow, after the full Linux gate
 
-- **Status:** Accepted
+- **Status:** Superseded by ADR-033
 - **Date:** 2026-10-10
 - **Related:** ADR-004, ADR-017, ADR-018, ADR-021
 
