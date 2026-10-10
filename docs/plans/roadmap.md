@@ -15,7 +15,7 @@ the second column belong to other teams. Here they are only interfaces, configur
 | **Apache Polaris** (ADR-009), with its own PostgreSQL on CloudNativePG (ADR-008, ADR-010) | **Object storage**, S3-compatible: the Iceberg warehouse and backups |
 | **Polaris console** (`apache/polaris-tools` `console/`) | **Observability**: Fluent Bit, OpenSearch, Prometheus, Grafana |
 | **The Polaris log batch** (ADR-014): processed log files ready for Fluent Bit | **ETL**: Spark, Flink, the shared Kafka |
-| **Datahub**, with its own PostgreSQL (Pgpool and PostgreSQL-HA for now), a small Kafka and a small OpenSearch used by Datahub only | **Query clients**: Trino, Iceberg clients, per-user StarRocks |
+| **Datahub**, with PostgreSQL on CNPG, a single-broker Kafka and a small OpenSearch, used by Datahub only (ADR-025) | **Query clients**: Trino, Iceberg clients, per-user StarRocks |
 | | **SSO**: Keycloak |
 | | **The catalog gateway**: Polaris's authorizer and wrapper API, built elsewhere |
 
@@ -37,7 +37,7 @@ flowchart LR
     POL -.->|"original logs"| LB["log batch"]
     LB -.->|"processed files"| FB["Fluent Bit"] --> OS[("OpenSearch")]
     DH["Datahub"] -->|"ingests metadata"| POL
-    DH --> DPG[("PostgreSQL-HA")]
+    DH --> DPG[("PostgreSQL<br/>CNPG")]
     DH --> DK[("Kafka")]
     DH --> DOS[("OpenSearch")]
 ```
@@ -58,6 +58,11 @@ Each phase lists its ADRs, PRs, gate, and what only a Linux test cluster can ver
 
 ### P0: realign the decisions to this scope (ADRs only)
 
+Written as ADR-023 to ADR-028 (Proposed, 2026-10-10). Kade's choices: Datahub's PostgreSQL
+moves to CNPG now, its Kafka is the official image with one broker, Polaris stays at 1.6.0,
+Polaris uses the OPA authorizer, and the console's image source does not matter for
+operation. What follows is the list they cover.
+
 - **Amend or supersede the ADRs written for a wider scope:**
   - ADR-007: namespaces only for what is built here; endpoints of other teams' services go in
     `.env`.
@@ -70,8 +75,6 @@ Each phase lists its ADRs, PRs, gate, and what only a Linux test cluster can ver
   - ADR-017: the gate installs stand-ins (MinIO, Fluent Bit) that are never released.
   - ADR-006: `init_env.py` drops the `minio-root` and `opensearch-admin` Secrets and gains
     Datahub's.
-- **Amend ADR-008 for Datahub:** its PostgreSQL stays on Pgpool and PostgreSQL-HA until a
-  later move to CNPG (P3).
 - **New ADRs:**
   - Datahub and its PostgreSQL, Kafka and OpenSearch;
   - the contract with other teams' services (S3, metrics, log files, SSO);
@@ -106,11 +109,12 @@ Each phase lists its ADRs, PRs, gate, and what only a Linux test cluster can ver
 
 ### P3: Datahub
 
-- Its PostgreSQL (Pgpool and PostgreSQL-HA, per the ADR-008 amendment), a small Kafka and a
-  small OpenSearch, all in `NS_CATALOG_DATAHUB`, then Datahub itself.
+- Its PostgreSQL on CNPG, a single-broker Kafka and a single-node OpenSearch, all in
+  `NS_CATALOG_DATAHUB`, then Datahub itself (ADR-025).
 - Datahub ingests Polaris's catalog with its own read-only principal.
 - Its own login through SSO, against a stand-in on the gate.
-- A later item, with its own ADR: Datahub's PostgreSQL moves to CNPG, with a data migration.
+- A runbook, proven on a Linux test cluster, moves Datahub's metadata from the target
+  clusters' existing PostgreSQL-HA to the new `Cluster`.
 - **Gate:** dry-run and smoke, including one ingestion run.
 
 ### P4: callers and their contracts
@@ -143,15 +147,13 @@ Each phase lists its ADRs, PRs, gate, and what only a Linux test cluster can ver
 
 ## Risks to verify
 
-- **Bitnami images.** As recalled, not yet checked: Bitnami stopped publishing free, updated
-  images in 2025 and moved the old ones to a frozen legacy repository. PostgreSQL-HA with
-  Pgpool is usually Bitnami's chart, and Datahub's prerequisites chart has used Bitnami charts
-  for Kafka. If this holds, Datahub's database and Kafka would run on images without security
-  fixes. That argues for moving Datahub to CNPG sooner, and for choosing the Kafka source with
-  care. To verify at the start of P0.
-- **Root credential concentration.** The catalog gateway creates every principal with
-  Polaris's root credential. P0's authentication ADR should check whether Polaris RBAC allows
-  a narrower principal for provisioning, and use it if so.
+- **Bitnami images: confirmed, and resolved by ADR-025.** Checked on 2026-10-10 in the
+  upstream repositories: since 2025-08-28, `postgresql-repmgr`, `pgpool` and `kafka` are
+  available only to paying customers; old tags are frozen in `bitnamilegacy`. Datahub's
+  prerequisites chart still uses them, so it is not used here.
+- **Root credential concentration: accepted in ADR-026.** Polaris's REST API cannot grant
+  anything between root and full `service_admin`, so the gateway creates principals with root;
+  narrower rules live in the gateway's own policy.
 - **Three levels of `workflow_run`.** Static → Auto-merge → Labels is GitHub's limit, so a new
   workflow cannot chain after Labels.
 
