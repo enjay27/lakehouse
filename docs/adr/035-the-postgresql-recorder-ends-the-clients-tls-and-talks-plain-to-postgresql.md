@@ -1,6 +1,6 @@
 # ADR-035: The PostgreSQL recorder ends the client's TLS and talks plain TCP to PostgreSQL
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-11
 - **Related:** ADR-017, ADR-026, ADR-034
 
