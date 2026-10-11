@@ -121,5 +121,29 @@ class BootstrapProbes(unittest.TestCase):
         self.assertTrue(self.failed(self.statement("INSERT INTO entities VALUES (1)", "23505")))
 
 
+class VendedCredentials(unittest.TestCase):
+    """iceberg.json's must-nots hold for Polaris's policy requests, not check-standins' curl."""
+
+    def delegation(self, user_agent):
+        return {"proto": "http", "listener": "opa", "method": "POST", "status": 200,
+                "request_headers": {"user-agent": user_agent},
+                "request_body": {"json": {"input": {
+                    "actor": {"principal": "gate_smoke"},
+                    "action": "LOAD_TABLE_WITH_READ_DELEGATION"}}},
+                "response_body": {"json": {"result": {"allow": False}}}}
+
+    def failed(self, *recorded):
+        expectations = traffic.load(os.path.join(HERE, "expectations", "iceberg.json"))
+        must_nots = [e for e in expectations if e["must"] == "not_exist"]
+        problems, _ = traffic.check(list(recorded), must_nots)
+        return problems
+
+    def test_check_standins_asking_with_curl_passes(self):
+        self.assertEqual(self.failed(self.delegation("curl/8.14.1")), [])
+
+    def test_polaris_asking_fails(self):
+        self.assertTrue(self.failed(self.delegation("Apache-HttpClient/5.5 (Java/21.0.8)")))
+
+
 if __name__ == "__main__":
     unittest.main()
