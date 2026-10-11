@@ -75,14 +75,14 @@ flowchart LR
 | [024](024-the-log-batch-hands-processed-files-to-the-observability-teams-fluent-bit.md) | The log batch hands processed files to the observability team's Fluent Bit | Accepted |
 | [025](025-datahub-with-postgresql-on-cnpg-a-small-kafka-and-a-small-opensearch.md) | Datahub runs with PostgreSQL on CloudNativePG, a single-broker Kafka and a small OpenSearch | Accepted |
 | [026](026-polaris-issues-its-own-tokens-and-asks-an-opa-policy-endpoint.md) | Polaris issues its own tokens and asks an OPA policy endpoint; principals are created by the catalog gateway | Accepted |
-| [027](027-ingress-is-denied-by-default-and-allowed-per-caller.md) | Ingress to this repository's namespaces is denied by default and allowed per caller | Accepted |
+| [027](027-ingress-is-denied-by-default-and-allowed-per-caller.md) | Ingress to this repository's namespaces is denied by default and allowed per caller | Amended by ADR-034 |
 | [028](028-the-polaris-console-is-a-maintainer-tool-outside-the-release-path.md) | The Polaris console is a maintainer tool, built from a pinned commit and kept off the release path | Accepted |
 | [029](029-the-cnpg-operator-belongs-to-the-operator-team-installed-here-only-on-the-gate.md) | The CloudNativePG operator belongs to the operator team; this repository installs it only on the gate and test clusters | Accepted |
 | [030](030-auto-merge-leaves-prs-that-change-the-merge-rules-or-the-checks-to-kade.md) | Auto-merge leaves PRs that change the merge rules or the checks to Kade | Accepted |
-| [031](031-other-teams-services-are-interfaces-stand-ins-only-on-the-gate-seaweedfs-for-s3.md) | Other teams' services are interfaces in `.env`; stand-ins only on the gate, SeaweedFS for S3 | Accepted |
+| [031](031-other-teams-services-are-interfaces-stand-ins-only-on-the-gate-seaweedfs-for-s3.md) | Other teams' services are interfaces in `.env`; stand-ins only on the gate, SeaweedFS for S3 | Amended by ADR-034 |
 | [032](032-a-cleanup-workflow-deletes-merged-claude-branches-and-their-gate-branches.md) | A cleanup workflow deletes merged `claude/*` branches and their `gate/*` branches | Accepted |
 | [033](033-release-candidates-are-gated-on-a-pr-from-main-into-rc-the-release-workflow-tags-rc.md) | Release candidates are gated on a PR from `main` into `rc`; the release workflow tags `rc` | Accepted |
-| [034](034-recording-proxies-on-the-gate-prove-each-connection-and-its-exchanges.md) | Recording proxies on the gate prove each of Polaris's connections and its exchanges | Proposed |
+| [034](034-recording-proxies-on-the-gate-prove-each-connection-and-its-exchanges.md) | Recording proxies on the gate prove each of Polaris's connections and its exchanges | Accepted |
 
 ## Not ADRs
 
