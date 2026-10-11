@@ -459,6 +459,30 @@ class Listener(unittest.TestCase):
         self.assertEqual(proxy.parse_listener("opa=8181:opa.standins.svc:8181"),
                          ("opa", 8181, ("opa.standins.svc", 8181)))
 
+    def test_the_ready_file_is_written_once_every_listener_accepts(self):
+        ports = []
+        for _ in range(2):
+            with socket.socket() as s:
+                s.bind(("127.0.0.1", 0))
+                ports.append(s.getsockname()[1])
+        with tempfile.TemporaryDirectory() as d:
+            ready = os.path.join(d, "ready")
+            args = ["--ready-file", ready]
+            for name, port in zip(("a", "b"), ports):
+                args += ["--http", f"{name}={port}:127.0.0.1:9"]
+            with open(os.devnull, "w") as quiet:
+                saved, proxy.sys.stdout = proxy.sys.stdout, quiet
+                try:
+                    threading.Thread(target=proxy.main, args=(args,), daemon=True).start()
+                    deadline = time.monotonic() + 5
+                    while not os.path.exists(ready) and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    self.assertTrue(os.path.exists(ready))
+                    for port in ports:
+                        socket.create_connection(("127.0.0.1", port), timeout=1).close()
+                finally:
+                    proxy.sys.stdout = saved
+
 
 if __name__ == "__main__":
     unittest.main()

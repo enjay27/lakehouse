@@ -108,6 +108,15 @@ class Manifests(unittest.TestCase):
         self.assertIn(("--tls-cert", "/tls/tls.crt"), pairs)
         self.assertIn(("--tls-key", "/tls/tls.key"), pairs)
 
+    def test_the_recorders_readiness_opens_no_connection_it_would_relay(self):
+        c = container(objects()[("Deployment", "recorder")])
+        probe = c["readinessProbe"]
+        self.assertNotIn("tcpSocket", probe)
+        self.assertNotIn("httpGet", probe)
+        args = c["command"][2:]
+        ready = dict(zip(args[0::2], args[1::2]))["--ready-file"]
+        self.assertEqual(probe["exec"]["command"], ["test", "-f", ready])
+
     def test_the_recorder_runs_its_code_from_a_configmap_and_its_certificate_from_a_secret(self):
         o = objects()
         self.assertEqual(o[("ConfigMap", "recorder-code")]["data"]["proxy.py"], "# proxy.py\n")
