@@ -1,0 +1,232 @@
+{
+  "_comment": "Cases the gate checks gates/opa/policy.rego against, in the shape Polaris 1.6.0 sends (docs/contracts/polaris-opa-input.md); gate.py check-standins posts each to the OPA stand-in.",
+  "cases": [
+    {
+      "name": "root creates a catalog",
+      "allow": true,
+      "input": {
+        "actor": {
+          "principal": "root",
+          "roles": [
+            "service_admin"
+          ]
+        },
+        "action": "CREATE_CATALOG",
+        "resource": {
+          "targets": [
+            {
+              "type": "ROOT",
+              "name": "root_container",
+              "parents": []
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "gate_smoke creates a namespace in gate_catalog",
+      "allow": true,
+      "input": {
+        "actor": {
+          "principal": "gate_smoke",
+          "roles": [
+            "gate_smoke"
+          ]
+        },
+        "action": "CREATE_NAMESPACE",
+        "resource": {
+          "targets": [
+            {
+              "type": "CATALOG",
+              "name": "gate_catalog",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "gate_smoke loads a table in gate_catalog",
+      "allow": true,
+      "input": {
+        "actor": {
+          "principal": "gate_smoke",
+          "roles": [
+            "gate_smoke"
+          ]
+        },
+        "action": "LOAD_TABLE",
+        "resource": {
+          "targets": [
+            {
+              "type": "TABLE_LIKE",
+              "name": "t1",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                },
+                {
+                  "type": "CATALOG",
+                  "name": "gate_catalog",
+                  "parents": []
+                },
+                {
+                  "type": "NAMESPACE",
+                  "name": "ns1",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "gate_smoke loads a table in another catalog",
+      "allow": false,
+      "input": {
+        "actor": {
+          "principal": "gate_smoke",
+          "roles": [
+            "gate_smoke"
+          ]
+        },
+        "action": "LOAD_TABLE",
+        "resource": {
+          "targets": [
+            {
+              "type": "TABLE_LIKE",
+              "name": "t1",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                },
+                {
+                  "type": "CATALOG",
+                  "name": "other_catalog",
+                  "parents": []
+                },
+                {
+                  "type": "NAMESPACE",
+                  "name": "ns1",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "gate_smoke creates a catalog",
+      "allow": false,
+      "input": {
+        "actor": {
+          "principal": "gate_smoke",
+          "roles": [
+            "gate_smoke"
+          ]
+        },
+        "action": "CREATE_CATALOG",
+        "resource": {
+          "targets": [
+            {
+              "type": "ROOT",
+              "name": "root_container",
+              "parents": []
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "gate_smoke drops a table in gate_catalog",
+      "allow": false,
+      "input": {
+        "actor": {
+          "principal": "gate_smoke",
+          "roles": [
+            "gate_smoke"
+          ]
+        },
+        "action": "DROP_TABLE_WITHOUT_PURGE",
+        "resource": {
+          "targets": [
+            {
+              "type": "TABLE_LIKE",
+              "name": "t1",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                },
+                {
+                  "type": "CATALOG",
+                  "name": "gate_catalog",
+                  "parents": []
+                },
+                {
+                  "type": "NAMESPACE",
+                  "name": "ns1",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "an unknown principal lists catalogs",
+      "allow": false,
+      "input": {
+        "actor": {
+          "principal": "stranger",
+          "roles": []
+        },
+        "action": "LIST_CATALOGS",
+        "resource": {
+          "targets": [
+            {
+              "type": "ROOT",
+              "name": "root_container",
+              "parents": []
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    }
+  ]
+}

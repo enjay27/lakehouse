@@ -10,9 +10,15 @@
                   chart archive into NS_CNPG_SYSTEM and waits for it. The operator exists here
                   only because the gate has no operator team (ADR-029); a release never
                   installs it.
-  secrets         writes `.env` for the gate (its context, and credentials for the S3
-                  stand-in, which is the gate's own, ADR-031), then runs
+  secrets         writes `.env` for the gate (its context, the stand-ins' endpoints and
+                  credentials for the S3 stand-in, which is the gate's own, ADR-031), then runs
                   scripts/init_env.py --apply-secrets (ADR-006). Refuses an existing `.env`.
+  standins        applies the stand-ins (gates/standins.py: SeaweedFS for S3, OPA with
+                  gates/opa/policy.rego) in NS_STANDINS and waits for them (ADR-031). Never
+                  part of a release; the install's endpoint check needs them on the gate.
+  check-standins  runs gates/check_standins.sh in a short-lived curl pod in Polaris's namespace:
+                  an S3 round trip with Polaris's credentials, and every case of
+                  gates/opa/cases.json against the policy endpoint (ADR-026, ADR-031).
   install [--fresh] [--dry-run]
                   installs the latest release HEAD contains (released_tags) from a checkout of
                   its tag, then this commit's release over it (ADR-021); with no tag, or with
@@ -26,7 +32,7 @@
 Every kubectl and helm call names the gate's context, and a namespace where the object has
 one. Nothing here reaches any cluster but the kind cluster it creates (ADR-017).
 
-Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | install [--fresh] [--dry-run] | check-polaris-pg
+Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | install [--fresh] [--dry-run] | check-polaris-pg
 """
 
 import hashlib
@@ -46,6 +52,7 @@ sys.path.insert(0, os.path.join(ROOT, "scripts"))
 import init_env  # noqa: E402
 import release  # noqa: E402
 import release_tag  # noqa: E402
+import standins  # noqa: E402
 
 CLUSTER = "lakehouse-gate"
 CONTEXT = f"kind-{CLUSTER}"
@@ -55,6 +62,9 @@ ARCHIVE_MEMBERS = {"helm": "linux-amd64/helm", "kubeconform": "kubeconform"}
 # On the gate the S3 stand-in is the gate's own, so the gate makes up its credentials; on a
 # test or target cluster they are another team's and typed in by hand (ADR-031).
 GATE_ENV_GENERATED = ("POLARIS_S3_ACCESS_KEY_ID", "POLARIS_S3_SECRET_ACCESS_KEY")
+# On the gate, the endpoints of other teams' services are the stand-ins' (ADR-031).
+STANDIN_REGION = "us-east-1"
+STANDIN_BUCKET = "polaris-warehouse"
 
 
 def load_pins(path=os.path.join(HERE, "pins.json")):
@@ -105,13 +115,27 @@ def up_commands(pins, chart_path, namespace):
     ]
 
 
+def standin_endpoints(ns):
+    """The `.env` values naming the stand-ins in namespace `ns`."""
+    return {
+        "S3_ENDPOINT": f"http://seaweedfs.{ns}.svc.cluster.local:{standins.S3_PORT}",
+        "S3_REGION": STANDIN_REGION,
+        "POLARIS_WAREHOUSE_BUCKET": STANDIN_BUCKET,
+        "POLARIS_OPA_URL": (f"http://opa.{ns}.svc.cluster.local:{standins.OPA_PORT}"
+                            f"{standins.OPA_PACKAGE_PATH}"),
+    }
+
+
 def gate_env(template_text, gen=init_env.generate):
-    """`.env` for the gate: its context and the stand-in's credentials; init_env fills the rest."""
+    """`.env` for the gate: its context, the stand-ins' endpoints and the S3 stand-in's
+    credentials; init_env fills the rest."""
+    fixed = {"KUBE_CONTEXT": CONTEXT,
+             **standin_endpoints(init_env.parse(template_text)["NS_STANDINS"])}
     lines = []
     for line in template_text.splitlines():
         name = line.split("=", 1)[0]
-        if name == "KUBE_CONTEXT":
-            line = f"KUBE_CONTEXT={CONTEXT}"
+        if name in fixed:
+            line = f"{name}={fixed[name]}"
         elif name in GATE_ENV_GENERATED:
             line = f"{name}={gen(name)}"
         lines.append(line)
@@ -122,6 +146,34 @@ def write_gate_env(path, template_text):
     if os.path.exists(path):
         sys.exit(f"{path} exists: the gate writes its own .env and never overwrites one")
     init_env.write_env(path, gate_env(template_text))
+
+
+def standins_commands(env):
+    """Apply the stand-ins' List (on stdin), then wait until both are ready."""
+    return [
+        ["kubectl", "--context", CONTEXT, "apply", "--server-side", "--field-manager=gate",
+         "-f", "-"],
+        ["kubectl", "--context", CONTEXT, "-n", env["NS_STANDINS"], "rollout", "status",
+         "deployment/seaweedfs", "deployment/opa", "--timeout=5m"],
+    ]
+
+
+def check_standins_command(env, cases, image, name):
+    """The pod that runs check_standins.sh (on stdin) with Polaris's S3 credentials."""
+    creds = [{"name": var, "valueFrom": {"secretKeyRef": {"name": "polaris-s3", "key": key}}}
+             for var, key in (("AWS_ACCESS_KEY_ID", "accessKeyId"),
+                              ("AWS_SECRET_ACCESS_KEY", "secretAccessKey"))]
+    overrides = {"spec": {"containers": [{"name": name, "image": image, "env": creds,
+                                          "stdin": True, "stdinOnce": True}]}}
+    argv = ["kubectl", "--context", CONTEXT, "-n", env["NS_CATALOG_POLARIS"], "run", name,
+            f"--image={image}", "--restart=Never", "--rm", "-i", "--quiet",
+            "--pod-running-timeout=3m", "--overrides", json.dumps(overrides),
+            "--command", "--", "sh", "-s", "--", env["S3_ENDPOINT"],
+            env["POLARIS_WAREHOUSE_BUCKET"], env["S3_REGION"], env["POLARIS_OPA_URL"]]
+    for case in cases:
+        argv += [case["name"], "true" if case["allow"] else "false",
+                 json.dumps(case["input"], separators=(",", ":"))]
+    return argv
 
 
 def install_plan(previous, previous_dir, fresh, dry_run=False):
@@ -217,6 +269,24 @@ def main(argv):
             write_gate_env(os.path.join(ROOT, ".env"), f.read())
         run(["python3", os.path.join(ROOT, "scripts", "init_env.py"), "--apply-secrets"])
         return 0
+    if argv[1:] == ["standins"]:
+        env = release.load_env(ROOT, os.environ)
+        with open(os.path.join(HERE, "opa", "policy.rego"), encoding="utf-8") as f:
+            manifest = json.dumps(standins.manifests(env, pins, f.read()))
+        apply, wait = standins_commands(env)
+        print("+ " + " ".join(apply) + "  (the stand-ins' List on stdin)", flush=True)
+        subprocess.run(apply, input=manifest, text=True, check=True)
+        run(wait)
+        return 0
+    if argv[1:] == ["check-standins"]:
+        env = release.load_env(ROOT, os.environ)
+        cases = standins.load_cases(os.path.join(HERE, "opa", "cases.json"))
+        with open(os.path.join(HERE, "check_standins.sh"), encoding="utf-8") as f:
+            script = f.read()
+        command = check_standins_command(env, cases, release.images()["curl"],
+                                         f"check-standins-{os.getpid()}")
+        result = subprocess.run(command, input=script, text=True, check=False)
+        return 1 if result.returncode else 0
     if argv[1:2] == ["install"] and set(argv[2:]) <= {"--fresh", "--dry-run"} \
             and len(set(argv[2:])) == len(argv[2:]):
         with tempfile.TemporaryDirectory() as d:
