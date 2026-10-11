@@ -2,7 +2,7 @@
 byte unchanged in both directions, and writes one JSON line per exchange to stdout.
 
     python3 proxy.py [--http NAME=PORT:HOST:UPSTREAM_PORT]... [--pg NAME=PORT:HOST:UPSTREAM_PORT]...
-                     [--tls-cert FILE --tls-key FILE]
+                     [--tls-cert FILE --tls-key FILE] [--ready-file FILE]
 
 Forwarding is transparent: the bytes a client sends are the bytes the upstream receives, every
 header (`Host`, `Authorization`, `x-amz-security-token`) and every PostgreSQL message included,
@@ -13,6 +13,11 @@ never its bytes. The one exception is PostgreSQL TLS, which a recorder cannot re
 --tls-cert/--tls-key (generated in the gate job) it says yes and ends the client's TLS, and
 talks plain TCP to PostgreSQL; without them it says no. TLS on both sides would fail SCRAM
 channel binding.
+
+Every connection a listener accepts is relayed, so a readiness probe must not connect to one: a
+probe that reached the recorder before its upstream was up would leave an
+`upstream_unreachable` record. With --ready-file the recorder writes that file once every
+listener is bound, for a probe to check instead.
 
 Records never hold a credential or a stored value (Actions logs are public, ADR-002):
 
@@ -550,19 +555,28 @@ def main(argv):
     parser.add_argument("--pg", action="append", default=[])
     parser.add_argument("--tls-cert")
     parser.add_argument("--tls-key")
+    parser.add_argument("--ready-file")
     args = parser.parse_args(argv)
     server_tls = tls_context(args.tls_cert, args.tls_key) if args.tls_cert else None
-    threads = []
+    threads, bound = [], []
     for kind, specs in (("http", args.http), ("pg", args.pg)):
         for spec in specs:
             name, port, target = parse_listener(spec)
             threads.append(threading.Thread(
                 target=serve, daemon=True,
-                args=(kind, name, port, target, server_tls)))
+                kwargs={"kind": kind, "listener": name, "port": port, "target": target,
+                        "server_tls": server_tls, "ready": bound}))
             emit({"event": "listening", "proto": kind, "listener": name, "port": port,
                   "upstream": f"{target[0]}:{target[1]}", "time": now()})
     for t in threads:
         t.start()
+    if args.ready_file:
+        while len(bound) < len(threads):
+            if not all(t.is_alive() for t in threads):
+                return 1  # a listener could not bind; its thread printed why
+            time.sleep(0.05)
+        with open(args.ready_file, "w", encoding="utf-8") as f:
+            f.write("ready\n")
     for t in threads:
         t.join()
     return 0
