@@ -193,8 +193,16 @@ source does not matter for operation. What follows is the list they cover.
   [38133756150](https://github.com/enjay27/lakehouse/actions/runs/38133756150) (the image
   built and loaded; the 10 sign-in checks ok; console.json's 3 expectations and the other 32
   ok). Open: how the image reaches a target cluster (ADR-028).
-- The log batch (ADR-014) and its output format for Fluent Bit (ADR-024). A
-  stand-in Fluent Bit on the gate proves the hand-off.
+- The log batch (2026-10-11, ADR-014, ADR-024, ADR-036, ADR-037, #45). Polaris writes one
+  JSON file per pod to the `ReadWriteMany` claim `polaris-logs`, which `release.py` step 1
+  creates before Polaris; step 2 installs the batch's CronJob before the console, and its
+  failure stops the install. Its output is contract v1 (`docs/contracts/polaris-logs.md`).
+  The smoke gate's `check-logs` sends each Polaris pod requests with their own `X-Request-ID`,
+  runs the batch twice with its clock past that hour, and a stand-in Fluent Bit 5.1.2 reads
+  the output from the claim, read-only: every line holds contract v1, each request ID is read
+  once from its pod, both pods' files are read, and the second run changes nothing.
+  Open: contract v2, the audit policy, before the first release (#45); how the batch's image
+  reaches a target cluster (ADR-036).
 - **Gate:** dry-run and smoke. **Linux:** the release installed on a test cluster.
 
 ### P3: Datahub
@@ -281,5 +289,5 @@ when Kade learns the target clusters' version.
   Linux test cluster.
 - [#9](https://github.com/enjay27/lakehouse/issues/9): versions pinned above; the pooler and the
   CPU architecture are still open (Kade).
-- ADR-014: how the log volume is shared across nodes; decided before the log batch is built
-  (P2).
+- [#45](https://github.com/enjay27/lakehouse/issues/45): contract v2 of the log files, the
+  audit policy, before the first release.
