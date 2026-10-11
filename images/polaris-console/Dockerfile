@@ -5,6 +5,10 @@
 #   was released at least two weeks before the lockfile was made, and npm checks each against
 #   its sha512. No install scripts run: the only ones are esbuild's, which finds its binary
 #   through @esbuild/linux-x64 without it, and fsevents', which is macOS only.
+#   --legacy-peer-deps: npm 10.9 writes a lockfile its own `npm ci` refuses, because
+#   @hookform/resolvers' optional peer ajv ^8 meets eslint's hoisted ajv 6; without the flag
+#   `npm ci` re-resolves that peer instead of installing the lockfile. With it, `npm ci`
+#   installs exactly the lockfile's packages. The console uses only the zod resolver.
 # - the same base images, pinned by digest (registry.access.redhat.com manifest-list digest,
 #   recomputed, read 2026-10-11).
 
@@ -23,7 +27,7 @@ USER root
 WORKDIR /app
 
 COPY package.json package-lock.json ./
-RUN npm ci --ignore-scripts --no-audit --no-fund
+RUN npm ci --ignore-scripts --legacy-peer-deps --no-audit --no-fund
 
 COPY . .
 

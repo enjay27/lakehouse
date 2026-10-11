@@ -42,7 +42,7 @@ class Committed(unittest.TestCase):
         steps = re.findall(r"(?m)^(COPY|RUN)\s+(.*)$", read("Dockerfile"))
         runs = [args for kind, args in steps if kind == "RUN"]
         self.assertIn(("COPY", "package.json package-lock.json ./"), steps)
-        self.assertTrue(any(r.startswith("npm ci ") and "--ignore-scripts" in r for r in runs))
+        self.assertIn("npm ci --ignore-scripts --legacy-peer-deps --no-audit --no-fund", runs)
         self.assertFalse(any("npm install" in r or "npm i " in r for r in runs))
 
     def test_the_lockfile_pins_every_package_by_sha512_from_the_npm_registry(self):
