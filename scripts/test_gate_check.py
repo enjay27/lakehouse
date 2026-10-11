@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import gate_check as gate  # noqa: E402
 
 DRY_RUN = ".github/workflows/dry-run.yml"
+SMOKE = ".github/workflows/smoke.yml"
 
 
 def dry_run(sha, branch="gate/dry-run/task", conclusion="success", path=DRY_RUN,
@@ -18,6 +19,10 @@ def dry_run(sha, branch="gate/dry-run/task", conclusion="success", path=DRY_RUN,
     return {"id": run_id, "head_sha": sha, "head_branch": branch, "path": path,
             "conclusion": conclusion, "status": "completed", "created_at": created,
             "html_url": f"https://github.com/o/r/actions/runs/{run_id}"}
+
+
+def smoke(sha, branch="gate/smoke/task", run_id=101, **kw):
+    return dry_run(sha, branch=branch, path=SMOKE, run_id=run_id, **kw)
 
 
 class FakeGit:
@@ -34,15 +39,18 @@ class FakeGit:
 
 
 class TaskBranch(unittest.TestCase):
-    def test_claude_branch_maps_to_its_task(self):
-        self.assertEqual(gate.gate_branch("claude/p1-gate-check"), "gate/dry-run/p1-gate-check")
+    def test_claude_branch_maps_to_both_gate_branches(self):
+        self.assertEqual(gate.gate_branches("claude/p1-gate-check"),
+                         ["gate/dry-run/p1-gate-check", "gate/smoke/p1-gate-check"])
 
     def test_other_prefixes_drop_the_first_segment(self):
-        self.assertEqual(gate.gate_branch("kade/x"), "gate/dry-run/x")
-        self.assertEqual(gate.gate_branch("kade/a/b"), "gate/dry-run/a/b")
+        self.assertEqual(gate.gate_branches("kade/x"), ["gate/dry-run/x", "gate/smoke/x"])
+        self.assertEqual(gate.gate_branches("kade/a/b"),
+                         ["gate/dry-run/a/b", "gate/smoke/a/b"])
 
     def test_a_branch_without_a_slash_is_its_own_task(self):
-        self.assertEqual(gate.gate_branch("feature"), "gate/dry-run/feature")
+        self.assertEqual(gate.gate_branches("feature"),
+                         ["gate/dry-run/feature", "gate/smoke/feature"])
 
 
 class PlatformFiles(unittest.TestCase):
@@ -79,48 +87,91 @@ class Decide(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("gate/dry-run/task", "\n".join(lines))
 
-    def test_dry_run_on_the_head_passes_and_names_commit_and_run(self):
+    def test_dry_run_and_smoke_on_the_head_pass_and_name_commits_and_runs(self):
         git = FakeGit({"aaa": []})
-        ok, lines = self.decide(["charts/a/values.yaml"], [dry_run("aaa", run_id=7)], git)
+        ok, lines = self.decide(["charts/a/values.yaml"],
+                                [dry_run("aaa", run_id=7), smoke("aaa", run_id=8)], git)
         self.assertTrue(ok)
         text = "\n".join(lines)
         self.assertIn("aaa", text)
         self.assertIn("actions/runs/7", text)
+        self.assertIn("actions/runs/8", text)
 
     def test_docs_only_since_the_gated_commit_passes(self):
         git = FakeGit({"aaa": ["docs/measurements/x.md", "README.md"]})
-        ok, _ = self.decide(["charts/a/values.yaml"], [dry_run("aaa")], git)
+        ok, _ = self.decide(["charts/a/values.yaml"], [dry_run("aaa"), smoke("aaa")], git)
         self.assertTrue(ok)
 
     def test_code_since_the_gated_commit_fails(self):
         git = FakeGit({"aaa": ["README.md", "charts/a/values.yaml"]})
-        ok, lines = self.decide(["charts/a/values.yaml"], [dry_run("aaa")], git)
+        ok, lines = self.decide(["charts/a/values.yaml"], [dry_run("aaa"), smoke("aaa")], git)
         self.assertFalse(ok)
         self.assertIn("charts/a/values.yaml", "\n".join(lines))
 
     def test_any_non_markdown_file_since_counts(self):
         git = FakeGit({"aaa": ["scripts/x.py"]})
-        ok, _ = self.decide(["charts/a/values.yaml"], [dry_run("aaa")], git)
+        ok, _ = self.decide(["charts/a/values.yaml"], [dry_run("aaa"), smoke("aaa")], git)
         self.assertFalse(ok)
 
     def test_gated_commit_not_an_ancestor_fails(self):
-        ok, lines = self.decide(["charts/a/values.yaml"], [dry_run("zzz")], FakeGit({}))
+        ok, lines = self.decide(["charts/a/values.yaml"], [dry_run("zzz"), smoke("aaa")],
+                                FakeGit({"aaa": []}))
         self.assertFalse(ok)
         self.assertIn("zzz", "\n".join(lines))
 
     def test_only_the_latest_successful_run_counts(self):
         # The older run covers the head; the newer one is on a commit that is not an
-        # ancestor. ADR-019 relies on the latest, so this fails.
+        # ancestor. ADR-039 relies on the latest, so this fails.
         runs = [dry_run("aaa", created="2026-10-10T10:00:00Z", run_id=1),
-                dry_run("zzz", created="2026-10-10T11:00:00Z", run_id=2)]
+                dry_run("zzz", created="2026-10-10T11:00:00Z", run_id=2), smoke("aaa")]
         ok, _ = self.decide(["charts/a/values.yaml"], runs, FakeGit({"aaa": []}))
         self.assertFalse(ok)
 
     def test_failed_runs_other_branches_and_other_workflows_are_ignored(self):
         runs = [dry_run("bbb", conclusion="failure"),
                 dry_run("ccc", branch="gate/dry-run/other"),
-                dry_run("ddd", path=".github/workflows/smoke.yml")]
-        git = FakeGit({"bbb": [], "ccc": [], "ddd": []})
+                dry_run("ddd", path=SMOKE), smoke("aaa")]
+        git = FakeGit({"aaa": [], "bbb": [], "ccc": [], "ddd": []})
+        ok, _ = self.decide(["charts/a/values.yaml"], runs, git)
+        self.assertFalse(ok)
+
+    def test_a_dry_run_without_a_smoke_fails_and_names_the_smoke_branch(self):
+        ok, lines = self.decide(["charts/a/values.yaml"], [dry_run("aaa")],
+                                FakeGit({"aaa": []}))
+        self.assertFalse(ok)
+        self.assertIn("git push origin HEAD:refs/heads/gate/smoke/task", "\n".join(lines))
+
+    def test_a_smoke_without_a_dry_run_fails(self):
+        ok, lines = self.decide(["charts/a/values.yaml"], [smoke("aaa")], FakeGit({"aaa": []}))
+        self.assertFalse(ok)
+        self.assertIn("gate/dry-run/task", "\n".join(lines))
+
+    def test_the_two_may_cover_the_head_from_different_commits(self):
+        git = FakeGit({"aaa": ["README.md"], "bbb": []})
+        ok, lines = self.decide(["charts/a/values.yaml"], [dry_run("aaa"), smoke("bbb")], git)
+        self.assertTrue(ok)
+        text = "\n".join(lines)
+        self.assertIn("aaa", text)
+        self.assertIn("bbb", text)
+
+    def test_a_smoke_on_a_commit_that_is_not_an_ancestor_fails(self):
+        ok, lines = self.decide(["charts/a/values.yaml"], [dry_run("aaa"), smoke("zzz")],
+                                FakeGit({"aaa": []}))
+        self.assertFalse(ok)
+        self.assertIn("zzz", "\n".join(lines))
+
+    def test_code_since_the_smoke_commit_fails(self):
+        git = FakeGit({"aaa": [], "bbb": ["gates/gate.py"]})
+        ok, lines = self.decide(["charts/a/values.yaml"], [dry_run("aaa"), smoke("bbb")], git)
+        self.assertFalse(ok)
+        self.assertIn("gates/gate.py", "\n".join(lines))
+
+    def test_failed_smokes_smokes_of_other_tasks_and_dry_runs_on_the_smoke_branch_are_ignored(
+            self):
+        runs = [dry_run("aaa"), smoke("bbb", conclusion="failure"),
+                smoke("ccc", branch="gate/smoke/other"),
+                dry_run("ddd", branch="gate/smoke/task")]
+        git = FakeGit({"aaa": [], "bbb": [], "ccc": [], "ddd": []})
         ok, _ = self.decide(["charts/a/values.yaml"], runs, git)
         self.assertFalse(ok)
 
@@ -185,7 +236,7 @@ class GitHelpers(unittest.TestCase):
 
 
 class Main(unittest.TestCase):
-    def test_gate_branch_mode_prints_the_branch(self):
+    def test_gate_branch_mode_prints_both_branches(self):
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "out")
             with open(out, "w", encoding="utf-8") as f:
@@ -193,7 +244,8 @@ class Main(unittest.TestCase):
                     [sys.executable, gate.__file__, "--gate-branch", "claude/t"],
                     stdout=f, check=False).returncode
             with open(out, encoding="utf-8") as f:
-                self.assertEqual((code, f.read().strip()), (0, "gate/dry-run/t"))
+                self.assertEqual((code, f.read().split()),
+                                 (0, ["gate/dry-run/t", "gate/smoke/t"]))
 
     def test_runs_file_may_be_the_api_object_or_a_list(self):
         runs = [dry_run("aaa")]

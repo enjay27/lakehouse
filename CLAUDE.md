@@ -28,7 +28,7 @@ storage, observability, SSO and the catalog gateway are other teams' services, r
 | `scripts/repo_check.py` | No env file, key file, secret pattern or CRLF in what git tracks (ADR-002, ADR-006) |
 | `scripts/claude_md_check.py` | This file at most 100 lines; `.claude/rules/*.md` at most 80 with `paths:` |
 | `scripts/auto_merge_gate.py` | Merge, wait or stop from a head's checks, drafts and paths (ADR-022, ADR-030) |
-| `scripts/gate_check.py` | gate-check: platform files need a dry-run covering the head (ADR-039) |
+| `scripts/gate_check.py` | gate-check: platform files need a dry-run and a smoke covering the head (ADR-039) |
 | `scripts/branch_cleanup.py` | Which merged `claude/*` and stale `gate/*` branches to delete (ADR-032) |
 | `gates/` | The kind gate: pinned tools and node image, the cluster, CNPG, the stand-ins (SeaweedFS, OPA with `gates/opa/policy.rego`), the recorder that `check-traffic` reads, the PyIceberg smoke tests (`gates/iceberg/`), the console's sign-in check (`gates/console/`), `check-logs` with a stand-in Fluent Bit reading the log batch's output; on the gate only, the gate's Secrets (ADR-017, ADR-026, ADR-029, ADR-031, ADR-034, ADR-036) |
 | `charts/`, `images/` | Local charts: `polaris-postgres` (ADR-010); `polaris`, upstream's 1.6.0, and `polaris-console`, polaris-tools at a pinned commit, each unchanged with our `values-lakehouse.yaml` (ADR-009, ADR-028); `images/polaris-console` builds the console on the gate from that commit with our lockfile; `polaris-log-batch` and `images/polaris-log-batch`, the log batch's CronJob and image, its contract in `docs/contracts/` (ADR-036); tests render each chart, check its values schema, run kubeconform on CNPG's CRD (ADR-016) |
@@ -50,9 +50,9 @@ storage, observability, SSO and the catalog gateway are other teams' services, r
 
 CI runs all of these as the **static** gate on every push to `claude/**` and every PR (ADR-038).
 **gate-check** runs on every PR into `main` (ADR-039): a PR changing `charts/`, `images/`,
-`install/`, `gates/` or the gate workflows needs a passing dry-run covering its head. gate-check
-does not wait: push each new head to `gate/dry-run/<task>` and `gate/smoke/<task>` (ADR-038)
-first, then open the PR or push the head once that dry-run passed; sessions read those runs.
+`install/`, `gates/` or the gate workflows needs a passing dry-run and smoke covering its head.
+gate-check does not wait: push each new head to `gate/dry-run/<task>` and `gate/smoke/<task>`
+(ADR-038) first, then open the PR or push the head once both passed; sessions read those runs.
 
 ## Environments and clusters (ADR-004, ADR-005)
 
