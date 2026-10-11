@@ -153,8 +153,20 @@ source does not matter for operation. What follows is the list they cover.
   [38123641118](https://github.com/enjay27/lakehouse/actions/runs/38123641118) (logins as
   Polaris through the recorder with `sslmode=require` and `disable` ok, so polaris-pg accepts
   the recorder's plain TCP; 21 records, 13 HTTP and 8 PostgreSQL; all 15 expectations ok).
-- Bootstrap: the realm and root principal from Secrets (ADR-006), then a catalog on the S3
-  endpoint (SeaweedFS stand-in on the gate, ADR-031).
+- Polaris 1.6.0 (2026-10-11, ADR-009, ADR-026): `charts/polaris` is upstream's chart from
+  `apache-polaris-1.6.0`, unchanged but for trailing whitespace, without its `ci/` and
+  `tests/`; our settings are in `values-lakehouse.yaml`: 2 replicas with required
+  anti-affinity and a PodDisruptionBudget, `relational-jdbc` with `sslmode=require`, tokens
+  signed with the shared symmetric key, the OPA authorizer (Kade's choices). `release.py` step
+  1 then bootstraps the realm `POLARIS` with the admin tool (an already bootstrapped realm is
+  kept) and installs Polaris. The smoke gate's `check-polaris` compares the running objects
+  with the values and gets root a token both replicas accept; `polaris.json` holds the
+  recorder to Polaris's own exchanges. Gates on commit `1683851` (2026-10-11), both upgrading
+  from `platform-2026.10.10`: dry-run
+  [38125705407](https://github.com/enjay27/lakehouse/actions/runs/38125705407), smoke
+  [38125706002](https://github.com/enjay27/lakehouse/actions/runs/38125706002) (2 replicas on
+  2 nodes; the token accepted by both pods; 142 records; all 21 expectations ok).
+- A catalog on the S3 endpoint (SeaweedFS stand-in on the gate, ADR-031).
 - Smoke tests through the Iceberg REST API, as an ordinary principal: create a namespace and
   a table, write, read, and check that a principal without a grant is refused.
 - The console from `apache/polaris-tools`. If no image is published, it is built from a
