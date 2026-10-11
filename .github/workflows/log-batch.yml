@@ -1,9 +1,10 @@
-# The log-batch gate (ADR-040): runs on a push to gate/log-batch/<task>, the same commit as the
-# PR's head (ADR-038). A first job reads the diff against main: when the fixture spec changed
-# (gates/fixtures.py), Create Fixtures runs first and the gate uses its artifact; otherwise the
-# gate uses the latest unexpired artifact for this spec hash, and fails when there is none. The
-# gate (gates/log_batch_gate.py) refuses an artifact that differs from its manifest, runs the
-# batch built from this commit over it, ships the outputs through a stand-in Fluent Bit into an
+# The log-batch gate (ADR-040, amended by ADR-041): runs on a push to gate/log-batch/<task>, the
+# same commit as the PR's head (ADR-038). A first job computes the spec hash (gates/fixtures.py)
+# and looks up an unexpired artifact polaris-log-fixtures-<spec hash>: when there is none,
+# Create Fixtures runs first and the gate uses its artifact; otherwise the gate uses the latest
+# one. Whether the spec changed against main goes to the summary only. The gate
+# (gates/log_batch_gate.py) refuses an artifact that differs from its manifest, runs the batch
+# built from this commit over it, ships the outputs through a stand-in Fluent Bit into an
 # OpenSearch stand-in, and checks what OpenSearch holds. It runs on gate branches, not on PRs,
 # so auto-merge.yml does not list it.
 name: Log batch
@@ -25,28 +26,43 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      actions: read  # the artifacts of other runs (ADR-041)
     outputs:
-      spec_changed: ${{ steps.diff.outputs.spec_changed }}
-      spec_hash: ${{ steps.diff.outputs.spec_hash }}
+      capture: ${{ steps.lookup.outputs.capture }}
+      spec_hash: ${{ steps.lookup.outputs.spec_hash }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Did the fixture spec change against main?
-        id: diff
+      - name: An unexpired artifact for this spec hash, or Create Fixtures (ADR-041)
+        id: lookup
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           base=$(git merge-base origin/main HEAD)
-          python3 gates/fixtures.py changes "$base" | tee -a "$GITHUB_OUTPUT"
-          echo "Changed against main: $(git diff --name-only "$base" HEAD | wc -l) files" \
-            >> "$GITHUB_STEP_SUMMARY"
+          python3 gates/fixtures.py changes "$base" > "$RUNNER_TEMP/changes"
+          spec_hash=$(sed -n 's/^spec_hash=//p' "$RUNNER_TEMP/changes")
+          spec_changed=$(sed -n 's/^spec_changed=//p' "$RUNNER_TEMP/changes")
+          [ -n "$spec_hash" ] || { echo "::error::no spec hash"; exit 1; }
+          artifact="polaris-log-fixtures-$spec_hash"
+          found=$(gh api -X GET "repos/$REPO/actions/artifacts" -f name="$artifact" \
+            -F per_page=100 --jq '[.artifacts[] | select(.expired | not)] | length')
+          if [ "$found" -eq 0 ]; then capture=true; else capture=false; fi
+          { echo "spec_hash=$spec_hash"; echo "capture=$capture"; } | tee -a "$GITHUB_OUTPUT"
+          {
+            echo "Changed against main: $(git diff --name-only "$base" HEAD | wc -l) files;" \
+              "the fixture spec changed: $spec_changed."
+            echo "Unexpired $artifact: $found; Create Fixtures runs: $capture."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   fixtures:
     name: create fixtures
     needs: changes
-    if: needs.changes.outputs.spec_changed == 'true'
+    if: needs.changes.outputs.capture == 'true'
     permissions:
       contents: read
     uses: ./.github/workflows/create-fixtures.yml
