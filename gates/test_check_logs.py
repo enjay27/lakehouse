@@ -3,12 +3,15 @@ logs_traffic.sh run here with this machine's curl against local fakes of Polaris
 Run: python3 -m unittest discover -s gates"""
 
 import datetime as dt
+import http.server
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+import urllib.parse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -16,28 +19,62 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(ROOT, "images", "polaris-log-batch"))
 import gate  # noqa: E402
 import polaris_log_batch  # noqa: E402
-from test_check_polaris import CREDS, TOKEN, fake_polaris  # noqa: E402
+from test_check_polaris import CREDS, TOKEN  # noqa: E402
 
 ENV = {"NS_CATALOG_POLARIS": "catalog-polaris"}
 PODS = ["polaris-6d9f-aaaaa", "polaris-6d9f-bbbbb"]
 PREFIX = "gate-logs-42"
 NOW = "2026-10-11T13:01:01Z"
+ACCESS = "io.quarkus.http.access-log"
+ADMIN = "org.apache.polaris.service.admin.PolarisServiceImpl"
+MAPPER = "org.apache.polaris.service.exception.IcebergExceptionMapper"
+COMMIT = "org.apache.polaris.service.catalog.iceberg.LocalIcebergCatalog"
 
 
-def polaris_line(pod, second, request_id=None, kind="read"):
-    """One access line as Polaris 1.6.0 writes it (docs/contracts/polaris-logs.md): root
-    listing the catalogs, or (`denied`) a request without a token."""
-    who, status = ("root", "200 15") if kind == "read" else ("-", "401 -")
+def polaris_record(pod, second, request_id, logger, message):
+    """One line as Polaris 1.6.0 writes it (docs/contracts/polaris-logs.md)."""
     return json.dumps({
         "timestamp": f"2026-10-11T12:40:{second:02d}.753600155Z", "sequence": second,
-        "loggerClassName": "org.jboss.logging.Logger",
-        "loggerName": "io.quarkus.http.access-log", "level": "INFO",
-        "message": f"10.0.0.9 - {who} [11/Oct/2026:12:40:47 +0000] "
-                   f"\"GET /api/management/v1/catalogs HTTP/1.1\" {status}",
-        "threadName": "executor-thread-2", "threadId": 31,
+        "loggerClassName": "org.jboss.logging.Logger", "loggerName": logger, "level": "INFO",
+        "message": message, "threadName": "executor-thread-2", "threadId": 31,
         "mdc": {"requestId": request_id or f"generated-{pod}-{second}", "realmId": "POLARIS"},
         "ndc": "", "hostName": pod, "processName": "/usr/lib/jvm/java-21/bin/java",
         "processId": 1}) + "\n"
+
+
+def access_message(who, request, status):
+    return f"10.0.0.9 - {who} [11/Oct/2026:12:40:47 +0000] \"{request} HTTP/1.1\" {status}"
+
+
+def polaris_line(pod, second, request_id=None, kind="read"):
+    """One access line: root listing the catalogs, or (`denied`) a request without a token."""
+    who, status = ("root", "200 15") if kind == "read" else ("-", "401 -")
+    return polaris_record(pod, second, request_id, ACCESS,
+                          access_message(who, "GET /api/management/v1/catalogs", status))
+
+
+# The lines Polaris 1.6.0 wrote for each of check-logs' other requests, measured on 2026-10-11:
+# its application lines, then its access line.
+SPACE = f"/api/catalog/v1/{gate.LOGS_CATALOG}/namespaces/{gate.LOGS_NAMESPACE}"
+POLICY_LINES = {
+    "catalog": [(ADMIN, "Created new catalog class PolarisCatalog {\n    class Catalog {"),
+                (ACCESS, access_message("root", "POST /api/management/v1/catalogs", "201 261"))],
+    "invalid": [(MAPPER, "Handling runtimeException Invalid schema: null"),
+                (ACCESS, access_message("root", f"POST {SPACE}/tables", "400 89"))],
+    "missing": [(MAPPER, "Handling runtimeException Table does not exist: logs.absent"),
+                (ACCESS, access_message("root", f"GET {SPACE}/tables/absent", "404 98"))],
+    "commit": [(COMMIT, "Successfully committed to table {catalog}.logs.{table} in 311 ms"),
+               (ACCESS, access_message("root", f"POST {SPACE}/tables", "200 836"))],
+}
+
+
+def polaris_lines(pod, second, request_id, kind):
+    """Every line Polaris writes for one of check-logs' requests, from `second` on."""
+    if kind in ("read", "denied"):
+        return [polaris_line(pod, second, request_id, kind)]
+    return [polaris_record(pod, second + i, request_id, logger, message.replace(
+        "{catalog}", gate.LOGS_CATALOG).replace("{table}", gate.logs_table(request_id)))
+        for i, (logger, message) in enumerate(POLICY_LINES[kind])]
 
 
 def batch_outputs(log_dir, lines_by_pod, now=NOW):
@@ -79,8 +116,11 @@ class Fixture:
         self.sent = sent or gate.logs_request_ids(PREFIX, 2, PODS)
         self.dir = tempfile.TemporaryDirectory()
         lines = {pod: [polaris_line(pod, 1)] for pod in PODS}
-        for n, (rid, (pod, kind)) in enumerate(sorted(self.sent.items()), 2):
-            lines[pod].append(polaris_line(pod, n, rid, kind))
+        second = 2
+        for rid, (pod, kind) in sorted(self.sent.items()):
+            written = polaris_lines(pod or PODS[0], second, rid, kind)
+            lines[pod or PODS[0]] += written
+            second += len(written)
         self.events = [batch_outputs(self.dir.name, lines)]
         self.before = listing(self.dir.name)
         out = subprocess.run([sys.executable, os.path.join(
@@ -118,16 +158,26 @@ class BatchImage(unittest.TestCase):
 
 
 class Traffic(unittest.TestCase):
-    def test_each_pod_gets_requests_the_policy_counts_and_requests_it_keeps(self):
+    def test_each_pod_gets_requests_for_each_rule_and_the_catalog_is_made_once(self):
         sent = gate.logs_request_ids(PREFIX, 3, PODS)
-        self.assertEqual(len(sent), 12)
-        self.assertEqual(sorted(set(sent.values())),
-                         [(pod, kind) for pod in PODS for kind in ("denied", "read")])
+        self.assertEqual(len(sent), 2 * (3 * 2 + 3) + 1)
+        self.assertEqual(sent[f"{PREFIX}-setup-catalog"], (None, "catalog"))
+        for pod in PODS:
+            kinds = sorted(kind for p, kind in sent.values() if p == pod)
+            self.assertEqual(kinds, ["commit"] + ["denied"] * 3 + ["invalid", "missing"]
+                             + ["read"] * 3)
         for rid, (pod, kind) in sent.items():
-            self.assertTrue(rid.startswith(f"{PREFIX}-{pod}-{kind}-"), rid)
+            if pod:
+                self.assertTrue(rid.startswith(f"{PREFIX}-{pod}-{kind}-"), rid)
+
+    def test_a_commits_table_is_named_for_its_request(self):
+        self.assertEqual(gate.logs_table(f"{PREFIX}-{PODS[0]}-commit-1"),
+                         "gate_logs_42_polaris_6d9f_aaaaa_commit_1")
 
     def test_the_traffic_pod_gets_roots_credentials_and_asks_each_pod_by_its_address(self):
-        argv = gate.logs_traffic_command(ENV, "curl:1@sha256:" + "e" * 64, "logs-traffic",
+        env = {**ENV, "S3_ENDPOINT": "http://s3.test:8333", "S3_REGION": "us-east-1",
+               "POLARIS_WAREHOUSE_BUCKET": "warehouse"}
+        argv = gate.logs_traffic_command(env, "curl:1@sha256:" + "e" * 64, "logs-traffic",
                                          PREFIX, 3, [(PODS[0], "http://10.0.0.1:8181"),
                                                      (PODS[1], "http://10.0.0.2:8181")])
         self.assertEqual(argv[:7], ["kubectl", "--context", gate.CONTEXT, "-n",
@@ -140,12 +190,83 @@ class Traffic(unittest.TestCase):
                                                       "key": "clientSecret"}})
         self.assertEqual(argv[argv.index("--") + 1:],
                          ["sh", "-s", "--", "http://polaris:8181", "POLARIS", "3", PREFIX,
+                          "gate_logs", "http://s3.test:8333", "us-east-1", "warehouse",
                           PODS[0], "http://10.0.0.1:8181", PODS[1], "http://10.0.0.2:8181"])
+
+
+def fake_catalog(signing_key=TOKEN, fail=None, catalogs=None):
+    """A Polaris replica for logs_traffic.sh: a token for root's client credentials, the
+    catalogs listed with that token (401 without), and one catalog's API as Polaris 1.6.0
+    answers it. `catalogs` is shared between replicas, as their database is; `fail` names a
+    request kind to answer 500."""
+    state = catalogs if catalogs is not None else {}
+    seen = []
+
+    class Replica(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def reply(self, code, body=None):
+            data = json.dumps(body).encode() if body is not None else b""
+            self.send_response(code)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def handle_one(self, method):
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length).decode() if length else ""
+            seen.append((method, self.path, dict(self.headers), body))
+            if self.path == "/api/catalog/v1/oauth/tokens":
+                form = urllib.parse.parse_qs(body)
+                if form.get("client_secret") == [CREDS["ROOT_CLIENT_SECRET"]]:
+                    return self.reply(200, {"access_token": signing_key})
+                return self.reply(401)
+            if self.headers.get("Authorization") != f"Bearer {signing_key}":
+                return self.reply(401)
+            kind = self.headers.get("X-Request-ID", "").split("-")[-2]
+            if kind == fail:
+                return self.reply(500)
+            space = f"/api/catalog/v1/{gate.LOGS_CATALOG}/namespaces"
+            if (method, self.path) == ("GET", "/api/management/v1/catalogs"):
+                return self.reply(200, {"catalogs": []})
+            if (method, self.path) == ("POST", "/api/management/v1/catalogs"):
+                name = json.loads(body)["catalog"]["name"]
+                if name in state:
+                    return self.reply(409)
+                state[name] = set()
+                return self.reply(201)
+            if (method, self.path) == ("POST", space):
+                ns = json.loads(body)["namespace"][0]
+                if ns in state[gate.LOGS_CATALOG]:
+                    return self.reply(409)
+                state[gate.LOGS_CATALOG].add(ns)
+                return self.reply(200)
+            if (method, self.path) == ("GET", f"{space}/{gate.LOGS_NAMESPACE}/tables/absent"):
+                return self.reply(404)
+            if (method, self.path) == ("POST", f"{space}/{gate.LOGS_NAMESPACE}/tables"):
+                if "schema" not in json.loads(body):
+                    return self.reply(400)
+                return self.reply(200, {"metadata-location": "s3://x"})
+            self.reply(404)
+
+        def do_GET(self):
+            self.handle_one("GET")
+
+        def do_POST(self):
+            self.handle_one("POST")
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Replica)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, seen
 
 
 class TrafficScript(unittest.TestCase):
     def setUp(self):
         self.servers = []
+        self.catalogs = {}
 
     def tearDown(self):
         for server in self.servers:
@@ -153,15 +274,16 @@ class TrafficScript(unittest.TestCase):
             server.server_close()
 
     def replica(self, **kwargs):
-        server, seen = fake_polaris(**kwargs)
+        server, seen = fake_catalog(catalogs=self.catalogs, **kwargs)
         self.servers.append(server)
         return f"http://127.0.0.1:{server.server_port}", seen
 
-    def run_script(self, api, pods):
+    def run_script(self, api, pods, prefix=PREFIX):
         with open(os.path.join(HERE, "logs_traffic.sh"), encoding="utf-8") as f:
             text = f.read()
         args = [a for name, url in pods for a in (name, url)]
-        return subprocess.run(["sh", "-s", "--", api, "POLARIS", "2", PREFIX, *args],
+        return subprocess.run(["sh", "-s", "--", api, "POLARIS", "2", prefix, gate.LOGS_CATALOG,
+                               "http://s3.test:8333", "us-east-1", "warehouse", *args],
                               input=text, capture_output=True, text=True,
                               env={**os.environ, **CREDS}, timeout=60)
 
@@ -170,14 +292,64 @@ class TrafficScript(unittest.TestCase):
         done = self.run_script(a, [(PODS[0], a), (PODS[1], b)])
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         for pod, seen in ((PODS[0], seen_a), (PODS[1], seen_b)):
-            asked = [(h.get("X-Request-ID"), h.get("Authorization")) for method, path, h in seen
-                     if path == "/api/management/v1/catalogs"]
+            asked = [(h.get("X-Request-ID"), h.get("Authorization"))
+                     for method, path, h, _ in seen
+                     if (method, path) == ("GET", "/api/management/v1/catalogs")]
             self.assertEqual(asked, [(f"{PREFIX}-{pod}-read-1", f"Bearer {TOKEN}"),
                                      (f"{PREFIX}-{pod}-denied-1", None),
                                      (f"{PREFIX}-{pod}-read-2", f"Bearer {TOKEN}"),
                                      (f"{PREFIX}-{pod}-denied-2", None)])
         self.assertNotIn(CREDS["ROOT_CLIENT_SECRET"], done.stdout + done.stderr)
         self.assertNotIn(TOKEN, done.stdout + done.stderr)
+
+    def test_the_catalog_is_made_on_s3_then_each_pod_gets_a_400_a_404_and_a_commit(self):
+        (a, seen_a), (b, seen_b) = self.replica(), self.replica()
+        done = self.run_script(a, [(PODS[0], a), (PODS[1], b)])
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        made = [(h["X-Request-ID"], json.loads(body)) for method, path, h, body in seen_a
+                if (method, path) == ("POST", "/api/management/v1/catalogs")]
+        self.assertEqual(made, [(f"{PREFIX}-setup-catalog", {"catalog": {
+            "type": "INTERNAL", "name": "gate_logs",
+            "properties": {"default-base-location": "s3://warehouse/gate_logs"},
+            "storageConfigInfo": {"storageType": "S3",
+                                  "allowedLocations": ["s3://warehouse/gate_logs"],
+                                  "endpoint": "http://s3.test:8333", "region": "us-east-1",
+                                  "pathStyleAccess": True, "stsUnavailable": True}}})])
+        space = "/api/catalog/v1/gate_logs/namespaces"
+        for pod, seen in ((PODS[0], seen_a), (PODS[1], seen_b)):
+            policy = [(method, path, h, body) for method, path, h, body in seen
+                      if any(h.get("X-Request-ID") == f"{PREFIX}-{pod}-{kind}-1"
+                             for kind in gate.LOGS_POLICY_KINDS)]
+            asked = [(h["X-Request-ID"], method, path, body and json.loads(body))
+                     for method, path, h, body in policy]
+            rid = f"{PREFIX}-{pod}-commit-1"
+            self.assertEqual(asked, [
+                (f"{PREFIX}-{pod}-invalid-1", "POST", f"{space}/logs/tables",
+                 {"name": gate.logs_table(f"{PREFIX}-{pod}-invalid-1")}),
+                (f"{PREFIX}-{pod}-missing-1", "GET", f"{space}/logs/tables/absent", ""),
+                (rid, "POST", f"{space}/logs/tables", {"name": gate.logs_table(rid), "schema": {
+                    "type": "struct", "schema-id": 0, "fields": [
+                        {"id": 1, "name": "id", "required": False, "type": "long"}]}})])
+            self.assertTrue(all(h.get("Authorization") == f"Bearer {TOKEN}"
+                                for _, _, h, _ in policy))
+        for kind, code in (("invalid", 400), ("missing", 404), ("commit", 200)):
+            self.assertIn(f"ok   {PREFIX}-{PODS[1]}-{kind}-1: {PODS[1]} answered HTTP {code}",
+                          done.stdout)
+
+    def test_a_catalog_already_there_is_kept(self):
+        a, _ = self.replica()
+        self.assertEqual(self.run_script(a, [(PODS[0], a)]).returncode, 0)
+        done = self.run_script(a, [(PODS[0], a)], prefix="gate-logs-43")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("gate-logs-43-setup-catalog: answered HTTP 409", done.stdout)
+
+    def test_a_commit_that_fails_fails_the_script(self):
+        (a, _), (b, _) = self.replica(), self.replica(fail="commit")
+        done = self.run_script(a, [(PODS[0], a), (PODS[1], b)])
+        self.assertEqual(done.returncode, 1)
+        self.assertIn(f"FAIL {PREFIX}-{PODS[1]}-commit-1: {PODS[1]} answered HTTP 500, "
+                      "expected 200", done.stdout)
+        self.assertIn(f"ok   {PREFIX}-{PODS[0]}-commit-1", done.stdout)
 
     def test_a_pod_that_refuses_fails_the_script(self):
         (a, _), (b, _) = self.replica(), self.replica(signing_key="other-key")
@@ -314,6 +486,9 @@ class Problems(unittest.TestCase):
         text = "\n".join(notes)
         self.assertIn("4 kept request IDs", text)
         self.assertIn("4 counted", text)
+        self.assertIn("2 404s dropped with their application lines", text)
+        self.assertIn("2 400s kept with theirs", text)
+        self.assertIn("2 commits on their tables' rows", text)
         for pod in PODS:
             self.assertIn(pod, text)
         self.assertIn("contract v2", text)
@@ -388,6 +563,50 @@ class Problems(unittest.TestCase):
         skipped = [{"event": "skipped", "reason": "another run holds the lock"}]
         problems, _ = self.f.problems(events=[skipped, self.f.events[1]])
         self.assertIn("another run holds the lock", "\n".join(problems))
+
+    def rid(self, kind, pod=PODS[1]):
+        return f"{PREFIX}-{pod}-{kind}-1"
+
+    def test_a_404_or_its_application_line_kept_fails(self):
+        rid = self.rid("missing")
+        [doc] = [r for r in self.f.records if r.get("mdc", {}).get("requestId")
+                 == self.rid("invalid") and r.get("http_status") == 400]
+        for logger in (ACCESS, MAPPER):
+            leaked = dict(doc, loggerName=logger, mdc={"requestId": rid, "realmId": "POLARIS"})
+            problems, _ = self.f.problems(records=self.f.records + [leaked])
+            self.assertIn(rid, "\n".join(problems))
+
+    def test_404s_the_summaries_do_not_count_fail(self):
+        for field in ("counted_404", "app_dropped_404"):
+            records = [dict(r, **{field: 0}) if r.get("report_type") == "summary" else r
+                       for r in self.f.records]
+            problems, _ = self.f.problems(records=records)
+            self.assertIn(field, "\n".join(problems))
+
+    def test_a_400_without_its_kept_application_line_fails(self):
+        rid = self.rid("invalid")
+        records = [r for r in self.f.records if not (
+            r.get("mdc", {}).get("requestId") == rid and r.get("loggerName") == MAPPER)]
+        problems, _ = self.f.problems(records=records)
+        self.assertIn(rid, "\n".join(problems))
+
+    def test_a_commit_its_tables_row_does_not_count_fails(self):
+        rid = self.rid("commit")
+        table = f"{SPACE}/tables/{gate.logs_table(rid)}"
+        records = [dict(r, commit_count=0) if r.get("resource") == table else r
+                   for r in self.f.records]
+        problems, _ = self.f.problems(records=records)
+        self.assertIn(table, "\n".join(problems))
+        records = [r for r in self.f.records if r.get("resource") != table]
+        problems, _ = self.f.problems(records=records)
+        self.assertIn(table, "\n".join(problems))
+
+    def test_the_catalog_made_without_its_kept_application_line_fails(self):
+        rid = f"{PREFIX}-setup-catalog"
+        records = [r for r in self.f.records if not (
+            r.get("mdc", {}).get("requestId") == rid and r.get("loggerName") == ADMIN)]
+        problems, _ = self.f.problems(records=records)
+        self.assertIn(rid, "\n".join(problems))
 
     def test_an_hour_without_its_summary_fails(self):
         after = {k: v for k, v in self.f.after.items() if not k.startswith("aggregated-logs/")}
