@@ -16,7 +16,12 @@
       the realm and its root principal from the `polaris-root` Secret. A realm already
       bootstrapped is kept.
    d. Polaris 1.6.0 from charts/polaris (ADR-009), with values-lakehouse.yaml and the values
-      from `.env` (the database host, the policy endpoint), waited on until rolled out.
+      from `.env` (the database host, the policy endpoint, and the console's origin, allowed
+      by CORS only while the console is enabled), waited on until rolled out.
+2. The console, when `POLARIS_CONSOLE_ENABLED=true` (ADR-028): charts/polaris-console with its
+   values-lakehouse.yaml and the URL at which the browser reaches Polaris, waited on until
+   rolled out. A maintainer tool, never part of how Polaris operates: its problems are printed
+   and the install still passes. The log batch joins this step later (ADR-029).
 
 With --dry-run, the helm upgrades are server-side dry-runs, the bootstrap does not run and
 nothing waits: the dry-run gate (ADR-018).
@@ -68,6 +73,10 @@ ALREADY_BOOTSTRAPPED = "It appears this metastore manager has already been boots
 BOOTSTRAP_TAIL = 20
 POLARIS_CHART = os.path.join(ROOT, "charts", "polaris")
 POLARIS_VALUES = os.path.join(POLARIS_CHART, "values-lakehouse.yaml")
+CONSOLE = "polaris-console"
+CONSOLE_CHART = os.path.join(ROOT, "charts", "polaris-console")
+CONSOLE_VALUES = os.path.join(CONSOLE_CHART, "values-lakehouse.yaml")
+CONSOLE_TIMEOUT = "300s"
 READY_TIMEOUT = "900s"
 # The endpoint check's pod reads this script on stdin (`sh -s`), so it starts only once kubectl
 # is attached and no output is lost. Each URL in its arguments gets one request; any HTTP
@@ -183,10 +192,26 @@ def jdbc_url(env):
     return f"jdbc:postgresql://{host}:5432/{POLARIS_DATABASE}?sslmode=require"
 
 
+def console_enabled(env):
+    return env.get("POLARIS_CONSOLE_ENABLED", "") == "true"
+
+
 def polaris_values(env):
-    """The chart values that come from `.env`, on top of charts/polaris/values-lakehouse.yaml."""
-    return {"advancedConfig": {"quarkus.datasource.jdbc.url": jdbc_url(env),
-                               "polaris.authorization.opa.policy-uri": env["POLARIS_OPA_URL"]}}
+    """The chart values that come from `.env`, on top of charts/polaris/values-lakehouse.yaml.
+    Polaris allows the console's origin only while the console is enabled (ADR-028)."""
+    values = {"advancedConfig": {"quarkus.datasource.jdbc.url": jdbc_url(env),
+                                 "polaris.authorization.opa.policy-uri": env["POLARIS_OPA_URL"]}}
+    if console_enabled(env) and env.get("POLARIS_CONSOLE_ORIGIN"):
+        values["cors"] = {"enabled": True, "allowedOrigins": [env["POLARIS_CONSOLE_ORIGIN"]]}
+    return values
+
+
+def console_values(env):
+    """The console's values from `.env`: where the browser reaches Polaris and its realm."""
+    api = env["POLARIS_CONSOLE_API_URL"].rstrip("/")
+    return {"config": {"api": {"polarisApiUrl": api,
+                               "oauthTokenUrl": f"{api}/api/catalog/v1/oauth/tokens",
+                               "polarisRealm": POLARIS_REALM}}}
 
 
 def endpoints_answer(env, run, image=None, name=None):
@@ -296,8 +321,42 @@ def polaris(env, run, dry_run=False):
     return [], [f"Step 1: deployment/{POLARIS} in {namespace} rolled out."]
 
 
+def console(env, run, dry_run=False):
+    """Step 2: the console, when enabled (ADR-028). Returns (problems, notes); no call is made
+    while it is off or its settings are incomplete."""
+    enabled = env.get("POLARIS_CONSOLE_ENABLED", "")
+    if enabled not in ("true", "false", ""):
+        return [f"POLARIS_CONSOLE_ENABLED is {enabled!r}: set true or false in .env"], []
+    if not console_enabled(env):
+        return [], ["Step 2: the console is not enabled (ADR-028)."]
+    empty = [f"{var} is empty: the console needs it (ADR-028)"
+             for var in ("POLARIS_CONSOLE_ORIGIN", "POLARIS_CONSOLE_API_URL") if not env.get(var)]
+    if empty:
+        return empty, []
+    namespace, context = env["NS_CATALOG_POLARIS"], env["KUBE_CONTEXT"]
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+        json.dump(console_values(env), f)
+    try:
+        helm = ["helm", "--kube-context", context, "-n", namespace, "upgrade", "--install",
+                CONSOLE, CONSOLE_CHART, "-f", CONSOLE_VALUES, "-f", f.name]
+        code, out = run(helm + (["--dry-run=server"] if dry_run else []))
+    finally:
+        os.unlink(f.name)
+    if code != 0:
+        return [f"helm upgrade {CONSOLE} in {namespace} failed: {out.strip()}"], []
+    if dry_run:
+        return [], [f"Step 2: the console in {namespace}, server-side dry-run passed."]
+    code, out = run(["kubectl", "--context", context, "-n", namespace, "rollout", "status",
+                     f"deployment/{CONSOLE}", f"--timeout={CONSOLE_TIMEOUT}"])
+    if code != 0:
+        return [f"deployment/{CONSOLE} in {namespace} did not finish its rollout: "
+                f"{out.strip()}"], []
+    return [], [f"Step 2: deployment/{CONSOLE} in {namespace} rolled out."]
+
+
 def install(env, run, supported, dry_run):
-    """Every step in order; the first step with problems stops the rest."""
+    """Every step in order; the first step with problems stops the rest. The console's
+    problems are notes: it never fails a release (ADR-028)."""
     notes = []
     for step in (lambda: check_preconditions(env, run, supported),
                  lambda: polaris_postgres(env, run, dry_run),
@@ -308,6 +367,8 @@ def install(env, run, supported, dry_run):
         notes += more
         if problems:
             return problems, notes
+    problems, more = console(env, run, dry_run)
+    notes += more + [f"Step 2: the console (ADR-028, not blocking): {p}" for p in problems]
     return [], notes
 
 

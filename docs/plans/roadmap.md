@@ -180,8 +180,19 @@ source does not matter for operation. What follows is the list they cover.
   [38131673029](https://github.com/enjay27/lakehouse/actions/runs/38131673029), smoke
   [38131673239](https://github.com/enjay27/lakehouse/actions/runs/38131673239) (3 rows
   written and read back; the 3 refusals each a 403; 334 records; all 32 expectations ok).
-- The console from `apache/polaris-tools`. If no image is published, it is built from a
-  pinned commit in the job (ADR-017).
+- The console from `apache/polaris-tools` (2026-10-11, ADR-028): no image is published, so
+  the smoke gate builds it from commit 3edb60f (`images/polaris-console`) with our lockfile
+  (Kade's choice: npm packages released at least two weeks before, each checked by sha512;
+  the UBI base images pinned by digest) and loads it into kind. `charts/polaris-console` is
+  upstream's chart at that commit with our values. It is off by default
+  (`POLARIS_CONSOLE_ENABLED`); when enabled, `release.py` installs it after Polaris (step 2,
+  never blocking), and Polaris allows its origin (CORS) only then. `gate.py check-console`
+  signs gate_maintainer in as the browser does (Kade's choice: over HTTP); the gate's policy
+  lets it read only. Passed on 79814d6: dry-run
+  [38133756210](https://github.com/enjay27/lakehouse/actions/runs/38133756210), smoke
+  [38133756150](https://github.com/enjay27/lakehouse/actions/runs/38133756150) (the image
+  built and loaded; the 10 sign-in checks ok; console.json's 3 expectations and the other 32
+  ok). Open: how the image reaches a target cluster (ADR-028).
 - The log batch (ADR-014) and its output format for Fluent Bit (ADR-024). A
   stand-in Fluent Bit on the gate proves the hand-off.
 - **Gate:** dry-run and smoke. **Linux:** the release installed on a test cluster.

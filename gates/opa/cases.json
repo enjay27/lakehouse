@@ -379,6 +379,169 @@
           "request_id": "00000000-0000-0000-0000-000000000000"
         }
       }
+    },
+    {
+      "name": "gate_maintainer lists catalogs",
+      "allow": true,
+      "input": {
+        "actor": {
+          "principal": "gate_maintainer",
+          "roles": []
+        },
+        "action": "LIST_CATALOGS",
+        "resource": {
+          "targets": [
+            {
+              "type": "ROOT",
+              "name": "root_container",
+              "parents": []
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "gate_maintainer loads a table in gate_catalog",
+      "allow": true,
+      "input": {
+        "actor": {
+          "principal": "gate_maintainer",
+          "roles": []
+        },
+        "action": "LOAD_TABLE",
+        "resource": {
+          "targets": [
+            {
+              "type": "TABLE_LIKE",
+              "name": "t1",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                },
+                {
+                  "type": "CATALOG",
+                  "name": "gate_catalog",
+                  "parents": []
+                },
+                {
+                  "type": "NAMESPACE",
+                  "name": "ns1",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "gate_maintainer creates a catalog",
+      "allow": false,
+      "input": {
+        "actor": {
+          "principal": "gate_maintainer",
+          "roles": []
+        },
+        "action": "CREATE_CATALOG",
+        "resource": {
+          "targets": [
+            {
+              "type": "ROOT",
+              "name": "root_container",
+              "parents": []
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "gate_maintainer drops a table in gate_catalog",
+      "allow": false,
+      "input": {
+        "actor": {
+          "principal": "gate_maintainer",
+          "roles": []
+        },
+        "action": "DROP_TABLE_WITHOUT_PURGE",
+        "resource": {
+          "targets": [
+            {
+              "type": "TABLE_LIKE",
+              "name": "t1",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                },
+                {
+                  "type": "CATALOG",
+                  "name": "gate_catalog",
+                  "parents": []
+                },
+                {
+                  "type": "NAMESPACE",
+                  "name": "ns1",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "gate_maintainer loads a table asking for vended credentials",
+      "allow": false,
+      "input": {
+        "actor": {
+          "principal": "gate_maintainer",
+          "roles": []
+        },
+        "action": "LOAD_TABLE_WITH_READ_DELEGATION",
+        "resource": {
+          "targets": [
+            {
+              "type": "TABLE_LIKE",
+              "name": "t1",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                },
+                {
+                  "type": "CATALOG",
+                  "name": "gate_catalog",
+                  "parents": []
+                },
+                {
+                  "type": "NAMESPACE",
+                  "name": "ns1",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
     }
   ]
 }

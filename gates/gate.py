@@ -41,6 +41,14 @@
                   replicas run on different nodes (ADR-016), then runs gates/check_polaris.sh
                   in a short-lived curl pod: ready, a token for root, and each pod accepting
                   it (ADR-026).
+  console-image   builds the Polaris console's image (ADR-028): apache/polaris-tools fetched at
+                  the commit in images/polaris-console/source.json and checked, its console/ as
+                  the context with this repository's package-lock.json, built with
+                  images/polaris-console/Dockerfile, then loaded into the kind cluster.
+  check-console   runs gates/console/check.py (on stdin) in a short-lived pod on the pinned
+                  Python image: the console answers and points the browser at Polaris, and
+                  gate_maintainer signs in as the browser does, from the console's origin,
+                  lists the catalogs and is refused a write (ADR-028, ADR-026).
   check-iceberg   runs gates/iceberg/smoke.py in a short-lived pod on the pinned Python image,
                   mounted with its hashed requirements from the ConfigMap iceberg-smoke: PyIceberg
                   as gate_smoke, with the smoke tests' own S3 key (Secret smoke-s3), writes a
@@ -50,13 +58,14 @@
 Every kubectl and helm call names the gate's context, and a namespace where the object has
 one. Nothing here reaches any cluster but the kind cluster it creates (ADR-017).
 
-Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | check-polaris-pg | check-polaris | check-iceberg
+Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | check-polaris-pg | check-polaris | console-image | check-console | check-iceberg
 """
 
 import hashlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -94,6 +103,10 @@ POLARIS_POD_LABELS = "app.kubernetes.io/name=polaris,app.kubernetes.io/instance=
 POLARIS_API_PORT, POLARIS_MGMT_PORT = 8181, 8182
 # The catalog the smoke tests create and the gate's policy names (gates/opa/policy.rego).
 ICEBERG_CATALOG = "gate_catalog"
+# The Polaris console's image, built here from a pinned polaris-tools commit (ADR-028).
+CONSOLE_IMAGE_DIR = os.path.join(ROOT, "images", "polaris-console")
+CONSOLE_IMAGE_REPOSITORY = "lakehouse/polaris-console"
+CONSOLE_PORT = 8080
 
 
 def load_pins(path=os.path.join(HERE, "pins.json")):
@@ -157,11 +170,23 @@ def standin_endpoints(ns):
     }
 
 
+def console_settings(ns):
+    """The `.env` values for the gate's console, in Polaris's namespace `ns`: enabled, opened
+    at its Service, and reaching Polaris at its Service (ADR-028)."""
+    return {
+        "POLARIS_CONSOLE_ENABLED": "true",
+        "POLARIS_CONSOLE_ORIGIN": f"http://{release.CONSOLE}.{ns}.svc.cluster.local:{CONSOLE_PORT}",
+        "POLARIS_CONSOLE_API_URL": f"http://{release.POLARIS}.{ns}.svc.cluster.local:"
+                                   f"{POLARIS_API_PORT}",
+    }
+
+
 def gate_env(template_text, gen=init_env.generate):
-    """`.env` for the gate: its context, the stand-ins' endpoints and the S3 stand-in's
-    credentials; init_env fills the rest."""
-    fixed = {"KUBE_CONTEXT": CONTEXT,
-             **standin_endpoints(init_env.parse(template_text)["NS_STANDINS"])}
+    """`.env` for the gate: its context, the stand-ins' endpoints, the S3 stand-in's
+    credentials and the console's settings; init_env fills the rest."""
+    template = init_env.parse(template_text)
+    fixed = {"KUBE_CONTEXT": CONTEXT, **standin_endpoints(template["NS_STANDINS"]),
+             **console_settings(template["NS_CATALOG_POLARIS"])}
     lines = []
     for line in template_text.splitlines():
         name = line.split("=", 1)[0]
@@ -458,6 +483,58 @@ def check_iceberg_commands(env, image, name):
     ]
 
 
+def console_source(path=os.path.join(CONSOLE_IMAGE_DIR, "source.json")):
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def console_image(source):
+    """The console image's name: built here, never pulled, tagged with its commit."""
+    return f"{CONSOLE_IMAGE_REPOSITORY}:{source['commit'][:12]}"
+
+
+def console_image_commands(source, context_dir):
+    """Fetch the pinned commit into `context_dir`, build its console/ with our Dockerfile, load
+    the image into kind. Our lockfile is copied in, and the commit checked, between the third
+    and the fourth command."""
+    return [
+        ["git", "init", "--quiet", context_dir],
+        ["git", "-C", context_dir, "fetch", "--quiet", "--depth", "1", source["repository"],
+         source["commit"]],
+        ["git", "-C", context_dir, "-c", "advice.detachedHead=false", "checkout", "--quiet",
+         "FETCH_HEAD"],
+        ["docker", "build", "--file", os.path.join(CONSOLE_IMAGE_DIR, "Dockerfile"),
+         "--tag", console_image(source), os.path.join(context_dir, source["path"])],
+        ["kind", "load", "docker-image", console_image(source), "--name", CLUSTER],
+    ]
+
+
+def check_commit(repo, commit):
+    """Raises unless `repo` has exactly `commit` checked out."""
+    head = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    if head != commit:
+        raise ValueError(f"{repo}: {head or 'nothing'} checked out, pinned {commit}")
+
+
+def check_console_command(env, image, name):
+    """The pod that runs console/check.py (on stdin) with root's credentials, against the
+    console's origin and the URL its browser reaches Polaris at."""
+    if not release.console_enabled(env):
+        sys.exit("the console is not enabled in .env (POLARIS_CONSOLE_ENABLED): nothing to check")
+    creds = [{"name": var, "valueFrom": {"secretKeyRef": {"name": release.POLARIS_ROOT_SECRET,
+                                                         "key": key}}}
+             for var, key in (("ROOT_CLIENT_ID", "clientId"),
+                              ("ROOT_CLIENT_SECRET", "clientSecret"))]
+    overrides = {"spec": {"containers": [{"name": name, "image": image, "env": creds,
+                                          "stdin": True, "stdinOnce": True}]}}
+    return ["kubectl", "--context", CONTEXT, "-n", env["NS_CATALOG_POLARIS"], "run", name,
+            f"--image={image}", "--restart=Never", "--rm", "-i", "--quiet",
+            "--pod-running-timeout=3m", "--override-type=strategic",
+            "--overrides", json.dumps(overrides),
+            "--command", "--", "python3", "-", env["POLARIS_CONSOLE_ORIGIN"],
+            env["POLARIS_CONSOLE_API_URL"], release.POLARIS_REALM]
+
+
 def _git(repo, *args):
     return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, check=False)
 
@@ -544,6 +621,25 @@ def main(argv):
             for command in commands:
                 run(command)
         return 0
+    if argv[1:] == ["console-image"]:
+        source = console_source()
+        with tempfile.TemporaryDirectory() as d:
+            commands = console_image_commands(source, d)
+            for command in commands[:3]:
+                run(command)
+            check_commit(d, source["commit"])
+            shutil.copyfile(os.path.join(CONSOLE_IMAGE_DIR, "package-lock.json"),
+                            os.path.join(d, source["path"], "package-lock.json"))
+            for command in commands[3:]:
+                run(command)
+        return 0
+    if argv[1:] == ["check-console"]:
+        env = release.load_env(ROOT, os.environ)
+        with open(os.path.join(HERE, "console", "check.py"), encoding="utf-8") as f:
+            script = f.read()
+        command = check_console_command(env, smoke_python_image(pins),
+                                        f"check-console-{os.getpid()}")
+        return subprocess.run(command, input=script, text=True, check=False).returncode
     if argv[1:] == ["check-polaris-pg"]:
         namespace = os.environ.get("NS_CATALOG_POLARIS") or "catalog-polaris"
         answers = [json.loads(subprocess.run(c, capture_output=True, text=True,

@@ -182,6 +182,9 @@ S3_REGION=
 POLARIS_WAREHOUSE_BUCKET=
 POLARIS_OPA_URL=
 POLARIS_DB_HOST=
+POLARIS_CONSOLE_ENABLED=false
+POLARIS_CONSOLE_ORIGIN=
+POLARIS_CONSOLE_API_URL=
 POLARIS_S3_ACCESS_KEY_ID=
 POLARIS_S3_SECRET_ACCESS_KEY=
 SMOKE_S3_ACCESS_KEY_ID=
@@ -210,6 +213,14 @@ class GateEnv(unittest.TestCase):
                          "http://recorder.si.svc.cluster.local:8181/v1/data/polaris/authz")
         self.assertEqual(env["POLARIS_DB_HOST"], "recorder.si.svc.cluster.local")
 
+    def test_the_console_is_enabled_at_its_service_and_reaches_polaris_at_its_service(self):
+        env = gate.init_env.parse(gate.gate_env(TEMPLATE, gen=lambda name: "x"))
+        self.assertEqual(env["POLARIS_CONSOLE_ENABLED"], "true")
+        self.assertEqual(env["POLARIS_CONSOLE_ORIGIN"],
+                         "http://polaris-console.catalog-polaris.svc.cluster.local:8080")
+        self.assertEqual(env["POLARIS_CONSOLE_API_URL"],
+                         "http://polaris.catalog-polaris.svc.cluster.local:8181")
+
     def test_everything_else_is_left_to_init_env(self):
         env = gate.init_env.parse(gate.gate_env(TEMPLATE, gen=lambda name: "x"))
         self.assertEqual(env["POLARIS_DB_PASSWORD"], "")
@@ -220,7 +231,8 @@ class GateEnv(unittest.TestCase):
             env = gate.init_env.parse(gate.gate_env(f.read()))
         for name in gate.GATE_ENV_GENERATED + ("KUBE_CONTEXT", "S3_ENDPOINT", "S3_REGION",
                                                "POLARIS_WAREHOUSE_BUCKET", "POLARIS_OPA_URL",
-                                               "POLARIS_DB_HOST"):
+                                               "POLARIS_DB_HOST", "POLARIS_CONSOLE_ORIGIN",
+                                               "POLARIS_CONSOLE_API_URL"):
             with self.subTest(name=name):
                 self.assertTrue(env[name])
 
@@ -556,6 +568,44 @@ class CheckIceberg(unittest.TestCase):
     def test_the_python_image_is_the_pinned_one_the_recorder_runs_on(self):
         self.assertEqual(gate.smoke_python_image(gate.load_pins()),
                          gate.load_pins()["standin_images"]["recorder"]["image"])
+
+
+CONSOLE_ENV = {**STANDIN_ENV, "POLARIS_CONSOLE_ENABLED": "true",
+               "POLARIS_CONSOLE_ORIGIN": "http://polaris-console.catalog-polaris.svc.cluster.local:8080",
+               "POLARIS_CONSOLE_API_URL": "http://polaris.catalog-polaris.svc.cluster.local:8181"}
+
+
+class CheckConsole(unittest.TestCase):
+    def command(self):
+        return gate.check_console_command(CONSOLE_ENV, PYTHON, name="console-test")
+
+    def test_a_short_lived_pod_on_the_pinned_python_reads_the_check_on_stdin(self):
+        argv = self.command()
+        self.assertEqual(argv[:7], ["kubectl", "--context", gate.CONTEXT, "-n",
+                                    "catalog-polaris", "run", "console-test"])
+        for flag in ("--rm", "-i", "--restart=Never", f"--image={PYTHON}",
+                     "--override-type=strategic"):
+            self.assertIn(flag, argv)
+        self.assertEqual(argv[argv.index("--command") + 1:], [
+            "--", "python3", "-", CONSOLE_ENV["POLARIS_CONSOLE_ORIGIN"],
+            CONSOLE_ENV["POLARIS_CONSOLE_API_URL"], "POLARIS"])
+
+    def test_roots_credentials_come_from_their_secret_never_the_command_line(self):
+        argv = self.command()
+        overrides = json.loads(argv[argv.index("--overrides") + 1])
+        (container,) = overrides["spec"]["containers"]
+        self.assertEqual(container["name"], "console-test")
+        self.assertIs(container["stdin"], True)
+        refs = {e["name"]: e["valueFrom"]["secretKeyRef"] for e in container["env"]
+                if "valueFrom" in e}
+        self.assertEqual(refs, {
+            "ROOT_CLIENT_ID": {"name": "polaris-root", "key": "clientId"},
+            "ROOT_CLIENT_SECRET": {"name": "polaris-root", "key": "clientSecret"}})
+
+    def test_a_console_that_is_not_enabled_is_not_checked(self):
+        with self.assertRaises(SystemExit):
+            gate.check_console_command({**CONSOLE_ENV, "POLARIS_CONSOLE_ENABLED": "false"},
+                                       PYTHON, name="console-test")
 
 
 class Standins(unittest.TestCase):

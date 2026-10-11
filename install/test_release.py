@@ -209,11 +209,36 @@ class Steps(unittest.TestCase):
             return pg(argv)
         problems, notes = release.install(BOOTSTRAP_ENV, run, ["1.30"], dry_run=False)
         self.assertEqual(problems, [])
-        self.assertEqual([n.split(":")[0] for n in notes], ["Step 0"] + ["Step 1"] * 4)
+        self.assertEqual([n.split(":")[0] for n in notes],
+                         ["Step 0"] + ["Step 1"] * 4 + ["Step 2"])
         self.assertIn("polaris-pg", notes[1])
         self.assertIn("answer", notes[2])
         self.assertIn("bootstrapped", notes[3])
         self.assertIn("deployment/polaris", notes[4])
+        self.assertIn("console is not enabled", notes[5])
+
+    def test_a_console_that_fails_is_reported_and_the_install_still_passes(self):
+        step0, pg, endpoints = FakeKubectl(), FakeCalls(), FakeRun()
+        boot, pol = FakeBootstrap(), FakePolaris()
+        console = FakeConsole(rollout=(1, "ErrImageNeverPull"))
+
+        def run(argv, stdin=None):
+            if "crd" in argv or "deployments" in argv:
+                return step0(argv)
+            if "endpoint-check" in " ".join(argv):
+                return endpoints(argv, stdin)
+            if "polaris-root" in argv or "run" in argv:
+                return boot(argv, stdin)
+            if release.CONSOLE_CHART in argv or "deployment/polaris-console" in argv:
+                return console(argv, stdin)
+            if "polaris-s3" in argv or "rollout" in argv or release.POLARIS_CHART in argv:
+                return pol(argv, stdin)
+            return pg(argv)
+        problems, notes = release.install({**BOOTSTRAP_ENV, **CONSOLE_ENV}, run, ["1.30"],
+                                          dry_run=False)
+        self.assertEqual(problems, [])
+        self.assertIn("ErrImageNeverPull", notes[-1])
+        self.assertIn("not blocking", notes[-1])
 
     def test_a_failed_bootstrap_stops_before_polaris(self):
         step0, pg, endpoints = FakeKubectl(), FakeCalls(), FakeRun()
@@ -579,6 +604,101 @@ class Polaris(unittest.TestCase):
     def test_a_rollout_that_never_finishes_stops(self):
         problems, _ = self.step(FakePolaris(rollout=(1, "timed out waiting")))
         self.assertIn("timed out waiting", "\n".join(problems))
+
+
+CONSOLE_ENV = {"POLARIS_CONSOLE_ENABLED": "true",
+               "POLARIS_CONSOLE_ORIGIN": "http://console.example:8080",
+               "POLARIS_CONSOLE_API_URL": "http://polaris.example:8181"}
+
+
+class FakeConsole(FakePolaris):
+    """Answers the console step's helm and rollout wait; it checks no Secret."""
+
+
+class Console(unittest.TestCase):
+    def step(self, calls, env=None, dry_run=False):
+        return release.console({**BOOTSTRAP_ENV, **CONSOLE_ENV} if env is None else env,
+                               calls, dry_run=dry_run)
+
+    def test_off_unless_enabled_and_then_nothing_is_called(self):
+        for value in (None, "false", ""):
+            with self.subTest(value=value):
+                env = dict(BOOTSTRAP_ENV)
+                if value is not None:
+                    env["POLARIS_CONSOLE_ENABLED"] = value
+                calls = FakeConsole()
+                problems, notes = self.step(calls, env)
+                self.assertEqual((problems, calls.calls), ([], []))
+                self.assertIn("Step 2: the console is not enabled", "\n".join(notes))
+
+    def test_installs_the_chart_with_both_values_files_then_waits_for_the_rollout(self):
+        calls = FakeConsole()
+        problems, notes = self.step(calls)
+        self.assertEqual(problems, [])
+        self.assertEqual([c[0] for c in calls.calls], ["helm", "kubectl"])
+        helm = calls.calls[0]
+        self.assertEqual(helm[:3], ["helm", "--kube-context", "kind-lakehouse-gate"])
+        self.assertEqual(helm[helm.index("-n") + 1], "catalog-polaris")
+        self.assertEqual(helm[helm.index("upgrade"):helm.index("upgrade") + 4],
+                         ["upgrade", "--install", "polaris-console", release.CONSOLE_CHART])
+        files = [helm[i + 1] for i, a in enumerate(helm) if a == "-f"]
+        self.assertEqual(files[0], release.CONSOLE_VALUES)
+        self.assertFalse(os.path.exists(files[1]), "the generated values file is left behind")
+        rollout = calls.calls[1]
+        self.assertEqual(rollout[1:3], ["--context", "kind-lakehouse-gate"])
+        self.assertEqual(rollout[rollout.index("-n") + 1], "catalog-polaris")
+        self.assertEqual(rollout[rollout.index("rollout"):rollout.index("rollout") + 3],
+                         ["rollout", "status", "deployment/polaris-console"])
+        self.assertIn("Step 2: deployment/polaris-console", "\n".join(notes))
+
+    def test_the_browser_reaches_polaris_at_the_api_url_from_env(self):
+        calls = FakeConsole()
+        self.step(calls)
+        self.assertEqual(calls.values, [{"config": {"api": {
+            "polarisApiUrl": "http://polaris.example:8181",
+            "oauthTokenUrl": "http://polaris.example:8181/api/catalog/v1/oauth/tokens",
+            "polarisRealm": "POLARIS"}}}])
+
+    def test_enabled_without_its_origin_or_api_url_stops_before_helm(self):
+        for var in ("POLARIS_CONSOLE_ORIGIN", "POLARIS_CONSOLE_API_URL"):
+            with self.subTest(var=var):
+                calls = FakeConsole()
+                problems, _ = self.step(calls, {**BOOTSTRAP_ENV, **CONSOLE_ENV, var: ""})
+                self.assertIn(var, "\n".join(problems))
+                self.assertEqual(calls.calls, [])
+
+    def test_anything_but_true_or_false_is_refused(self):
+        calls = FakeConsole()
+        problems, _ = self.step(calls, {**BOOTSTRAP_ENV, **CONSOLE_ENV,
+                                        "POLARIS_CONSOLE_ENABLED": "yes"})
+        self.assertIn("POLARIS_CONSOLE_ENABLED", "\n".join(problems))
+        self.assertEqual(calls.calls, [])
+
+    def test_dry_run_is_server_side_and_does_not_wait(self):
+        calls = FakeConsole()
+        problems, notes = self.step(calls, dry_run=True)
+        self.assertEqual(problems, [])
+        self.assertIn("--dry-run=server", calls.calls[0])
+        self.assertEqual(len(calls.calls), 1)
+        self.assertIn("dry-run", "\n".join(notes))
+
+    def test_a_failed_helm_or_rollout_is_a_problem_with_its_error(self):
+        problems, _ = self.step(FakeConsole(helm=(1, "schema invalid")))
+        self.assertIn("schema invalid", "\n".join(problems))
+        problems, _ = self.step(FakeConsole(rollout=(1, "timed out waiting")))
+        self.assertIn("timed out waiting", "\n".join(problems))
+
+
+class Cors(unittest.TestCase):
+    def test_polaris_allows_the_consoles_origin_only_while_it_is_enabled(self):
+        enabled = release.polaris_values({**BOOTSTRAP_ENV, **CONSOLE_ENV})
+        self.assertEqual(enabled["cors"], {"enabled": True,
+                                           "allowedOrigins": ["http://console.example:8080"]})
+        for env in (BOOTSTRAP_ENV, {**BOOTSTRAP_ENV, **CONSOLE_ENV,
+                                    "POLARIS_CONSOLE_ENABLED": "false"},
+                    {**BOOTSTRAP_ENV, **CONSOLE_ENV, "POLARIS_CONSOLE_ORIGIN": ""}):
+            with self.subTest(env=env.get("POLARIS_CONSOLE_ENABLED")):
+                self.assertNotIn("cors", release.polaris_values(env))
 
 
 class LoadEnv(unittest.TestCase):
