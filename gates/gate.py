@@ -617,19 +617,25 @@ def batch_image_commands(directory=release.BATCH_IMAGE_DIR):
             ["kind", "load", "docker-image", image, "--name", CLUSTER]]
 
 
-def logs_request_ids(prefix, count, pod_names):
+def logs_request_ids(prefix, count, pod_names, failing=False):
     """The X-Request-ID each request carries, as logs_traffic.sh makes it -> (its pod, its kind),
     each kind for a rule of the audit policy (contract v2): `read`, root listing the catalogs,
     which it counts (6); `denied`, the same without a token, which it keeps (3); once per pod,
     `invalid`, a table made without a schema, 400, refused before anything is written, kept
     with its application line (2b); `missing`, a table that does not exist, 404, dropped with
-    its application line (3'); `commit`, a table made, whose commit counts on its row (2a). `catalog`, through the Service, so on no pod
-    known in advance: LOGS_CATALOG made, its application line kept (2b)."""
+    its application line (3'); `commit`, a table made, whose commit counts on its row (2a).
+    `catalog`, through the Service, so on no pod known in advance: LOGS_CATALOG made, its
+    application line kept (2b). With `failing` (Create Fixtures, ADR-040, logs_traffic.sh's
+    LOGS_DOWN_ENDPOINT), also LOGS_CATALOG_down made (`catalog`) and once per pod `failed`, a
+    table made there, 500, kept with its ERROR line and the line's `exception` (1)."""
     sent = {f"{prefix}-{pod}-{kind}-{n}": (pod, kind) for pod in pod_names
             for n in range(1, count + 1) for kind in ("read", "denied")}
     sent.update({f"{prefix}-{pod}-{kind}-1": (pod, kind) for pod in pod_names
                  for kind in LOGS_POLICY_KINDS})
     sent[f"{prefix}-setup-catalog"] = (None, "catalog")
+    if failing:
+        sent.update({f"{prefix}-{pod}-failed-1": (pod, "failed") for pod in pod_names})
+        sent[f"{prefix}-setup-down-catalog"] = (None, "catalog")
     return sent
 
 
@@ -638,13 +644,16 @@ def logs_table(request_id):
     return request_id.replace("-", "_")
 
 
-def logs_traffic_command(env, image, name, prefix, count, pods):
+def logs_traffic_command(env, image, name, prefix, count, pods, down=None):
     """The pod that runs logs_traffic.sh (on stdin) with root's credentials against each of
-    `pods`, (name, URL) pairs, LOGS_CATALOG on the S3 endpoint in `env`."""
+    `pods`, (name, URL) pairs, LOGS_CATALOG on the S3 endpoint in `env`; with `down`, its
+    LOGS_DOWN_ENDPOINT (Create Fixtures, ADR-040)."""
     creds = [{"name": var, "valueFrom": {"secretKeyRef": {"name": release.POLARIS_ROOT_SECRET,
                                                          "key": key}}}
              for var, key in (("ROOT_CLIENT_ID", "clientId"),
                               ("ROOT_CLIENT_SECRET", "clientSecret"))]
+    if down:
+        creds.append({"name": "LOGS_DOWN_ENDPOINT", "value": down})
     overrides = {"spec": {"containers": [{"name": name, "image": image, "env": creds,
                                           "stdin": True, "stdinOnce": True}]}}
     return ["kubectl", "--context", CONTEXT, "-n", env["NS_CATALOG_POLARIS"], "run", name,
@@ -881,6 +890,18 @@ def logs_problems(sent, pods, events, before, after, records):
                  f"{logs_table(rid)}")
         if total("resource", "resource", table, "commit_count") < 1:
             problems.append(f"resource {table}: no commit counted for request {rid}")
+    failed = of_kind("failed")
+    for rid in failed:
+        pod, lines = sent[rid][0], by_rid.get(rid, [])
+        access = [r for r in lines if r.get("http_status") == 500]
+        errors = [r for r in lines if r.get("level") == "ERROR"
+                  and isinstance(r.get("exception"), dict)]
+        hosts = sorted({r.get("hostName") for r in lines})
+        if len(access) != 1 or not errors or hosts != [pod]:
+            problems.append(f"request {rid}, sent to {pod}: {len(access)} access line(s) of a "
+                            f"500 and {len(errors)} ERROR line(s) with `exception` kept, from "
+                            f"{', '.join(map(str, hosts)) or 'no pod'}; want one access line "
+                            f"and its ERROR line, kept from its pod")
 
     logged = {p for _, s in summaries for p in s.get("pods", [])}
     files = {f["file"] for _, s in summaries for f in s.get("sources", [])}
@@ -899,7 +920,9 @@ def logs_problems(sent, pods, events, before, after, records):
         f"on the rows; pods {', '.join(pods)}, both files read.",
         f"Rules 2a, 2b and 3' on Polaris's own lines: {len(missing)} 404s dropped with their "
         f"application lines, {len(invalid)} 400s kept with theirs, {len(commits)} commits on "
-        f"their tables' rows; {LOGS_CATALOG} made, its application line kept."]
+        f"their tables' rows; {LOGS_CATALOG} made, its application line kept."
+        + (f" Rule 1: {len(failed)} 500s kept with their ERROR line and its exception."
+           if failed else "")]
     return problems, ([] if problems else notes)
 
 

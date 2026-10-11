@@ -31,15 +31,15 @@ MAPPER = "org.apache.polaris.service.exception.IcebergExceptionMapper"
 COMMIT = "org.apache.polaris.service.catalog.iceberg.LocalIcebergCatalog"
 
 
-def polaris_record(pod, second, request_id, logger, message):
+def polaris_record(pod, second, request_id, logger, message, level="INFO", **extra):
     """One line as Polaris 1.6.0 writes it (docs/contracts/polaris-logs.md)."""
     return json.dumps({
         "timestamp": f"2026-10-11T12:40:{second:02d}.753600155Z", "sequence": second,
-        "loggerClassName": "org.jboss.logging.Logger", "loggerName": logger, "level": "INFO",
+        "loggerClassName": "org.jboss.logging.Logger", "loggerName": logger, "level": level,
         "message": message, "threadName": "executor-thread-2", "threadId": 31,
         "mdc": {"requestId": request_id or f"generated-{pod}-{second}", "realmId": "POLARIS"},
         "ndc": "", "hostName": pod, "processName": "/usr/lib/jvm/java-21/bin/java",
-        "processId": 1}) + "\n"
+        "processId": 1, **extra}) + "\n"
 
 
 def access_message(who, request, status):
@@ -66,12 +66,36 @@ POLICY_LINES = {
     "commit": [(COMMIT, "Successfully committed to table {catalog}.logs.{table} in 311 ms"),
                (ACCESS, access_message("root", f"POST {SPACE}/tables", "200 836"))],
 }
+# A table made in a catalog whose S3 endpoint does not answer, as Polaris 1.6.0 wrote it
+# (2026-10-11, claude/batch-roll-fixture at aa38b9d): the mapper's line, its ERROR line with
+# the exception, and the access line of the 500.
+EXCEPTION = {"exceptionType": "software.amazon.awssdk.core.exception.SdkClientException",
+             "message": "Unable to execute HTTP request: Connect to s3 failed",
+             "frames": [{"class": "software.amazon.awssdk.core.exception.SdkClientException",
+                         "method": "create", "line": 111}],
+             "causedBy": {"exception": {
+                 "exceptionType": "org.apache.http.conn.HttpHostConnectException",
+                 "message": "Connection refused", "frames": [], "refId": 2}},
+             "suppressed": [{"exceptionType":
+                             "software.amazon.awssdk.core.exception.SdkClientException",
+                             "message": "Request attempt 1 failure", "frames": [],
+                             "refId": 3}],
+             "refId": 1}
+DOWN_SPACE = f"/api/catalog/v1/{gate.LOGS_CATALOG}_down/namespaces/{gate.LOGS_NAMESPACE}"
+FAILED_LINES = [
+    (MAPPER, "INFO", "Handling runtimeException Unable to execute HTTP request", {}),
+    (MAPPER, "ERROR", "Unhandled exception returning INTERNAL_SERVER_ERROR",
+     {"exception": EXCEPTION}),
+    (ACCESS, "INFO", access_message("root", f"POST {DOWN_SPACE}/tables", "500 120"), {})]
 
 
 def polaris_lines(pod, second, request_id, kind):
     """Every line Polaris writes for one of check-logs' requests, from `second` on."""
     if kind in ("read", "denied"):
         return [polaris_line(pod, second, request_id, kind)]
+    if kind == "failed":
+        return [polaris_record(pod, second + i, request_id, logger, message, level, **extra)
+                for i, (logger, level, message, extra) in enumerate(FAILED_LINES)]
     return [polaris_record(pod, second + i, request_id, logger, message.replace(
         "{catalog}", gate.LOGS_CATALOG).replace("{table}", gate.logs_table(request_id)))
         for i, (logger, message) in enumerate(POLICY_LINES[kind])]
@@ -170,6 +194,16 @@ class Traffic(unittest.TestCase):
             if pod:
                 self.assertTrue(rid.startswith(f"{PREFIX}-{pod}-{kind}-"), rid)
 
+    def test_with_failures_each_pod_also_gets_a_500_and_the_down_catalog_is_made_once(self):
+        plain = gate.logs_request_ids(PREFIX, 3, PODS)
+        sent = gate.logs_request_ids(PREFIX, 3, PODS, failing=True)
+        self.assertEqual(set(sent) - set(plain),
+                         {f"{PREFIX}-{pod}-failed-1" for pod in PODS}
+                         | {f"{PREFIX}-setup-down-catalog"})
+        self.assertEqual(sent[f"{PREFIX}-setup-down-catalog"], (None, "catalog"))
+        for pod in PODS:
+            self.assertEqual(sent[f"{PREFIX}-{pod}-failed-1"], (pod, "failed"))
+
     def test_a_commits_table_is_named_for_its_request(self):
         self.assertEqual(gate.logs_table(f"{PREFIX}-{PODS[0]}-commit-1"),
                          "gate_logs_42_polaris_6d9f_aaaaa_commit_1")
@@ -192,13 +226,27 @@ class Traffic(unittest.TestCase):
                          ["sh", "-s", "--", "http://polaris:8181", "POLARIS", "3", PREFIX,
                           "gate_logs", "http://s3.test:8333", "us-east-1", "warehouse",
                           PODS[0], "http://10.0.0.1:8181", PODS[1], "http://10.0.0.2:8181"])
+        self.assertNotIn("LOGS_DOWN_ENDPOINT", json.dumps(overrides))
+
+    def test_with_a_down_endpoint_the_traffic_pod_gets_it(self):
+        env = {**ENV, "S3_ENDPOINT": "http://s3.test:8333", "S3_REGION": "us-east-1",
+               "POLARIS_WAREHOUSE_BUCKET": "warehouse"}
+        argv = gate.logs_traffic_command(env, "curl:1@sha256:" + "e" * 64, "logs-traffic",
+                                         PREFIX, 3, [(PODS[0], "http://10.0.0.1:8181")],
+                                         down=DOWN)
+        (container,) = json.loads(argv[argv.index("--overrides") + 1])["spec"]["containers"]
+        self.assertIn({"name": "LOGS_DOWN_ENDPOINT", "value": DOWN}, container["env"])
 
 
-def fake_catalog(signing_key=TOKEN, fail=None, catalogs=None):
+DOWN = "http://127.0.0.1:9"
+
+
+def fake_catalog(signing_key=TOKEN, fail=None, catalogs=None, down=DOWN):
     """A Polaris replica for logs_traffic.sh: a token for root's client credentials, the
     catalogs listed with that token (401 without), and one catalog's API as Polaris 1.6.0
     answers it. `catalogs` is shared between replicas, as their database is; `fail` names a
-    request kind to answer 500."""
+    request kind to answer 500; a table made in a catalog on the S3 endpoint `down` is answered
+    500, as Polaris answers when that endpoint does not answer."""
     state = catalogs if catalogs is not None else {}
     seen = []
 
@@ -226,26 +274,33 @@ def fake_catalog(signing_key=TOKEN, fail=None, catalogs=None):
             kind = self.headers.get("X-Request-ID", "").split("-")[-2]
             if kind == fail:
                 return self.reply(500)
-            space = f"/api/catalog/v1/{gate.LOGS_CATALOG}/namespaces"
             if (method, self.path) == ("GET", "/api/management/v1/catalogs"):
                 return self.reply(200, {"catalogs": []})
             if (method, self.path) == ("POST", "/api/management/v1/catalogs"):
-                name = json.loads(body)["catalog"]["name"]
-                if name in state:
+                catalog = json.loads(body)["catalog"]
+                if catalog["name"] in state:
                     return self.reply(409)
-                state[name] = set()
+                state[catalog["name"]] = {"endpoint": catalog["storageConfigInfo"]["endpoint"],
+                                          "namespaces": set()}
                 return self.reply(201)
+            parts = self.path.split("/")
+            name = parts[4] if len(parts) > 5 and parts[5] == "namespaces" else None
+            if name not in state:
+                return self.reply(404)
+            space = f"/api/catalog/v1/{name}/namespaces"
             if (method, self.path) == ("POST", space):
                 ns = json.loads(body)["namespace"][0]
-                if ns in state[gate.LOGS_CATALOG]:
+                if ns in state[name]["namespaces"]:
                     return self.reply(409)
-                state[gate.LOGS_CATALOG].add(ns)
+                state[name]["namespaces"].add(ns)
                 return self.reply(200)
             if (method, self.path) == ("GET", f"{space}/{gate.LOGS_NAMESPACE}/tables/absent"):
                 return self.reply(404)
             if (method, self.path) == ("POST", f"{space}/{gate.LOGS_NAMESPACE}/tables"):
                 if "schema" not in json.loads(body):
                     return self.reply(400)
+                if state[name]["endpoint"] == down:
+                    return self.reply(500)
                 return self.reply(200, {"metadata-location": "s3://x"})
             self.reply(404)
 
@@ -278,14 +333,17 @@ class TrafficScript(unittest.TestCase):
         self.servers.append(server)
         return f"http://127.0.0.1:{server.server_port}", seen
 
-    def run_script(self, api, pods, prefix=PREFIX):
+    def run_script(self, api, pods, prefix=PREFIX, down=None):
         with open(os.path.join(HERE, "logs_traffic.sh"), encoding="utf-8") as f:
             text = f.read()
         args = [a for name, url in pods for a in (name, url)]
+        env = {k: v for k, v in os.environ.items() if k != "LOGS_DOWN_ENDPOINT"}
+        env.update(CREDS)
+        if down:
+            env["LOGS_DOWN_ENDPOINT"] = down
         return subprocess.run(["sh", "-s", "--", api, "POLARIS", "2", prefix, gate.LOGS_CATALOG,
                                "http://s3.test:8333", "us-east-1", "warehouse", *args],
-                              input=text, capture_output=True, text=True,
-                              env={**os.environ, **CREDS}, timeout=60)
+                              input=text, capture_output=True, text=True, env=env, timeout=60)
 
     def test_each_pod_is_read_with_roots_token_and_asked_without_one(self):
         (a, seen_a), (b, seen_b) = self.replica(), self.replica()
@@ -350,6 +408,40 @@ class TrafficScript(unittest.TestCase):
         self.assertIn(f"FAIL {PREFIX}-{PODS[1]}-commit-1: {PODS[1]} answered HTTP 500, "
                       "expected 200", done.stdout)
         self.assertIn(f"ok   {PREFIX}-{PODS[0]}-commit-1", done.stdout)
+
+    def test_without_a_down_endpoint_nothing_fails_on_purpose(self):
+        a, seen = self.replica()
+        done = self.run_script(a, [(PODS[0], a)])
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertFalse([path for _, path, _, _ in seen if "_down" in path])
+        self.assertNotIn("failed-1", done.stdout)
+
+    def test_with_a_down_endpoint_each_pod_gets_a_500_from_the_down_catalog(self):
+        (a, seen_a), (b, seen_b) = self.replica(), self.replica()
+        done = self.run_script(a, [(PODS[0], a), (PODS[1], b)], down=DOWN)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        made = {json.loads(body)["catalog"]["name"]: json.loads(body)["catalog"]
+                for method, path, h, body in seen_a
+                if (method, path) == ("POST", "/api/management/v1/catalogs")}
+        down = made[f"{gate.LOGS_CATALOG}_down"]
+        self.assertEqual(down["storageConfigInfo"]["endpoint"], DOWN)
+        self.assertEqual(down["properties"]["default-base-location"],
+                         f"s3://warehouse/{gate.LOGS_CATALOG}_down")
+        for pod, seen in ((PODS[0], seen_a), (PODS[1], seen_b)):
+            rid = f"{PREFIX}-{pod}-failed-1"
+            [(path, body)] = [(path, json.loads(body)) for method, path, h, body in seen
+                              if h.get("X-Request-ID") == rid]
+            self.assertEqual(path, f"{DOWN_SPACE}/tables")
+            self.assertEqual(body["name"], gate.logs_table(rid))
+            self.assertIn("schema", body)
+            self.assertIn(f"ok   {rid}: {pod} answered HTTP 500", done.stdout)
+
+    def test_a_down_catalog_that_answers_fails_the_script(self):
+        (a, _), (b, _) = self.replica(down="http://nothing.test"), self.replica()
+        done = self.run_script(a, [(PODS[0], a), (PODS[1], b)], down=DOWN)
+        self.assertEqual(done.returncode, 1)
+        self.assertIn(f"FAIL {PREFIX}-{PODS[0]}-failed-1: {PODS[0]} answered HTTP 200, "
+                      "expected 500", done.stdout)
 
     def test_a_pod_that_refuses_fails_the_script(self):
         (a, _), (b, _) = self.replica(), self.replica(signing_key="other-key")
@@ -497,6 +589,10 @@ class Problems(unittest.TestCase):
     def kept(self):
         return sorted(r for r, (_, kind) in self.f.sent.items() if kind == "denied")
 
+    def test_without_500s_the_notes_name_none(self):
+        self.assertNotIn("500", "\n".join(self.f.problems()[1]))
+
+
     def test_a_request_id_missing_or_read_twice_fails(self):
         rid = self.kept()[0]
         records = [r for r in self.f.records if r.get("mdc", {}).get("requestId") != rid]
@@ -613,6 +709,49 @@ class Problems(unittest.TestCase):
         problems, _ = self.f.problems(before=after, after=after, records=[
             r for r in self.f.records if "aggregated-logs" not in r["source_file"]])
         self.assertIn("aggregated-logs/", "\n".join(problems))
+
+
+class ProblemsWithFailures(unittest.TestCase):
+    """The traffic Create Fixtures sends (ADR-040): each pod also gets a 500."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.f = Fixture(gate.logs_request_ids(PREFIX, 2, PODS, failing=True))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.f.dir.cleanup()
+
+    def failed(self):
+        return sorted(r for r, (_, kind) in self.f.sent.items() if kind == "failed")
+
+    def test_each_500_kept_with_its_error_line_and_exception_passes(self):
+        problems, notes = self.f.problems()
+        self.assertEqual(problems, [])
+        self.assertIn("2 500s kept with their ERROR line and its exception", notes[-1])
+
+    def test_a_500_without_its_error_line_fails(self):
+        rid = self.failed()[0]
+        records = [r for r in self.f.records if not (
+            r.get("mdc", {}).get("requestId") == rid and r.get("level") == "ERROR")]
+        problems, _ = self.f.problems(records=records)
+        self.assertIn(f"request {rid}", "\n".join(problems))
+        self.assertIn("ERROR line", "\n".join(problems))
+
+    def test_an_error_line_without_the_exception_fails(self):
+        rid = self.failed()[1]
+        records = [({k: v for k, v in r.items() if k != "exception"}
+                    if r.get("mdc", {}).get("requestId") == rid else r)
+                   for r in self.f.records]
+        problems, _ = self.f.problems(records=records)
+        self.assertIn(f"request {rid}", "\n".join(problems))
+
+    def test_a_500_without_its_access_line_fails(self):
+        rid = self.failed()[0]
+        records = [r for r in self.f.records if not (
+            r.get("mdc", {}).get("requestId") == rid and "http_status" in r)]
+        problems, _ = self.f.problems(records=records)
+        self.assertIn(f"request {rid}", "\n".join(problems))
 
 
 if __name__ == "__main__":
