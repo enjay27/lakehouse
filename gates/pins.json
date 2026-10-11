@@ -42,6 +42,10 @@
     "opa": {
       "image": "openpolicyagent/opa:1.21.0@sha256:9e0010512cf405e66bfd7b89394f514e56fe0464822df0527e780344ab151450",
       "source": "Docker Hub index digest (docker-content-digest, recomputed), read 2026-10-11; 1.21.1 under two weeks old"
+    },
+    "recorder": {
+      "image": "python:3.12.14-slim@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f",
+      "source": "Docker Hub index digest (docker-content-digest, recomputed), read 2026-10-11; 3.12.15 under two weeks old"
     }
   }
 }

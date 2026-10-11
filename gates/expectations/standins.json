@@ -1,0 +1,178 @@
+{
+  "_comment": "What the recorder must have seen after the smoke gate's check-standins and the install's endpoint check (ADR-034): the allowed and refused policy decisions, an S3 round trip, logins as Polaris with and without TLS; and what it must never see. Matched by gates/traffic.py; Polaris's own exchanges get their file with the Polaris chart.",
+  "expectations": [
+    {
+      "name": "OPA allowed root to create a catalog",
+      "must": "exist",
+      "match": {
+        "proto": "http",
+        "listener": "opa",
+        "method": "POST",
+        "status": 200,
+        "request_body.json.input.actor.principal": "root",
+        "request_body.json.input.action": "CREATE_CATALOG",
+        "response_body.json.result.allow": true
+      }
+    },
+    {
+      "name": "OPA refused gate_smoke a table in another catalog",
+      "must": "exist",
+      "match": {
+        "proto": "http",
+        "listener": "opa",
+        "method": "POST",
+        "status": 200,
+        "request_body.json.input.actor.principal": "gate_smoke",
+        "request_body.json.input.action": "LOAD_TABLE",
+        "response_body.json.result.allow": false
+      }
+    },
+    {
+      "name": "S3 stored an object for a signed PUT",
+      "must": "exist",
+      "match": {
+        "proto": "http",
+        "listener": "s3",
+        "method": "PUT",
+        "status": 200,
+        "path": {
+          "regex": "^/polaris-warehouse/gate-check/"
+        },
+        "request_headers.authorization": {
+          "present": true
+        }
+      }
+    },
+    {
+      "name": "S3 returned the object for a signed GET",
+      "must": "exist",
+      "match": {
+        "proto": "http",
+        "listener": "s3",
+        "method": "GET",
+        "status": 200,
+        "path": {
+          "regex": "^/polaris-warehouse/gate-check/"
+        },
+        "request_headers.authorization": {
+          "present": true
+        }
+      }
+    },
+    {
+      "name": "S3 refused an anonymous GET",
+      "must": "exist",
+      "match": {
+        "proto": "http",
+        "listener": "s3",
+        "method": "GET",
+        "status": 403,
+        "path": {
+          "regex": "^/polaris-warehouse/gate-check/"
+        },
+        "request_headers.authorization": {
+          "present": false
+        }
+      }
+    },
+    {
+      "name": "PostgreSQL accepted Polaris's login over TLS",
+      "must": "exist",
+      "match": {
+        "proto": "pg",
+        "event": "connect",
+        "result": "ok",
+        "tls": true,
+        "user": "polaris"
+      }
+    },
+    {
+      "name": "PostgreSQL accepted Polaris's login without TLS",
+      "must": "exist",
+      "match": {
+        "proto": "pg",
+        "event": "connect",
+        "result": "ok",
+        "tls": false,
+        "user": "polaris"
+      }
+    },
+    {
+      "name": "PostgreSQL inserted a row",
+      "must": "exist",
+      "match": {
+        "proto": "pg",
+        "event": "statement",
+        "sql": {
+          "regex": "^INSERT INTO gate_check"
+        },
+        "tag": "INSERT 0 1"
+      }
+    },
+    {
+      "name": "PostgreSQL returned the row it was given",
+      "must": "exist",
+      "match": {
+        "proto": "pg",
+        "event": "statement",
+        "sql": {
+          "regex": "^SELECT count"
+        },
+        "rows": 1
+      }
+    },
+    {
+      "name": "No signed S3 request was refused",
+      "must": "not_exist",
+      "match": {
+        "proto": "http",
+        "listener": "s3",
+        "status": 403,
+        "request_headers.authorization": {
+          "present": true
+        }
+      }
+    },
+    {
+      "name": "No PostgreSQL login was refused",
+      "must": "not_exist",
+      "match": {
+        "proto": "pg",
+        "event": "connect",
+        "result": "error"
+      }
+    },
+    {
+      "name": "No PostgreSQL statement failed",
+      "must": "not_exist",
+      "match": {
+        "proto": "pg",
+        "event": "statement",
+        "error": {
+          "present": true
+        }
+      }
+    },
+    {
+      "name": "No stream the recorder could not parse",
+      "must": "not_exist",
+      "match": {
+        "event": "parse_error"
+      }
+    },
+    {
+      "name": "No upstream the recorder could not reach",
+      "must": "not_exist",
+      "match": {
+        "event": "upstream_unreachable"
+      }
+    },
+    {
+      "name": "No PostgreSQL TLS negotiation failed",
+      "must": "not_exist",
+      "match": {
+        "event": "negotiation_failed"
+      }
+    }
+  ]
+}
