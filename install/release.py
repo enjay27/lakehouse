@@ -37,6 +37,7 @@ Usage: python3 install/release.py [--dry-run]
        Exits 0 when every step passed, 1 with the problems, 2 on an unknown option.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -77,6 +78,13 @@ BOOTSTRAP_TAIL = 20
 # The claim Polaris writes its log files to and the batch reads (ADR-036); its name is also
 # in charts/polaris/values-lakehouse.yaml.
 POLARIS_LOGS = "polaris-logs"
+# The log batch (ADR-014, ADR-036): its chart, and its image built from this repository,
+# tagged by a hash of the files that go into it.
+BATCH = "polaris-log-batch"
+BATCH_CHART = os.path.join(ROOT, "charts", BATCH)
+BATCH_IMAGE_DIR = os.path.join(ROOT, "images", BATCH)
+BATCH_IMAGE_FILES = ("Dockerfile", "polaris_log_batch.py")
+BATCH_IMAGE_REPOSITORY = f"lakehouse/{BATCH}"
 POLARIS_CHART = os.path.join(ROOT, "charts", "polaris")
 POLARIS_VALUES = os.path.join(POLARIS_CHART, "values-lakehouse.yaml")
 CONSOLE = "polaris-console"
@@ -218,6 +226,23 @@ def console_values(env):
     return {"config": {"api": {"polarisApiUrl": api,
                                "oauthTokenUrl": f"{api}/api/catalog/v1/oauth/tokens",
                                "polarisRealm": POLARIS_REALM}}}
+
+
+def batch_image(directory=BATCH_IMAGE_DIR):
+    """The batch's image: its repository, and the first 12 hex digits of a SHA-256 over the
+    names and contents of the files that go into it."""
+    digest = hashlib.sha256()
+    for name in BATCH_IMAGE_FILES:
+        with open(os.path.join(directory, name), "rb") as f:
+            data = f.read()
+        digest.update(f"{name}\0{len(data)}\0".encode() + data)
+    return f"{BATCH_IMAGE_REPOSITORY}:{digest.hexdigest()[:12]}"
+
+
+def batch_values():
+    """The batch chart's values from this checkout: the image built from it."""
+    repository, tag = batch_image().rsplit(":", 1)
+    return {"image": {"repository": repository, "tag": tag}}
 
 
 def endpoints_answer(env, run, image=None, name=None):

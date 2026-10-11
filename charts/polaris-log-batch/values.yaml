@@ -1,0 +1,33 @@
+# The image is built from images/polaris-log-batch; install/release.py passes its repository
+# and tag (a hash of the files that go into it). No tag here: the schema refuses an install
+# without one.
+image:
+  repository: lakehouse/polaris-log-batch
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# Minute 3 of every hour, UTC; one run at a time (ADR-036).
+schedule: "3 * * * *"
+timeZone: Etc/UTC
+
+# What the batch shares with Polaris (charts/polaris/values-lakehouse.yaml): the claim, the
+# directory Polaris writes polaris-${HOSTNAME}.log to, the file names of Polaris's pods, and
+# the labels that list them, for orphaned files.
+polaris:
+  logsClaim: polaris-logs
+  logsDir: /deployments/logs
+  podPrefix: "polaris-"
+  podSelector: "app.kubernetes.io/instance=polaris,app.kubernetes.io/name=polaris"
+
+# Polaris 1.6.0 writes its files as uid 10000, gid 10001.
+securityContext:
+  runAsUser: 10000
+  runAsGroup: 10001
+  fsGroup: 10001
+
+# A run that fails is not retried within the hour: the next run catches up (ADR-036).
+activeDeadlineSeconds: 3000
+successfulJobsHistoryLimit: 3
+failedJobsHistoryLimit: 3
+
+resources: {}
