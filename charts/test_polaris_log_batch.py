@@ -150,8 +150,19 @@ class Rendered(unittest.TestCase):
 
 
 class ValuesSchema(unittest.TestCase):
-    def test_no_image_tag_is_refused(self):
+    def test_the_default_values_render_and_name_the_image_built_from_this_checkout(self):
+        # The static gate lints every chart with its defaults, so values.yaml carries the tag;
+        # it must change with the Dockerfile or the script (release.batch_image).
         result = helm_template()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with open(os.path.join(release.BATCH_CHART, "values.yaml"), encoding="utf-8") as f:
+            image = yaml.safe_load(f)["image"]
+        self.assertEqual(f"{image['repository']}:{image['tag']}", release.batch_image(),
+                         "images/polaris-log-batch changed: set image.tag in "
+                         "charts/polaris-log-batch/values.yaml to the new hash")
+
+    def test_an_empty_image_tag_is_refused(self):
+        result = helm_template("image.tag=")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("tag", result.stderr)
 
