@@ -1,0 +1,63 @@
+{
+  "_comment": "What the recorder must have seen from Polaris itself after the install's bootstrap and the smoke gate's check-polaris (ADR-034, ADR-026); what it must never see from it. Read with standins.json, whose must-nots hold for every record. Matched by gates/traffic.py.",
+  "expectations": [
+    {
+      "name": "PostgreSQL accepted a login from Polaris's JDBC driver over TLS",
+      "must": "exist",
+      "_comment": "pgjdbc sends no application_name at login (it sets it after); check_db.sh names itself.",
+      "match": {
+        "proto": "pg",
+        "event": "connect",
+        "result": "ok",
+        "tls": true,
+        "user": "polaris",
+        "application_name": null
+      }
+    },
+    {
+      "name": "The bootstrap stored the root principal's credentials",
+      "must": "exist",
+      "match": {
+        "proto": "pg",
+        "event": "statement",
+        "sql": {
+          "regex": "^INSERT INTO POLARIS_SCHEMA\\.PRINCIPAL_AUTHENTICATION_DATA "
+        },
+        "tag": "INSERT 0 1"
+      }
+    },
+    {
+      "name": "OPA allowed root to list the catalogs, asked by Polaris",
+      "must": "exist",
+      "match": {
+        "proto": "http",
+        "listener": "opa",
+        "method": "POST",
+        "status": 200,
+        "request_body.json.input.actor.principal": "root",
+        "request_body.json.input.action": "LIST_CATALOGS",
+        "response_body.json.result.allow": true
+      }
+    },
+    {
+      "name": "No login from Polaris's JDBC driver without TLS",
+      "must": "not_exist",
+      "match": {
+        "proto": "pg",
+        "event": "connect",
+        "tls": false,
+        "application_name": null
+      }
+    },
+    {
+      "name": "OPA never refused root",
+      "must": "not_exist",
+      "match": {
+        "proto": "http",
+        "listener": "opa",
+        "request_body.json.input.actor.principal": "root",
+        "response_body.json.result.allow": false
+      }
+    }
+  ]
+}
