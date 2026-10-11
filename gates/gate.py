@@ -47,6 +47,15 @@
                   the commit in images/polaris-console/source.json and checked, its console/ as
                   the context with this repository's package-lock.json, built with
                   images/polaris-console/Dockerfile, then loaded into the kind cluster.
+  batch-image     builds the log batch's image from images/polaris-log-batch, tagged as
+                  install/release.py names it, and loads it into the kind cluster (ADR-036).
+  check-logs      follows traffic to the hand-off (ADR-024, ADR-036): gates/logs_traffic.sh in
+                  a short-lived curl pod sends each Polaris pod requests with their own
+                  X-Request-ID; a Job from the batch's CronJob runs with its clock past that
+                  hour, then again; a stand-in Fluent Bit (pinned, the claim read-only) reads
+                  processed-logs/ and aggregated-logs/. Every line it read must hold contract
+                  v1 (gates/contract.py), every request ID appear once from its pod, both
+                  pods' files be read, and the second run change no file.
   check-console   runs gates/console/check.py (on stdin) in a short-lived pod on the pinned
                   Python image: the console answers and points the browser at Polaris, and
                   gate_maintainer signs in as the browser does, from the console's origin,
@@ -60,9 +69,11 @@
 Every kubectl and helm call names the gate's context, and a namespace where the object has
 one. Nothing here reaches any cluster but the kind cluster it creates (ADR-017).
 
-Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | check-polaris-pg | check-polaris | console-image | check-console | check-iceberg
+Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | check-polaris-pg | check-polaris | console-image | batch-image | check-logs | check-console | check-iceberg
 """
 
+import copy
+import datetime as dt
 import hashlib
 import io
 import json
@@ -72,12 +83,14 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, "install"))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
+import contract  # noqa: E402
 import init_env  # noqa: E402
 import release  # noqa: E402
 import release_tag  # noqa: E402
@@ -119,6 +132,23 @@ STANDARD_NODE_PATHS = [{"node": "DEFAULT_PATH_FOR_NON_LISTED_NODES",
 CONSOLE_IMAGE_DIR = os.path.join(ROOT, "images", "polaris-console")
 CONSOLE_IMAGE_REPOSITORY = "lakehouse/polaris-console"
 CONSOLE_PORT = 8080
+# The log batch on the gate (ADR-036): requests sent to each Polaris pod, how long a run of the
+# batch or of the stand-in Fluent Bit may take, and where the claim is mounted to be read.
+LOGS_REQUESTS = 5
+LOGS_TIMEOUT = 300
+LOGS_MOUNT = "/logs"
+OUTPUT_DIRS = ("processed-logs", "aggregated-logs")
+# The stand-in reads as a user that is neither root nor Polaris's and the batch's (10000), as
+# the observability team's reader would (ADR-024).
+READER_UID = 65534
+# Run in a short-lived pod with the claim at $1, read-only: one line per output file, its
+# SHA-256, its line count and its path under the claim.
+LOGS_LISTING = """cd "$1" || exit 1
+for f in processed-logs/*.jsonl aggregated-logs/*.jsonl; do
+  [ -f "$f" ] || continue
+  printf '%s %s %s\\n' "$(sha256sum < "$f" | cut -c1-64)" "$(($(wc -l < "$f")))" "$f"
+done
+"""
 
 
 def load_pins(path=os.path.join(HERE, "pins.json")):
@@ -568,6 +598,212 @@ def check_console_command(env, image, name):
             env["POLARIS_CONSOLE_API_URL"], release.POLARIS_REALM]
 
 
+def batch_image_commands(directory=release.BATCH_IMAGE_DIR):
+    """Build the log batch's image, tagged as release.py names it, and load it into kind."""
+    image = release.batch_image(directory)
+    return [["docker", "build", "--file", os.path.join(directory, "Dockerfile"),
+             "--tag", image, directory],
+            ["kind", "load", "docker-image", image, "--name", CLUSTER]]
+
+
+def logs_request_ids(prefix, count, pod_names):
+    """The X-Request-ID each request carries, as logs_traffic.sh makes it, and its pod."""
+    return {f"{prefix}-{pod}-{n}": pod for pod in pod_names for n in range(1, count + 1)}
+
+
+def logs_traffic_command(env, image, name, prefix, count, pods):
+    """The pod that runs logs_traffic.sh (on stdin) with root's credentials against each of
+    `pods`, (name, URL) pairs."""
+    creds = [{"name": var, "valueFrom": {"secretKeyRef": {"name": release.POLARIS_ROOT_SECRET,
+                                                         "key": key}}}
+             for var, key in (("ROOT_CLIENT_ID", "clientId"),
+                              ("ROOT_CLIENT_SECRET", "clientSecret"))]
+    overrides = {"spec": {"containers": [{"name": name, "image": image, "env": creds,
+                                          "stdin": True, "stdinOnce": True}]}}
+    return ["kubectl", "--context", CONTEXT, "-n", env["NS_CATALOG_POLARIS"], "run", name,
+            f"--image={image}", "--restart=Never", "--rm", "-i", "--quiet",
+            "--pod-running-timeout=3m", "--override-type=strategic",
+            "--overrides", json.dumps(overrides),
+            "--command", "--", "sh", "-s", "--",
+            f"http://{release.POLARIS}:{POLARIS_API_PORT}", release.POLARIS_REALM, str(count),
+            prefix, *[part for pod in pods for part in pod]]
+
+
+def batch_now(t):
+    """The clock the gate gives the batch: the hour after `t` began, plus the batch's 60 s of
+    grace and one more, so the hour `t` is in is publishable (ADR-036)."""
+    hour = t.astimezone(dt.timezone.utc).replace(minute=0, second=0, microsecond=0)
+    return (hour + dt.timedelta(hours=1, seconds=61)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def batch_job(cronjob, name, now):
+    """A Job from the CronJob's own template, the batch told `--now`."""
+    template = copy.deepcopy(cronjob["spec"]["jobTemplate"])
+    container = template["spec"]["template"]["spec"]["containers"][0]
+    container["args"] = container.get("args", []) + ["--now", now]
+    metadata = {"name": name, "namespace": cronjob["metadata"]["namespace"]}
+    if template.get("metadata", {}).get("labels"):
+        metadata["labels"] = template["metadata"]["labels"]
+    return {"apiVersion": "batch/v1", "kind": "Job", "metadata": metadata,
+            "spec": template["spec"]}
+
+
+def job_outcome(job):
+    """`succeeded`, `failed`, or None while the Job runs."""
+    status = job.get("status", {})
+    if status.get("succeeded"):
+        return "succeeded"
+    if status.get("failed"):
+        return "failed"
+    return None
+
+
+def json_lines(text):
+    """The lines of `text` that are JSON objects; anything else (a log line, a traceback) is
+    skipped."""
+    out = []
+    for line in text.splitlines():
+        if line.startswith("{"):
+            try:
+                out.append(json.loads(line))
+            except ValueError:
+                pass
+    return out
+
+
+batch_events = fluent_bit_records = json_lines
+
+
+def _logs_volume(read_only):
+    return ({"name": release.POLARIS_LOGS,
+             "persistentVolumeClaim": {"claimName": release.POLARIS_LOGS,
+                                       "readOnly": read_only}},
+            {"name": release.POLARIS_LOGS, "mountPath": LOGS_MOUNT, "readOnly": read_only})
+
+
+def logs_listing_command(env, image, name):
+    """The pod that runs LOGS_LISTING (on stdin) with the claim mounted read-only."""
+    volume, mount = _logs_volume(True)
+    overrides = {"spec": {"containers": [{"name": name, "image": image, "stdin": True,
+                                          "stdinOnce": True, "volumeMounts": [mount]}],
+                          "volumes": [volume]}}
+    return ["kubectl", "--context", CONTEXT, "-n", env["NS_CATALOG_POLARIS"], "run", name,
+            f"--image={image}", "--restart=Never", "--rm", "-i", "--quiet",
+            "--pod-running-timeout=3m", "--override-type=strategic",
+            "--overrides", json.dumps(overrides), "--command", "--", "sh", "-s", "--",
+            LOGS_MOUNT]
+
+
+def parse_listing(text):
+    """LOGS_LISTING's lines -> {path: {"sha256": ..., "lines": ...}}."""
+    out = {}
+    for line in text.splitlines():
+        parts = line.split(" ", 2)
+        if len(parts) == 3:
+            out[parts[2]] = {"sha256": parts[0], "lines": int(parts[1])}
+    return out
+
+
+def fluent_bit_pod(env, image, name):
+    """The stand-in for the observability team's Fluent Bit (ADR-024, ADR-036): in Polaris's
+    namespace, the claim mounted read-only, it tails both output directories from their start
+    and prints every line as JSON with its path, then exits once it has read them all."""
+    volume, mount = _logs_volume(True)
+    paths = ",".join(f"{LOGS_MOUNT}/{d}/*.jsonl" for d in OUTPUT_DIRS)
+    return {"apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": name, "namespace": env["NS_CATALOG_POLARIS"],
+                         "labels": {"app.kubernetes.io/name": "fluent-bit-standin"}},
+            "spec": {
+                "restartPolicy": "Never",
+                "securityContext": {"runAsNonRoot": True, "runAsUser": READER_UID,
+                                    "runAsGroup": READER_UID,
+                                    "seccompProfile": {"type": "RuntimeDefault"}},
+                "containers": [{
+                    "name": "fluent-bit", "image": image,
+                    "command": ["/fluent-bit/bin/fluent-bit"],
+                    "args": ["-R", "/fluent-bit/etc/parsers.conf",
+                             "-i", "tail", "-p", f"path={paths}", "-p", "read_from_head=true",
+                             "-p", "exit_on_eof=true", "-p", "parser=json",
+                             "-p", "path_key=source_file", "-p", "buffer_max_size=1M",
+                             "-o", "stdout", "-p", "format=json_lines",
+                             "-p", "json_date_key=false", "-f", "1"],
+                    "securityContext": {"allowPrivilegeEscalation": False,
+                                        "readOnlyRootFilesystem": True,
+                                        "capabilities": {"drop": ["ALL"]}},
+                    "volumeMounts": [mount]}],
+                "volumes": [volume]}}
+
+
+def logs_problems(sent, pods, events, before, after, records):
+    """What the reader saw against what was sent (ADR-036): every line holds contract v1,
+    every file was read whole, every request ID once from its pod, every pod's file read, and
+    a second run changed nothing. Returns (problems, notes)."""
+    problems = []
+    first, second = events
+    published = [e["hour"] for e in first if e.get("event") == "published"]
+    if not published:
+        why = "; ".join(e.get("reason", e.get("event", "")) for e in first) or "no output"
+        problems.append(f"the first run published no hour: {why}")
+    if any(e.get("event") == "published" for e in second):
+        problems.append("the second run published again: "
+                        + ", ".join(e["hour"] for e in second if e.get("event") == "published"))
+    for path in sorted(set(before) | set(after)):
+        if before.get(path) != after.get(path):
+            problems.append(f"the second run changed {path}: {before.get(path)} -> "
+                            f"{after.get(path)}")
+    hours = {d: {p.split("/", 1)[1] for p in after if p.startswith(d + "/")}
+             for d in OUTPUT_DIRS}
+    for missing in sorted(hours["processed-logs"] ^ hours["aggregated-logs"]):
+        where = "aggregated-logs" if missing in hours["processed-logs"] else "processed-logs"
+        problems.append(f"{where}/{missing} is missing: an hour has both files")
+
+    schemas = {"processed-logs": contract.load("processed"),
+               "aggregated-logs": contract.load("summary")}
+    read, summaries, seen = {}, [], {}
+    for record in records:
+        record = dict(record)
+        path = record.pop("source_file", "")
+        rel = path[len(LOGS_MOUNT) + 1:] if path.startswith(LOGS_MOUNT + "/") else path
+        read[rel] = read.get(rel, 0) + 1
+        kind = rel.split("/", 1)[0]
+        if kind not in schemas:
+            problems.append(f"a record from {path or 'no file'}, outside the hand-off")
+            continue
+        problems += [f"{rel}: {p}" for p in contract.problems(record, schemas[kind])]
+        if kind == "aggregated-logs":
+            summaries.append(record)
+            continue
+        rid = record.get("mdc", {}).get("requestId")
+        if rid in sent:
+            seen.setdefault(rid, []).append(record.get("hostName"))
+    for path in sorted(set(after) | set(read)):
+        want = after.get(path, {}).get("lines", 0)
+        if read.get(path, 0) != want:
+            problems.append(f"{path}: the reader read {read.get(path, 0)} lines of {want}")
+
+    for rid, pod in sorted(sent.items()):
+        hosts = seen.get(rid, [])
+        if hosts != [pod]:
+            problems.append(f"request {rid}, sent to {pod}: read {len(hosts)} times"
+                            + (f", from {', '.join(map(str, hosts))}" if hosts else ""))
+
+    logged = {p for s in summaries for p in s.get("pods", [])}
+    files = {f["file"] for s in summaries for f in s.get("sources", [])}
+    for pod in pods:
+        if pod not in logged or f"polaris-{pod}.log" not in files:
+            problems.append(f"pod {pod}: its file polaris-{pod}.log was not read")
+
+    n_files = len(after)
+    notes = [
+        f"The batch published {len(published)} hour(s) ({', '.join(published)}); the second "
+        f"run published nothing and left all {n_files} files as they were.",
+        f"The stand-in Fluent Bit read {len(records)} lines from {len(read)} files, each "
+        f"checked against contract v1.",
+        f"All {len(sent)} request IDs read exactly once, each from the pod it was sent to: "
+        f"{', '.join(pods)}; both pods' files read."]
+    return problems, ([] if problems else notes)
+
+
 def _git(repo, *args):
     return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, check=False)
 
@@ -588,6 +824,77 @@ def released_tags(repo=ROOT):
 def run(argv, stdin=None):
     print("+ " + " ".join(argv), flush=True)
     subprocess.run(argv, input=stdin, text=True, check=True)
+
+
+def output(argv, stdin=None):
+    """A command's stdout; its failure stops the gate with what it said."""
+    done = subprocess.run(argv, input=stdin, capture_output=True, text=True, check=False)
+    if done.returncode != 0:
+        sys.exit(f"{' '.join(argv[:8])}... failed: {done.stderr.strip() or done.stdout.strip()}")
+    return done.stdout
+
+
+def wait_for(argv, done, what, timeout=LOGS_TIMEOUT):
+    """Reads `argv` as JSON every 3 s until done(answer) gives a value; stops the gate after
+    `timeout` seconds."""
+    end = time.monotonic() + timeout
+    while True:
+        result = done(json.loads(output(argv)))
+        if result:
+            return result
+        if time.monotonic() > end:
+            sys.exit(f"{what}: not done after {timeout} s")
+        time.sleep(3)
+
+
+def check_logs(env, pins):
+    """`check-logs`: see the module's docstring. Returns (problems, notes)."""
+    ns, pid = env["NS_CATALOG_POLARIS"], os.getpid()
+    kubectl = ["kubectl", "--context", CONTEXT, "-n", ns]
+    pods = _running(json.loads(output(kubectl + ["get", "pods", "-l", POLARIS_POD_LABELS,
+                                                 "-o", "json"])))
+    if len(pods) < 2:
+        return [f"{len(pods)} Polaris pod(s) running: the check needs both replicas"], []
+    targets = [(p["metadata"]["name"], f"http://{p['status']['podIP']}:{POLARIS_API_PORT}")
+               for p in pods]
+    prefix = f"gate-logs-{pid}"
+    sent = logs_request_ids(prefix, LOGS_REQUESTS, [name for name, _ in targets])
+    with open(os.path.join(HERE, "logs_traffic.sh"), encoding="utf-8") as f:
+        script = f.read()
+    if subprocess.run(logs_traffic_command(env, release.images()["curl"], f"logs-traffic-{pid}",
+                                           prefix, LOGS_REQUESTS, targets),
+                      input=script, text=True, check=False).returncode:
+        return ["the traffic to Polaris's pods failed: see its lines above"], []
+    now = batch_now(dt.datetime.now(dt.timezone.utc))
+    print(f"The batch runs twice with --now {now}.", flush=True)
+    cronjob = json.loads(output(kubectl + ["get", f"cronjob/{release.BATCH}", "-o", "json"]))
+    events, listings = [], []
+    for n in (1, 2):
+        name = f"{release.BATCH}-gate-{pid}-{n}"
+        run(kubectl + ["create", "-f", "-"], json.dumps(batch_job(cronjob, name, now)))
+        outcome = wait_for(kubectl + ["get", f"job/{name}", "-o", "json"], job_outcome,
+                           f"job/{name}")
+        log = output(kubectl + ["logs", f"job/{name}"])
+        print(log, end="", flush=True)
+        if outcome != "succeeded":
+            return [f"job/{name} {outcome}: see its output above"], []
+        events.append(batch_events(log))
+        listings.append(parse_listing(output(
+            logs_listing_command(env, release.images()["curl"], f"logs-listing-{pid}-{n}"),
+            LOGS_LISTING)))
+    reader = fluent_bit_pod(env, pins["standin_images"]["fluent_bit"]["image"],
+                            f"fluent-bit-standin-{pid}")
+    name = reader["metadata"]["name"]
+    run(kubectl + ["apply", "-f", "-"], json.dumps(reader))
+    phase = wait_for(kubectl + ["get", f"pod/{name}", "-o", "json"],
+                     lambda p: p.get("status", {}).get("phase") in ("Succeeded", "Failed")
+                     and p["status"]["phase"], f"pod/{name}")
+    records = fluent_bit_records(output(kubectl + ["logs", f"pod/{name}"]))
+    run(kubectl + ["delete", f"pod/{name}", "--wait=false"])
+    if phase != "Succeeded":
+        return [f"the stand-in Fluent Bit ended {phase}"], []
+    return logs_problems(sent, [name for name, _ in targets], events, listings[0],
+                         listings[1], records)
 
 
 def main(argv):
@@ -668,6 +975,15 @@ def main(argv):
             for command in commands[3:]:
                 run(command)
         return 0
+    if argv[1:] == ["batch-image"]:
+        for command in batch_image_commands():
+            run(command)
+        return 0
+    if argv[1:] == ["check-logs"]:
+        problems, notes = check_logs(release.load_env(ROOT, os.environ), pins)
+        for line in notes + problems:
+            print(line, flush=True)
+        return 1 if problems else 0
     if argv[1:] == ["check-console"]:
         env = release.load_env(ROOT, os.environ)
         with open(os.path.join(HERE, "console", "check.py"), encoding="utf-8") as f:
