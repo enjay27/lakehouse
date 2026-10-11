@@ -4,7 +4,8 @@
 # for other teams' services (ADR-031), the latest release tag installed from its checkout and
 # this commit's release over it (ADR-021), or with `fresh` this commit's alone; then the
 # running Cluster polaris-pg is checked against its values, its three instances on three nodes
-# (ADR-016), the stand-ins answer as Polaris needs them to (ADR-026), and the recorder saw
+# (ADR-016), the stand-ins answer as Polaris needs them to (ADR-026), Polaris runs as its values
+# say and gives root a token every replica accepts (ADR-016, ADR-026), and the recorder saw
 # those exchanges and none it must not (ADR-034). The release gate
 # calls it twice on every PR into rc, upgrade and fresh (ADR-033). Not a PR check into main,
 # so auto-merge.yml does not list it.
@@ -81,10 +82,15 @@ jobs:
           set -euo pipefail
           python3 gates/gate.py check-standins | tee -a "$GITHUB_STEP_SUMMARY"
 
+      - name: Polaris runs as its values say, and every replica accepts root's token (ADR-016, ADR-026)
+        run: |
+          set -euo pipefail
+          python3 gates/gate.py check-polaris | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: The recorder saw what it must, and nothing it must not (ADR-034)
         run: |
           set -euo pipefail
-          python3 gates/gate.py check-traffic gates/expectations/standins.json | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 gates/gate.py check-traffic gates/expectations/standins.json gates/expectations/polaris.json | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: State of the cluster on failure
         if: failure()
@@ -98,3 +104,5 @@ jobs:
           kubectl --context "$KUBE_CONTEXT" -n "$NS_STANDINS" logs deployment/seaweedfs --tail=60 || true
           kubectl --context "$KUBE_CONTEXT" -n "$NS_STANDINS" logs deployment/opa --tail=60 || true
           kubectl --context "$KUBE_CONTEXT" -n "$NS_STANDINS" logs deployment/recorder --tail=60 || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_POLARIS" get deployment,configmap -o wide || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_POLARIS" logs -l app.kubernetes.io/name=polaris --tail=80 --prefix || true

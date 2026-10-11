@@ -1,5 +1,5 @@
 {
-  "_comment": "What the recorder must have seen after the smoke gate's check-standins and the install's endpoint check (ADR-034): the allowed and refused policy decisions, an S3 round trip, logins as Polaris with and without TLS; and what it must never see. Matched by gates/traffic.py; Polaris's own exchanges get their file with the Polaris chart.",
+  "_comment": "What the recorder must have seen after the smoke gate's check-standins and the install's endpoint check (ADR-034): the allowed and refused policy decisions, an S3 round trip, logins as Polaris with and without TLS; and what it must never see, from anyone. Matched by gates/traffic.py; Polaris's own exchanges are in polaris.json.",
   "expectations": [
     {
       "name": "OPA allowed root to create a catalog",
@@ -143,13 +143,26 @@
       }
     },
     {
-      "name": "No PostgreSQL statement failed",
+      "name": "No PostgreSQL statement failed, but for a table that did not exist yet",
       "must": "not_exist",
       "match": {
         "proto": "pg",
         "event": "statement",
-        "error": {
-          "present": true
+        "error.sqlstate": {
+          "regex": "^(?!42P01$)"
+        }
+      }
+    },
+    {
+      "name": "No missing table, but the two the bootstrap looks for before it creates them",
+      "must": "not_exist",
+      "_comment": "Polaris 1.6.0's admin tool reads the schema version and one entity before it runs schema-v4.sql; on an empty database both fail with 42P01 (relation does not exist), measured 2026-10-11.",
+      "match": {
+        "proto": "pg",
+        "event": "statement",
+        "error.sqlstate": "42P01",
+        "sql": {
+          "regex": "^(?!SELECT version_value FROM POLARIS_SCHEMA\\.VERSION$|SELECT \\* FROM POLARIS_SCHEMA\\.ENTITIES LIMIT 1$)"
         }
       }
     },

@@ -93,5 +93,33 @@ class Committed(unittest.TestCase):
                     self.assertTrue(e["match"])
 
 
+class BootstrapProbes(unittest.TestCase):
+    """standins.json's must-nots hold for every record, Polaris's bootstrap included."""
+
+    def statement(self, sql, sqlstate):
+        return {"proto": "pg", "event": "statement", "sql": sql,
+                "error": {"severity": "ERROR", "sqlstate": sqlstate, "message": "m"}}
+
+    def failed(self, *recorded):
+        expectations = traffic.load(os.path.join(HERE, "expectations", "standins.json"))
+        must_nots = [e for e in expectations if e["must"] == "not_exist"]
+        problems, _ = traffic.check(list(recorded), must_nots)
+        return problems
+
+    def test_the_bootstraps_two_probes_of_an_empty_database_pass(self):
+        self.assertEqual(self.failed(
+            self.statement("SELECT version_value FROM POLARIS_SCHEMA.VERSION", "42P01"),
+            self.statement("SELECT * FROM POLARIS_SCHEMA.ENTITIES LIMIT 1", "42P01")), [])
+
+    def test_any_other_missing_table_fails(self):
+        self.assertTrue(self.failed(
+            self.statement("SELECT * FROM POLARIS_SCHEMA.GRANT_RECORDS", "42P01")))
+
+    def test_any_other_error_fails_even_on_a_probe(self):
+        self.assertTrue(self.failed(
+            self.statement("SELECT version_value FROM POLARIS_SCHEMA.VERSION", "42501")))
+        self.assertTrue(self.failed(self.statement("INSERT INTO entities VALUES (1)", "23505")))
+
+
 if __name__ == "__main__":
     unittest.main()

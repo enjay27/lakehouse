@@ -292,6 +292,134 @@ class PolarisPg(unittest.TestCase):
         self.assertIn("cnpg.io/cluster=polaris-pg,cnpg.io/podRole=instance", commands[2])
 
 
+POLARIS_ENV = {"NS_CATALOG_POLARIS": "catalog-polaris", "POLARIS_DB_HOST": "recorder.standins.svc",
+               "POLARIS_OPA_URL": "http://recorder.standins.svc:8181/v1/data/polaris/authz"}
+POLARIS_IMAGE = "apache/polaris:1.6.0@sha256:" + "d" * 64
+POLARIS_VALUES = {
+    "replicaCount": 2,
+    "image": {"repository": "apache/polaris", "tag": POLARIS_IMAGE.split(":", 1)[1]},
+    "persistence": {"type": "relational-jdbc"},
+    "authentication": {"tokenBroker": {"type": "symmetric-key"}},
+    "advancedConfig": {
+        "polaris.authorization.type": "opa",
+        "polaris.authorization.opa.policy-uri": POLARIS_ENV["POLARIS_OPA_URL"],
+        "quarkus.datasource.jdbc.url":
+            "jdbc:postgresql://recorder.standins.svc:5432/polaris?sslmode=require"},
+}
+
+
+def polaris_properties(**changes):
+    props = {"polaris.persistence.type": "relational-jdbc",
+             "polaris.authorization.type": "opa",
+             "polaris.authorization.opa.policy-uri": POLARIS_ENV["POLARIS_OPA_URL"],
+             "quarkus.datasource.jdbc.url":
+                 "jdbc:postgresql://recorder.standins.svc:5432/polaris?sslmode=require",
+             "polaris.authentication.token-broker.type": "symmetric-key", **changes}
+    text = "\n".join(f"{k}={v}" for k, v in props.items())
+    return {"data": {"application.properties": text}}
+
+
+def polaris_deployment(replicas=2, ready=2, image=POLARIS_IMAGE):
+    return {"spec": {"replicas": replicas,
+                     "template": {"spec": {"containers": [{"name": "polaris", "image": image}]}}},
+            "status": {"readyReplicas": ready}}
+
+
+def polaris_pods(*nodes):
+    return {"items": [{"metadata": {"name": f"polaris-{i}"},
+                       "spec": {"nodeName": n},
+                       "status": {"phase": "Running", "podIP": f"10.0.0.{i + 1}"}}
+                      for i, n in enumerate(nodes)]}
+
+
+class Polaris(unittest.TestCase):
+    """The running Polaris against the values it was installed with (ADR-016)."""
+
+    def problems(self, values=POLARIS_VALUES, deployment=None, pods=None, configmap=None,
+                 env=POLARIS_ENV):
+        return gate.polaris_problems(values, deployment or polaris_deployment(),
+                                     pods or polaris_pods("a", "b"),
+                                     configmap or polaris_properties(), env)
+
+    def test_as_installed_passes_and_names_the_nodes_and_settings(self):
+        problems, notes = self.problems()
+        self.assertEqual(problems, [])
+        text = "\n".join(notes)
+        for part in ("2 replicas ready on 2 nodes (a, b)", POLARIS_IMAGE, "relational-jdbc",
+                     "symmetric-key", "opa", POLARIS_ENV["POLARIS_OPA_URL"]):
+            self.assertIn(part, text)
+
+    def test_a_different_replica_count_is_found(self):
+        problems, _ = self.problems(deployment=polaris_deployment(replicas=1, ready=1),
+                                    pods=polaris_pods("a"))
+        self.assertIn("replicas", "\n".join(problems))
+
+    def test_replicas_not_ready_are_found(self):
+        problems, _ = self.problems(deployment=polaris_deployment(ready=1))
+        self.assertIn("ready", "\n".join(problems))
+
+    def test_a_different_image_is_found(self):
+        problems, _ = self.problems(deployment=polaris_deployment(image="apache/polaris:1.6.0"))
+        self.assertIn("image", "\n".join(problems))
+
+    def test_two_replicas_on_one_node_are_found(self):
+        problems, _ = self.problems(pods=polaris_pods("a", "a"))
+        self.assertIn("nodes", "\n".join(problems))
+
+    def test_each_running_setting_is_compared_with_the_values(self):
+        for key, other in (("polaris.persistence.type", "in-memory"),
+                           ("polaris.authorization.type", "internal"),
+                           ("polaris.authorization.opa.policy-uri", "http://elsewhere/v1"),
+                           ("quarkus.datasource.jdbc.url", "jdbc:postgresql://x:5432/polaris"),
+                           ("polaris.authentication.token-broker.type", "rsa-key-pair")):
+            with self.subTest(key=key):
+                problems, _ = self.problems(configmap=polaris_properties(**{key: other}))
+                self.assertIn(key, "\n".join(problems))
+
+    def test_values_that_do_not_name_the_endpoints_in_env_are_found(self):
+        env = {**POLARIS_ENV, "POLARIS_DB_HOST": "polaris-pg-rw",
+               "POLARIS_OPA_URL": "http://opa.standins.svc:8181/v1/data/polaris/authz"}
+        problems, _ = self.problems(env=env)
+        text = "\n".join(problems)
+        self.assertIn("quarkus.datasource.jdbc.url", text)
+        self.assertIn("polaris.authorization.opa.policy-uri", text)
+
+    def test_each_running_pod_is_asked_at_its_own_address(self):
+        pods = polaris_pods("a", "b")
+        pods["items"].append({"metadata": {"name": "polaris-old"}, "spec": {"nodeName": "c"},
+                              "status": {"phase": "Succeeded", "podIP": "10.0.0.9"}})
+        self.assertEqual(gate.polaris_pod_urls(pods),
+                         ["http://10.0.0.1:8181", "http://10.0.0.2:8181"])
+
+    def test_the_check_reads_the_release_and_its_objects_in_its_namespace(self):
+        commands = gate.polaris_commands("catalog-polaris")
+        self.assertEqual([c[0] for c in commands], ["helm", "kubectl", "kubectl", "kubectl"])
+        for argv in commands:
+            self.assertEqual(argv[argv.index("-n") + 1], "catalog-polaris")
+            self.assertIn(gate.CONTEXT, argv)
+        self.assertEqual(commands[0][commands[0].index("values") + 1], "polaris")
+        self.assertIn("--all", commands[0])
+        self.assertIn("deployment/polaris", commands[1])
+        self.assertIn("app.kubernetes.io/name=polaris,app.kubernetes.io/instance=polaris",
+                      commands[2])
+        self.assertIn("configmap/polaris", commands[3])
+
+    def test_the_check_pod_gets_roots_credentials_from_their_secret(self):
+        argv = gate.check_polaris_command(POLARIS_ENV, "curl:1@sha256:" + "e" * 64, "check-p",
+                                          ["http://10.0.0.1:8181", "http://10.0.0.2:8181"])
+        self.assertEqual(argv[:7], ["kubectl", "--context", gate.CONTEXT, "-n", "catalog-polaris",
+                                    "run", "check-p"])
+        overrides = json.loads(argv[argv.index("--overrides") + 1])
+        (container,) = overrides["spec"]["containers"]
+        env = {e["name"]: e["valueFrom"]["secretKeyRef"] for e in container["env"]}
+        self.assertEqual(env, {"ROOT_CLIENT_ID": {"name": "polaris-root", "key": "clientId"},
+                               "ROOT_CLIENT_SECRET": {"name": "polaris-root",
+                                                      "key": "clientSecret"}})
+        tail = argv[argv.index("--") + 1:]
+        self.assertEqual(tail, ["sh", "-s", "--", "http://polaris:8181", "http://polaris-mgmt:8182",
+                                "POLARIS", "http://10.0.0.1:8181", "http://10.0.0.2:8181"])
+
+
 def git(repo, *args):
     return subprocess.run(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", *args],
                           capture_output=True, text=True, check=True).stdout.strip()

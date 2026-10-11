@@ -35,11 +35,16 @@
                   compares the running `Cluster` polaris-pg with the values its helm release
                   was installed with, and checks its instances run on different nodes
                   (ADR-016).
+  check-polaris   compares the running Polaris (its Deployment, pods and ConfigMap) with the
+                  values its helm release was installed with and with `.env`, checks its
+                  replicas run on different nodes (ADR-016), then runs gates/check_polaris.sh
+                  in a short-lived curl pod: ready, a token for root, and each pod accepting
+                  it (ADR-026).
 
 Every kubectl and helm call names the gate's context, and a namespace where the object has
 one. Nothing here reaches any cluster but the kind cluster it creates (ADR-017).
 
-Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | check-polaris-pg
+Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | check-polaris-pg | check-polaris
 """
 
 import hashlib
@@ -73,6 +78,9 @@ GATE_ENV_GENERATED = ("POLARIS_S3_ACCESS_KEY_ID", "POLARIS_S3_SECRET_ACCESS_KEY"
 # On the gate, the endpoints of other teams' services are the stand-ins' (ADR-031).
 STANDIN_REGION = "us-east-1"
 STANDIN_BUCKET = "polaris-warehouse"
+# Polaris's pods and ports, as charts/polaris renders them.
+POLARIS_POD_LABELS = "app.kubernetes.io/name=polaris,app.kubernetes.io/instance=polaris"
+POLARIS_API_PORT, POLARIS_MGMT_PORT = 8181, 8182
 
 
 def load_pins(path=os.path.join(HERE, "pins.json")):
@@ -294,6 +302,96 @@ def polaris_pg_problems(values, cluster, pods):
                       f"{spec['imageName']}, anti-affinity {anti}."]
 
 
+def polaris_commands(namespace):
+    """Polaris's helm values, its Deployment, its pods and its ConfigMap, as JSON."""
+    kubectl = ["kubectl", "--context", CONTEXT, "-n", namespace, "get"]
+    return [
+        ["helm", "--kube-context", CONTEXT, "-n", namespace, "get", "values", release.POLARIS,
+         "--all", "-o", "json"],
+        kubectl + [f"deployment/{release.POLARIS}", "-o", "json"],
+        kubectl + ["pods", "-l", POLARIS_POD_LABELS, "-o", "json"],
+        kubectl + [f"configmap/{release.POLARIS}", "-o", "json"],
+    ]
+
+
+def _properties(configmap):
+    text = configmap["data"]["application.properties"]
+    pairs = (line.split("=", 1) for line in text.splitlines()
+             if "=" in line and not line.startswith("#"))
+    return {k.strip(): v.strip() for k, v in pairs}
+
+
+def _running(pods):
+    return [p for p in pods["items"] if p.get("status", {}).get("phase") == "Running"]
+
+
+def polaris_problems(values, deployment, pods, configmap, env):
+    """The running Polaris against the values it was installed with (ADR-016), and those
+    values against `.env`: the database host and the policy endpoint the gate names."""
+    problems, wanted = [], values["replicaCount"]
+    replicas = deployment["spec"]["replicas"]
+    if replicas != wanted:
+        problems.append(f"replicas: {replicas} running, {wanted} in the values")
+    ready = deployment.get("status", {}).get("readyReplicas", 0)
+    if ready != wanted:
+        problems.append(f"{ready} replicas ready of {wanted}")
+    image = deployment["spec"]["template"]["spec"]["containers"][0]["image"]
+    want_image = f"{values['image']['repository']}:{values['image']['tag']}"
+    if image != want_image:
+        problems.append(f"image: {image} running, {want_image} in the values")
+    running = _running(pods)
+    nodes = sorted({p["spec"].get("nodeName") for p in running})
+    if len(nodes) != len(running) or len(nodes) != wanted:
+        problems.append(f"{len(running)} replicas on {len(nodes)} nodes: "
+                        + ", ".join(str(n) for n in nodes))
+    advanced, props = values["advancedConfig"], _properties(configmap)
+    for key, want in (
+            ("polaris.persistence.type", values["persistence"]["type"]),
+            ("polaris.authentication.token-broker.type",
+             values["authentication"]["tokenBroker"]["type"]),
+            ("polaris.authorization.type", advanced["polaris.authorization.type"]),
+            ("polaris.authorization.opa.policy-uri",
+             advanced["polaris.authorization.opa.policy-uri"]),
+            ("quarkus.datasource.jdbc.url", advanced["quarkus.datasource.jdbc.url"])):
+        if props.get(key) != want:
+            problems.append(f"{key}: {props.get(key)} running, {want} in the values")
+    for key, want in (("quarkus.datasource.jdbc.url", release.jdbc_url(env)),
+                      ("polaris.authorization.opa.policy-uri", env["POLARIS_OPA_URL"])):
+        if advanced[key] != want:
+            problems.append(f"{key}: {advanced[key]} in the values, {want} from .env")
+    return problems, [
+        f"Deployment {release.POLARIS}: {ready} replicas ready on {len(nodes)} nodes "
+        f"({', '.join(str(n) for n in nodes)}), image {image}.",
+        f"Polaris settings: persistence {props.get('polaris.persistence.type')}, database "
+        f"{props.get('quarkus.datasource.jdbc.url')}, tokens "
+        f"{props.get('polaris.authentication.token-broker.type')}, authorization "
+        f"{props.get('polaris.authorization.type')} at "
+        f"{props.get('polaris.authorization.opa.policy-uri')}."]
+
+
+def polaris_pod_urls(pods):
+    """Each running Polaris pod's API, by its own address: one check per replica."""
+    return [f"http://{p['status']['podIP']}:{POLARIS_API_PORT}" for p in _running(pods)]
+
+
+def check_polaris_command(env, image, name, pod_urls):
+    """The pod that runs check_polaris.sh (on stdin) with root's credentials."""
+    creds = [{"name": var, "valueFrom": {"secretKeyRef": {"name": release.POLARIS_ROOT_SECRET,
+                                                         "key": key}}}
+             for var, key in (("ROOT_CLIENT_ID", "clientId"),
+                              ("ROOT_CLIENT_SECRET", "clientSecret"))]
+    overrides = {"spec": {"containers": [{"name": name, "image": image, "env": creds,
+                                          "stdin": True, "stdinOnce": True}]}}
+    return ["kubectl", "--context", CONTEXT, "-n", env["NS_CATALOG_POLARIS"], "run", name,
+            f"--image={image}", "--restart=Never", "--rm", "-i", "--quiet",
+            "--pod-running-timeout=3m", "--override-type=strategic",
+            "--overrides", json.dumps(overrides),
+            "--command", "--", "sh", "-s", "--",
+            f"http://{release.POLARIS}:{POLARIS_API_PORT}",
+            f"http://{release.POLARIS}-mgmt:{POLARIS_MGMT_PORT}", release.POLARIS_REALM,
+            *pod_urls]
+
+
 def _git(repo, *args):
     return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, check=False)
 
@@ -389,6 +487,21 @@ def main(argv):
         for line in notes + problems:
             print(line)
         return 1 if problems else 0
+    if argv[1:] == ["check-polaris"]:
+        env = release.load_env(ROOT, os.environ)
+        answers = [json.loads(subprocess.run(c, capture_output=True, text=True,
+                                             check=True).stdout)
+                   for c in polaris_commands(env["NS_CATALOG_POLARIS"])]
+        problems, notes = polaris_problems(*answers, env)
+        for line in notes + problems:
+            print(line, flush=True)
+        with open(os.path.join(HERE, "check_polaris.sh"), encoding="utf-8") as f:
+            script = f.read()
+        command = check_polaris_command(env, release.images()["curl"],
+                                        f"check-polaris-{os.getpid()}",
+                                        polaris_pod_urls(answers[2]))
+        failed = subprocess.run(command, input=script, text=True, check=False).returncode
+        return 1 if problems or failed else 0
     print(__doc__.strip().splitlines()[-1], file=sys.stderr)
     return 2
 

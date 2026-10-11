@@ -1,4 +1,5 @@
 {
   "curl": "curlimages/curl:8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777",
+  "polaris_admin_tool": "apache/polaris-admin-tool:1.6.0@sha256:7e2e1899dbd1e8c9f3792ebaf3faf67bbac42867ea912d49690dd8d49ff60db4",
   "_source": "Docker Hub index digest (docker-content-digest, recomputed), read 2026-10-11"
 }
