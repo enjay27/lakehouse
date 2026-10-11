@@ -60,6 +60,11 @@ jobs:
       - name: The gate's Secrets (ADR-006)
         run: python3 gates/gate.py secrets
 
+      # The console is a maintainer tool: its failure is reported, never blocking (ADR-028).
+      - name: The Polaris console's image, built from its pinned commit and loaded into kind (ADR-028)
+        continue-on-error: true
+        run: python3 gates/gate.py console-image
+
       - name: The stand-ins, SeaweedFS and OPA (gate only, ADR-031)
         run: python3 gates/gate.py standins
 

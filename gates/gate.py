@@ -41,6 +41,10 @@
                   replicas run on different nodes (ADR-016), then runs gates/check_polaris.sh
                   in a short-lived curl pod: ready, a token for root, and each pod accepting
                   it (ADR-026).
+  console-image   builds the Polaris console's image (ADR-028): apache/polaris-tools fetched at
+                  the commit in images/polaris-console/source.json and checked, its console/ as
+                  the context with this repository's package-lock.json, built with
+                  images/polaris-console/Dockerfile, then loaded into the kind cluster.
   check-iceberg   runs gates/iceberg/smoke.py in a short-lived pod on the pinned Python image,
                   mounted with its hashed requirements from the ConfigMap iceberg-smoke: PyIceberg
                   as gate_smoke, with the smoke tests' own S3 key (Secret smoke-s3), writes a
@@ -50,13 +54,14 @@
 Every kubectl and helm call names the gate's context, and a namespace where the object has
 one. Nothing here reaches any cluster but the kind cluster it creates (ADR-017).
 
-Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | check-polaris-pg | check-polaris | check-iceberg
+Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | check-polaris-pg | check-polaris | console-image | check-iceberg
 """
 
 import hashlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -94,6 +99,9 @@ POLARIS_POD_LABELS = "app.kubernetes.io/name=polaris,app.kubernetes.io/instance=
 POLARIS_API_PORT, POLARIS_MGMT_PORT = 8181, 8182
 # The catalog the smoke tests create and the gate's policy names (gates/opa/policy.rego).
 ICEBERG_CATALOG = "gate_catalog"
+# The Polaris console's image, built here from a pinned polaris-tools commit (ADR-028).
+CONSOLE_IMAGE_DIR = os.path.join(ROOT, "images", "polaris-console")
+CONSOLE_IMAGE_REPOSITORY = "lakehouse/polaris-console"
 
 
 def load_pins(path=os.path.join(HERE, "pins.json")):
@@ -458,6 +466,39 @@ def check_iceberg_commands(env, image, name):
     ]
 
 
+def console_source(path=os.path.join(CONSOLE_IMAGE_DIR, "source.json")):
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def console_image(source):
+    """The console image's name: built here, never pulled, tagged with its commit."""
+    return f"{CONSOLE_IMAGE_REPOSITORY}:{source['commit'][:12]}"
+
+
+def console_image_commands(source, context_dir):
+    """Fetch the pinned commit into `context_dir`, build its console/ with our Dockerfile, load
+    the image into kind. Our lockfile is copied in, and the commit checked, between the third
+    and the fourth command."""
+    return [
+        ["git", "init", "--quiet", context_dir],
+        ["git", "-C", context_dir, "fetch", "--quiet", "--depth", "1", source["repository"],
+         source["commit"]],
+        ["git", "-C", context_dir, "-c", "advice.detachedHead=false", "checkout", "--quiet",
+         "FETCH_HEAD"],
+        ["docker", "build", "--file", os.path.join(CONSOLE_IMAGE_DIR, "Dockerfile"),
+         "--tag", console_image(source), os.path.join(context_dir, source["path"])],
+        ["kind", "load", "docker-image", console_image(source), "--name", CLUSTER],
+    ]
+
+
+def check_commit(repo, commit):
+    """Raises unless `repo` has exactly `commit` checked out."""
+    head = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    if head != commit:
+        raise ValueError(f"{repo}: {head or 'nothing'} checked out, pinned {commit}")
+
+
 def _git(repo, *args):
     return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, check=False)
 
@@ -542,6 +583,18 @@ def main(argv):
                                              "--fresh" in argv, "--dry-run" in argv)
             print(summary, flush=True)
             for command in commands:
+                run(command)
+        return 0
+    if argv[1:] == ["console-image"]:
+        source = console_source()
+        with tempfile.TemporaryDirectory() as d:
+            commands = console_image_commands(source, d)
+            for command in commands[:3]:
+                run(command)
+            check_commit(d, source["commit"])
+            shutil.copyfile(os.path.join(CONSOLE_IMAGE_DIR, "package-lock.json"),
+                            os.path.join(d, source["path"], "package-lock.json"))
+            for command in commands[3:]:
                 run(command)
         return 0
     if argv[1:] == ["check-polaris-pg"]:
