@@ -24,14 +24,16 @@ PREFIX = "gate-logs-42"
 NOW = "2026-10-11T13:01:01Z"
 
 
-def polaris_line(pod, second, request_id=None):
-    """One line as Polaris 1.6.0 writes it (docs/contracts/polaris-logs.md)."""
+def polaris_line(pod, second, request_id=None, kind="read"):
+    """One access line as Polaris 1.6.0 writes it (docs/contracts/polaris-logs.md): root
+    listing the catalogs, or (`denied`) a request without a token."""
+    who, status = ("root", "200 15") if kind == "read" else ("-", "401 -")
     return json.dumps({
         "timestamp": f"2026-10-11T12:40:{second:02d}.753600155Z", "sequence": second,
         "loggerClassName": "org.jboss.logging.Logger",
         "loggerName": "io.quarkus.http.access-log", "level": "INFO",
-        "message": "10.0.0.9 - root [11/Oct/2026:12:40:47 +0000] "
-                   "\"GET /api/management/v1/catalogs HTTP/1.1\" 200 15",
+        "message": f"10.0.0.9 - {who} [11/Oct/2026:12:40:47 +0000] "
+                   f"\"GET /api/management/v1/catalogs HTTP/1.1\" {status}",
         "threadName": "executor-thread-2", "threadId": 31,
         "mdc": {"requestId": request_id or f"generated-{pod}-{second}", "realmId": "POLARIS"},
         "ndc": "", "hostName": pod, "processName": "/usr/lib/jvm/java-21/bin/java",
@@ -77,8 +79,8 @@ class Fixture:
         self.sent = sent or gate.logs_request_ids(PREFIX, 2, PODS)
         self.dir = tempfile.TemporaryDirectory()
         lines = {pod: [polaris_line(pod, 1)] for pod in PODS}
-        for n, (rid, pod) in enumerate(sorted(self.sent.items()), 2):
-            lines[pod].append(polaris_line(pod, n, rid))
+        for n, (rid, (pod, kind)) in enumerate(sorted(self.sent.items()), 2):
+            lines[pod].append(polaris_line(pod, n, rid, kind))
         self.events = [batch_outputs(self.dir.name, lines)]
         self.before = listing(self.dir.name)
         out = subprocess.run([sys.executable, os.path.join(
@@ -116,12 +118,13 @@ class BatchImage(unittest.TestCase):
 
 
 class Traffic(unittest.TestCase):
-    def test_every_request_id_is_distinct_and_names_its_pod(self):
+    def test_each_pod_gets_requests_the_policy_counts_and_requests_it_keeps(self):
         sent = gate.logs_request_ids(PREFIX, 3, PODS)
-        self.assertEqual(len(sent), 6)
-        self.assertEqual(sorted(set(sent.values())), PODS)
-        for rid, pod in sent.items():
-            self.assertTrue(rid.startswith(f"{PREFIX}-{pod}-"), rid)
+        self.assertEqual(len(sent), 12)
+        self.assertEqual(sorted(set(sent.values())),
+                         [(pod, kind) for pod in PODS for kind in ("denied", "read")])
+        for rid, (pod, kind) in sent.items():
+            self.assertTrue(rid.startswith(f"{PREFIX}-{pod}-{kind}-"), rid)
 
     def test_the_traffic_pod_gets_roots_credentials_and_asks_each_pod_by_its_address(self):
         argv = gate.logs_traffic_command(ENV, "curl:1@sha256:" + "e" * 64, "logs-traffic",
@@ -162,17 +165,17 @@ class TrafficScript(unittest.TestCase):
                               input=text, capture_output=True, text=True,
                               env={**os.environ, **CREDS}, timeout=60)
 
-    def test_each_pod_gets_its_own_request_ids_with_roots_token(self):
+    def test_each_pod_is_read_with_roots_token_and_asked_without_one(self):
         (a, seen_a), (b, seen_b) = self.replica(), self.replica()
         done = self.run_script(a, [(PODS[0], a), (PODS[1], b)])
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         for pod, seen in ((PODS[0], seen_a), (PODS[1], seen_b)):
-            ids = [h.get("X-Request-ID") for method, path, h in seen
-                   if path == "/api/management/v1/catalogs"]
-            self.assertEqual(ids, [f"{PREFIX}-{pod}-1", f"{PREFIX}-{pod}-2"])
-            for method, path, h in seen:
-                if path == "/api/management/v1/catalogs":
-                    self.assertEqual(h["Authorization"], f"Bearer {TOKEN}")
+            asked = [(h.get("X-Request-ID"), h.get("Authorization")) for method, path, h in seen
+                     if path == "/api/management/v1/catalogs"]
+            self.assertEqual(asked, [(f"{PREFIX}-{pod}-read-1", f"Bearer {TOKEN}"),
+                                     (f"{PREFIX}-{pod}-denied-1", None),
+                                     (f"{PREFIX}-{pod}-read-2", f"Bearer {TOKEN}"),
+                                     (f"{PREFIX}-{pod}-denied-2", None)])
         self.assertNotIn(CREDS["ROOT_CLIENT_SECRET"], done.stdout + done.stderr)
         self.assertNotIn(TOKEN, done.stdout + done.stderr)
 
@@ -180,7 +183,7 @@ class TrafficScript(unittest.TestCase):
         (a, _), (b, _) = self.replica(), self.replica(signing_key="other-key")
         done = self.run_script(a, [(PODS[0], a), (PODS[1], b)])
         self.assertEqual(done.returncode, 1)
-        self.assertIn(f"FAIL {PREFIX}-{PODS[1]}-1", done.stdout)
+        self.assertIn(f"FAIL {PREFIX}-{PODS[1]}-read-1", done.stdout)
 
 
 class BatchRun(unittest.TestCase):
@@ -309,14 +312,18 @@ class Problems(unittest.TestCase):
         problems, notes = self.f.problems()
         self.assertEqual(problems, [])
         text = "\n".join(notes)
-        self.assertIn("4 request IDs", text)
+        self.assertIn("4 kept request IDs", text)
+        self.assertIn("4 counted", text)
         for pod in PODS:
             self.assertIn(pod, text)
-        self.assertIn("contract v1", text)
+        self.assertIn("contract v2", text)
         self.assertIn("second run", text)
 
+    def kept(self):
+        return sorted(r for r, (_, kind) in self.f.sent.items() if kind == "denied")
+
     def test_a_request_id_missing_or_read_twice_fails(self):
-        rid = sorted(self.f.sent)[0]
+        rid = self.kept()[0]
         records = [r for r in self.f.records if r.get("mdc", {}).get("requestId") != rid]
         problems, _ = self.f.problems(records=records)
         self.assertIn(rid, "\n".join(problems))
@@ -325,11 +332,35 @@ class Problems(unittest.TestCase):
         self.assertIn(rid, "\n".join(problems))
 
     def test_a_request_id_from_another_pod_fails(self):
-        rid, pod = sorted(self.f.sent.items())[0]
+        rid = self.kept()[0]
+        pod = self.f.sent[rid][0]
         records = [dict(r, hostName=PODS[1] if pod == PODS[0] else PODS[0])
                    if r.get("mdc", {}).get("requestId") == rid else r for r in self.f.records]
         problems, _ = self.f.problems(records=records)
         self.assertIn(rid, "\n".join(problems))
+
+    def test_a_counted_request_in_the_processed_lines_fails(self):
+        rid = next(r for r, (_, kind) in sorted(self.f.sent.items()) if kind == "read")
+        [doc] = [r for r in self.f.records if r.get("mdc", {}).get("requestId") == self.kept()[0]]
+        leaked = dict(doc, mdc={"requestId": rid, "realmId": "POLARIS"})
+        problems, _ = self.f.problems(records=self.f.records + [leaked])
+        self.assertIn(rid, "\n".join(problems))
+
+    def test_rows_that_do_not_count_the_requests_sent_fail(self):
+        records = [dict(r, reads=0) if r.get("user_principal_name") == "root"
+                   and r.get("report_type") == "principal" else r for r in self.f.records]
+        problems, _ = self.f.problems(records=records)
+        self.assertIn("root", "\n".join(problems))
+        records = [dict(r, auth_denied=0) if r.get("resource") == "/api/management/v1/catalogs"
+                   else r for r in self.f.records]
+        problems, _ = self.f.problems(records=records)
+        self.assertIn("/api/management/v1/catalogs", "\n".join(problems))
+
+    def test_a_summary_whose_books_do_not_balance_fails(self):
+        records = [dict(r, dropped=r["dropped"] + 1) if r.get("report_type") == "summary"
+                   else r for r in self.f.records]
+        problems, _ = self.f.problems(records=records)
+        self.assertIn("dropped", "\n".join(problems))
 
     def test_a_line_the_contract_refuses_fails(self):
         records = [dict(self.f.records[0], event_id="not-a-sha1")] + self.f.records[1:]
@@ -337,7 +368,7 @@ class Problems(unittest.TestCase):
         self.assertIn("event_id", "\n".join(problems))
 
     def test_fewer_records_than_lines_fails(self):
-        summary = [r for r in self.f.records if "aggregated-logs" in r["source_file"]]
+        summary = [r for r in self.f.records if r.get("report_type") == "summary"]
         problems, _ = self.f.problems(records=[r for r in self.f.records if r not in summary])
         self.assertIn("aggregated-logs/", "\n".join(problems))
 

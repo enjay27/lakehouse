@@ -1,8 +1,9 @@
 """gates/contract.py: checks lines against the log contract's JSON schemas (ADR-024, ADR-036).
 
-The processed lines below are lines Polaris 1.6.0 wrote (apache/polaris:1.6.0 at the digest
-in charts/polaris/values-lakehouse.yaml, run locally with JSON file logging on 2026-10-11),
-each with the event_id and log_hour the batch adds.
+The lines below are lines Polaris 1.6.0 wrote (apache/polaris:1.6.0 at the digest in
+charts/polaris/values-lakehouse.yaml, run locally with JSON file logging on 2026-10-11); the 401
+is the access line a request without a token got, measured the same way. The batch's audit
+policy decides which are kept (contract v2).
 """
 
 import io
@@ -33,34 +34,77 @@ STARTUP = ('{"timestamp":"2026-10-11T12:40:38.429922859Z","sequence":1754,'
            '"level":"INFO","message":"Initialized persistence cache","threadName":"main",'
            '"threadId":1,"mdc":{},"ndc":"","hostName":"polaris-7f4d69c67c-aaaaa",'
            '"processName":"/usr/lib/jvm/java/bin/java","processId":1}')
+DENIED = ('{"timestamp":"2026-10-11T12:40:48.283104402Z","sequence":1771,'
+          '"loggerClassName":"org.jboss.logging.Logger","loggerName":"io.quarkus.http.access-log",'
+          '"level":"INFO","message":"172.17.0.1 - - [11/Oct/2026:12:40:48 +0000] '
+          '\\"GET /api/management/v1/catalogs HTTP/1.1\\" 401 -",'
+          '"threadName":"vert.x-eventloop-thread-3","threadId":27,'
+          '"mdc":{"requestId":"gate-req-0002","realmId":"POLARIS"},"ndc":"",'
+          '"hostName":"polaris-7f4d69c67c-aaaaa","processName":"/usr/lib/jvm/java/bin/java",'
+          '"processId":1}')
+FAILED = ('{"timestamp":"2026-10-11T12:40:49.100000000Z","sequence":1772,'
+          '"loggerClassName":"org.jboss.logging.Logger",'
+          '"loggerName":"org.apache.polaris.service.exception.IcebergExceptionMapper",'
+          '"level":"ERROR","message":"Unhandled exception","threadName":"executor-thread-2",'
+          '"threadId":31,"mdc":{"requestId":"gate-req-0003","realmId":"POLARIS"},"ndc":"",'
+          '"hostName":"polaris-7f4d69c67c-aaaaa","processName":"/usr/lib/jvm/java/bin/java",'
+          '"processId":1}')
+POD = "polaris-7f4d69c67c-aaaaa"
 
 
 def processed(raw, hour="20261011-12"):
-    return plb.processed_doc(json.loads(raw), raw.encode(), hour)
+    """The document the audit policy publishes for `raw`, which it must keep."""
+    rec, ts = plb.parse_line(raw.encode())
+    entry = {"rec": rec, "ts": ts, "raw": raw.encode(), "pod": POD, "file": "f", "line_no": 1}
+    [doc], _, _, _ = plb.AuditPolicy().apply([entry], [entry], plb.hour_from_key(hour), hour)
+    return doc
+
+
+def batch_hour(*raws):
+    """Every row and processed line the batch publishes for one hour of `raws`."""
+    with tempfile.TemporaryDirectory() as tmp:
+        d = pathlib.Path(tmp)
+        (d / f"polaris-{POD}.log").write_text("".join(r + "\n" for r in raws))
+        when = plb.parse_ts("2026-10-11T12:41:00Z").timestamp()
+        os.utime(d / f"polaris-{POD}.log", (when, when))
+        plb.run(plb.Config(tmp, pod_lister=lambda: {POD}),
+                now=plb.parse_ts("2026-10-11T13:03:00Z"), out=io.StringIO())
+        rows = [json.loads(x) for x in
+                (d / "aggregated-logs/20261011-12.jsonl").read_text().splitlines()]
+        docs = [json.loads(x) for x in
+                (d / "processed-logs/20261011-12.jsonl").read_text().splitlines()]
+    return rows, docs
 
 
 class Processed(unittest.TestCase):
     def setUp(self):
         self.schema = contract.load("processed")
 
-    def test_lines_polaris_wrote_pass(self):
-        for raw in (ACCESS, STARTUP):
+    def test_kept_lines_polaris_wrote_pass(self):
+        for raw in (DENIED, FAILED):
             self.assertEqual(contract.problems(processed(raw), self.schema), [])
 
+    def test_a_kept_access_line_carries_its_parsed_fields(self):
+        doc = processed(DENIED)
+        self.assertEqual((doc["http_status"], doc["response_size"], doc["user_principal_name"],
+                          doc["api_path"]), (401, 0, "-", "/api/management/v1/catalogs"))
+        doc["http_status"] = "401"
+        self.assertEqual(contract.problems(doc, self.schema), ["http_status: expected integer"])
+
     def test_a_field_polaris_writes_must_be_there(self):
-        doc = processed(ACCESS)
+        doc = processed(DENIED)
         del doc["mdc"]
         self.assertEqual(contract.problems(doc, self.schema), ["mdc: required"])
 
     def test_types_are_checked(self):
-        doc = processed(ACCESS)
+        doc = processed(DENIED)
         doc["sequence"] = "1770"
         doc["mdc"] = []
         self.assertEqual(sorted(contract.problems(doc, self.schema)),
                          ["mdc: expected object", "sequence: expected integer"])
 
     def test_event_id_and_log_hour_have_their_shape(self):
-        doc = processed(ACCESS)
+        doc = processed(DENIED)
         doc["event_id"] = "not-a-sha1"
         doc["log_hour"] = "2026-10-11-12"
         self.assertEqual(sorted(contract.problems(doc, self.schema)),
@@ -68,44 +112,52 @@ class Processed(unittest.TestCase):
                           "log_hour: does not match ^[0-9]{8}-[0-9]{2}$"])
 
     def test_the_timestamp_is_utc_with_a_z(self):
-        doc = processed(ACCESS)
+        doc = processed(DENIED)
         doc["timestamp"] = "2026-10-11T21:40:47.753600155+09:00"
         self.assertEqual(len(contract.problems(doc, self.schema)), 1)
 
     def test_fields_polaris_adds_later_are_allowed(self):
-        doc = processed(ACCESS)
+        doc = processed(FAILED)
         doc["exception"] = {"exceptionType": "java.lang.RuntimeException"}
         self.assertEqual(contract.problems(doc, self.schema), [])
 
     def test_a_boolean_is_not_an_integer(self):
-        doc = processed(ACCESS)
-        doc["processId"] = True
-        self.assertEqual(contract.problems(doc, self.schema), ["processId: expected integer"])
+        doc = processed(DENIED)
+        doc["threadId"] = True
+        self.assertEqual(contract.problems(doc, self.schema), ["threadId: expected integer"])
 
 
-class Summary(unittest.TestCase):
-    def test_the_batch_summary_row_passes_and_nothing_else_does(self):
-        schema = contract.load("summary")
-        with tempfile.TemporaryDirectory() as tmp:
-            d = pathlib.Path(tmp)
-            (d / "polaris-polaris-7f4d69c67c-aaaaa.log").write_text(
-                ACCESS + "\n" + "garbage\n")
-            when = plb.parse_ts("2026-10-11T12:41:00Z").timestamp()
-            os.utime(d / "polaris-polaris-7f4d69c67c-aaaaa.log", (when, when))
-            plb.run(plb.Config(tmp, pod_lister=lambda: {"polaris-7f4d69c67c-aaaaa"}),
-                    now=plb.parse_ts("2026-10-11T13:03:00Z"), out=io.StringIO())
-            [row] = [json.loads(x) for x in
-                     (d / "aggregated-logs/20261011-12.jsonl").read_text().splitlines()]
-            [doc] = [json.loads(x) for x in
-                     (d / "processed-logs/20261011-12.jsonl").read_text().splitlines()]
-        self.assertEqual(contract.problems(row, schema), [])
-        self.assertEqual(contract.problems(doc, contract.load("processed")), [])
-        row["extra"] = 1
-        self.assertEqual(contract.problems(row, schema), ["extra: not allowed"])
+class Rows(unittest.TestCase):
+    """The aggregated file: a summary row, then resource, principal and app_dropped rows, each
+    checked against the schema its report_type names."""
 
-    def test_the_contract_version_is_fixed(self):
-        schema = contract.load("summary")
-        self.assertEqual(schema["properties"]["contract_version"], {"const": 1})
+    @classmethod
+    def setUpClass(cls):
+        cls.rows, cls.docs = batch_hour(ACCESS, DENIED, STARTUP, FAILED, "garbage")
+
+    def test_every_row_and_kept_line_of_a_real_hour_passes(self):
+        self.assertEqual([r["report_type"] for r in self.rows],
+                         ["summary", "resource", "principal", "principal", "app_dropped"])
+        for row in self.rows:
+            self.assertEqual(contract.row_problems(row), [], row["report_type"])
+        self.assertEqual([d["message"][:20] for d in self.docs],
+                         ["172.17.0.1 - - [11/O", "Unhandled exception"])
+        for doc in self.docs:
+            self.assertEqual(contract.problems(doc, contract.load("processed")), [])
+
+    def test_a_field_no_schema_names_is_refused_in_every_row(self):
+        for row in self.rows:
+            self.assertEqual(contract.row_problems({**row, "extra": 1}), ["extra: not allowed"],
+                             row["report_type"])
+
+    def test_an_unknown_row_type_is_a_problem_not_an_error(self):
+        self.assertEqual(contract.row_problems({"report_type": "audit"}),
+                         ["report_type: 'audit' is no row type of the contract"])
+
+    def test_every_row_schema_fixes_the_contract_version(self):
+        for name in contract.ROW_SCHEMAS.values():
+            self.assertEqual(contract.load(name)["properties"]["contract_version"],
+                             {"const": 2}, name)
 
 
 class Validator(unittest.TestCase):
@@ -126,7 +178,7 @@ class Validator(unittest.TestCase):
 
     def test_lines_reports_the_line_number_and_bad_json(self):
         schema = contract.load("processed")
-        text = json.dumps(processed(ACCESS)) + "\nnot json\n"
+        text = json.dumps(processed(DENIED)) + "\nnot json\n"
         self.assertEqual(contract.check_lines(text, schema),
                          (1, ["line 2: not JSON"]))
 

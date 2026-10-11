@@ -8,8 +8,9 @@
 # say and gives root a token every replica accepts (ADR-016, ADR-026), PyIceberg as an ordinary
 # principal writes a table into a catalog on the S3 endpoint and reads it back while the policy
 # refuses what it is not granted (ADR-026, ADR-031), the log batch publishes the hour of
-# traffic sent to both Polaris pods once and a stand-in Fluent Bit reads it as contract v1
-# (ADR-024, ADR-036), and the recorder saw those exchanges and none it must not (ADR-034).
+# traffic sent to both Polaris pods once, keeping the refused requests and counting the reads,
+# and a stand-in Fluent Bit reads it as contract v2 (ADR-024, ADR-036), and the recorder saw
+# those exchanges and none it must not (ADR-034).
 # The console, built from its pinned commit, is checked last: a
 # maintainer signs in as the browser does and may only read; those steps report, never block
 # (ADR-028). The release gate
@@ -106,7 +107,7 @@ jobs:
           set -euo pipefail
           python3 gates/gate.py check-iceberg | tee -a "$GITHUB_STEP_SUMMARY"
 
-      - name: The batch publishes both pods' traffic once; a stand-in Fluent Bit reads it as contract v1 (ADR-024, ADR-036)
+      - name: The batch publishes both pods' traffic once; a stand-in Fluent Bit reads it as contract v2 (ADR-024, ADR-036)
         run: |
           set -euo pipefail
           python3 gates/gate.py check-logs | tee -a "$GITHUB_STEP_SUMMARY"

@@ -50,12 +50,14 @@
   batch-image     builds the log batch's image from images/polaris-log-batch, tagged as
                   install/release.py names it, and loads it into the kind cluster (ADR-036).
   check-logs      follows traffic to the hand-off (ADR-024, ADR-036): gates/logs_traffic.sh in
-                  a short-lived curl pod sends each Polaris pod requests with their own
-                  X-Request-ID; a Job from the batch's CronJob runs with its clock past that
-                  hour, then again; a stand-in Fluent Bit (pinned, the claim read-only) reads
-                  processed-logs/ and aggregated-logs/. Every line it read must hold contract
-                  v1 (gates/contract.py), every request ID appear once from its pod, both
-                  pods' files be read, and the second run change no file.
+                  a short-lived curl pod sends each Polaris pod reads with root's token and
+                  requests without one, each with its own X-Request-ID; a Job from the batch's
+                  CronJob runs with its clock past that hour, then again; a stand-in Fluent Bit
+                  (pinned, the claim read-only) reads processed-logs/ and aggregated-logs/.
+                  Every line and row it read must hold contract v2 (gates/contract.py) and every
+                  summary's books balance; each refused request must be kept once from its pod,
+                  no read kept but all counted on the rows; both pods' files read; the second
+                  run must change no file.
   check-console   runs gates/console/check.py (on stdin) in a short-lived pod on the pinned
                   Python image: the console answers and points the browser at Polaris, and
                   gate_maintainer signs in as the browser does, from the console's origin,
@@ -607,8 +609,11 @@ def batch_image_commands(directory=release.BATCH_IMAGE_DIR):
 
 
 def logs_request_ids(prefix, count, pod_names):
-    """The X-Request-ID each request carries, as logs_traffic.sh makes it, and its pod."""
-    return {f"{prefix}-{pod}-{n}": pod for pod in pod_names for n in range(1, count + 1)}
+    """The X-Request-ID each request carries, as logs_traffic.sh makes it -> (its pod, its kind):
+    `read`, root listing the catalogs, which the audit policy counts; `denied`, the same request
+    without a token, which it keeps (contract v2)."""
+    return {f"{prefix}-{pod}-{kind}-{n}": (pod, kind) for pod in pod_names
+            for n in range(1, count + 1) for kind in ("read", "denied")}
 
 
 def logs_traffic_command(env, image, name, prefix, count, pods):
@@ -735,9 +740,10 @@ def fluent_bit_pod(env, image, name):
 
 
 def logs_problems(sent, pods, events, before, after, records):
-    """What the reader saw against what was sent (ADR-036): every line holds contract v1,
-    every file was read whole, every request ID once from its pod, every pod's file read, and
-    a second run changed nothing. Returns (problems, notes)."""
+    """What the reader saw against what was sent (ADR-036, contract v2): every line and row
+    holds the contract, every file was read whole, every summary's books balance, each kept
+    request was read once from its pod, no counted one was kept but the rows count them all,
+    every pod's file was read, and a second run changed nothing. Returns (problems, notes)."""
     problems = []
     first, second = events
     published = [e["hour"] for e in first if e.get("event") == "published"]
@@ -757,38 +763,71 @@ def logs_problems(sent, pods, events, before, after, records):
         where = "aggregated-logs" if missing in hours["processed-logs"] else "processed-logs"
         problems.append(f"{where}/{missing} is missing: an hour has both files")
 
-    schemas = {"processed-logs": contract.load("processed"),
-               "aggregated-logs": contract.load("summary")}
-    read, summaries, seen = {}, [], {}
+    processed_schema = contract.load("processed")
+    read, rows, seen = {}, [], {}
     for record in records:
         record = dict(record)
         path = record.pop("source_file", "")
         rel = path[len(LOGS_MOUNT) + 1:] if path.startswith(LOGS_MOUNT + "/") else path
         read[rel] = read.get(rel, 0) + 1
         kind = rel.split("/", 1)[0]
-        if kind not in schemas:
-            problems.append(f"a record from {path or 'no file'}, outside the hand-off")
-            continue
-        problems += [f"{rel}: {p}" for p in contract.problems(record, schemas[kind])]
         if kind == "aggregated-logs":
-            summaries.append(record)
-            continue
-        rid = record.get("mdc", {}).get("requestId")
-        if rid in sent:
-            seen.setdefault(rid, []).append(record.get("hostName"))
+            problems += [f"{rel}: {p}" for p in contract.row_problems(record)]
+            rows.append((rel, record))
+        elif kind == "processed-logs":
+            problems += [f"{rel}: {p}" for p in contract.problems(record, processed_schema)]
+            rid = record.get("mdc", {}).get("requestId")
+            if rid in sent:
+                seen.setdefault(rid, []).append(record.get("hostName"))
+        else:
+            problems.append(f"a record from {path or 'no file'}, outside the hand-off")
     for path in sorted(set(after) | set(read)):
         want = after.get(path, {}).get("lines", 0)
         if read.get(path, 0) != want:
             problems.append(f"{path}: the reader read {read.get(path, 0)} lines of {want}")
 
-    for rid, pod in sorted(sent.items()):
+    summaries = [(rel, r) for rel, r in rows if r.get("report_type") == "summary"]
+    for rel, s in summaries:
+        books = (("lines_in", s.get("processed", 0) + s.get("dropped", 0) + s.get("malformed", 0)),
+                 ("dropped", s.get("access_counted", 0) + s.get("app_dropped_total", 0)
+                  + s.get("app_dropped_404", 0)),
+                 ("access_kept", s.get("access_seen", 0) - s.get("access_counted", 0)),
+                 ("processed", after.get(f"processed-logs/{rel.split('/', 1)[1]}",
+                                         {}).get("lines")))
+        for field, want in books:
+            if s.get(field) != want:
+                problems.append(f"{rel}: {field} is {s.get(field)}, its books say {want}")
+
+    kept = {rid: pod for rid, (pod, kind) in sent.items() if kind == "denied"}
+    counted = {rid: pod for rid, (pod, kind) in sent.items() if kind == "read"}
+    for rid, pod in sorted(kept.items()):
         hosts = seen.get(rid, [])
         if hosts != [pod]:
-            problems.append(f"request {rid}, sent to {pod}: read {len(hosts)} times"
-                            + (f", from {', '.join(map(str, hosts))}" if hosts else ""))
+            problems.append(f"request {rid}, sent to {pod} without a token: read {len(hosts)} "
+                            f"times" + (f", from {', '.join(map(str, hosts))}" if hosts else ""))
+    for rid in sorted(set(counted) & set(seen)):
+        problems.append(f"request {rid}, a read the policy counts, was kept {len(seen[rid])} "
+                        f"times")
 
-    logged = {p for s in summaries for p in s.get("pods", [])}
-    files = {f["file"] for s in summaries for f in s.get("sources", [])}
+    def total(kind, key, value, field):
+        return sum(r.get(field, 0) for _, r in rows
+                   if r.get("report_type") == kind and r.get(key) == value)
+
+    catalogs = "/api/management/v1/catalogs"
+    for what, have, want in (
+            (f"resource {catalogs} reads", total("resource", "resource", catalogs, "reads"),
+             len(sent)),
+            (f"resource {catalogs} auth_denied",
+             total("resource", "resource", catalogs, "auth_denied"), len(kept)),
+            ("principal root reads", total("principal", "user_principal_name", "root", "reads"),
+             len(counted)),
+            ("principal - auth_denied",
+             total("principal", "user_principal_name", "-", "auth_denied"), len(kept))):
+        if have < want:
+            problems.append(f"{what}: {have}, fewer than the {want} sent")
+
+    logged = {p for _, s in summaries for p in s.get("pods", [])}
+    files = {f["file"] for _, s in summaries for f in s.get("sources", [])}
     for pod in pods:
         if pod not in logged or f"polaris-{pod}.log" not in files:
             problems.append(f"pod {pod}: its file polaris-{pod}.log was not read")
@@ -798,9 +837,10 @@ def logs_problems(sent, pods, events, before, after, records):
         f"The batch published {len(published)} hour(s) ({', '.join(published)}); the second "
         f"run published nothing and left all {n_files} files as they were.",
         f"The stand-in Fluent Bit read {len(records)} lines from {len(read)} files, each "
-        f"checked against contract v1.",
-        f"All {len(sent)} request IDs read exactly once, each from the pod it was sent to: "
-        f"{', '.join(pods)}; both pods' files read."]
+        f"checked against contract v2, every summary's books balanced.",
+        f"All {len(kept)} kept request IDs (no token, 401) read exactly once, each from the pod "
+        f"it was sent to; none of the {len(counted)} counted (root's reads) kept, all counted "
+        f"on the rows; pods {', '.join(pods)}, both files read."]
     return problems, ([] if problems else notes)
 
 
