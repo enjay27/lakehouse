@@ -60,6 +60,8 @@ def roll(d, pod, hour, lines, mtime, n=None):
 
 
 def cfg(d, pods=(A, B), **kw):
+    kw.setdefault("policy", plb.PassthroughPolicy())  # these tests: every line kept, as the
+    # archive's framework tests ran; the policy has its own tests (test_polaris_log_policy.py)
     lister = kw.pop("lister", None)
     if lister is None and pods is not None:
         lister = lambda: set(pods)  # noqa: E731
@@ -365,14 +367,14 @@ class ExactlyOnce(Case):
 
 
 class TheSummaryRow(Case):
-    def test_contract_v1_summary_fields(self):
+    def test_contract_v2_summary_fields(self):
         current(self.d, A, [line("2026-09-28 10:10:00", A)], "2026-09-28 10:10:00")
         run(cfg(self.d), "2026-09-28 11:03:00")
         s = summary(self.d, "20260928-10")
-        self.assertEqual(s["contract_version"], 1)
+        self.assertEqual(s["contract_version"], 2)
         self.assertEqual(s["report_type"], "summary")
-        self.assertEqual((s["window_start"], s["window_end"]),
-                         ("2026-09-28T10:00:00+00:00", "2026-09-28T11:00:00+00:00"))
+        self.assertEqual((s["window_start"], s["window_end"], s["window_seconds"]),
+                         ("2026-09-28T10:00:00+00:00", "2026-09-28T11:00:00+00:00", 3600))
         self.assertEqual(s["hour"], "20260928-10")
         self.assertEqual(s["pods"], [A])
         self.assertEqual(s["published_at"], "2026-09-28T11:03:00+00:00")

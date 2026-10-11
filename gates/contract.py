@@ -17,10 +17,23 @@ KEYWORDS = ANNOTATIONS | {"type", "required", "properties", "additionalPropertie
 TYPES = {"object": dict, "array": list, "string": str, "null": type(None), "boolean": bool}
 
 
+# The schema of each row of an aggregated file, by its report_type (contract v2).
+ROW_SCHEMAS = {"summary": "summary", "resource": "resource", "principal": "principal",
+               "app_dropped": "app-dropped"}
+
+
 def load(name):
-    """`processed` or `summary`: docs/contracts/polaris-logs-<name>.schema.json."""
+    """`processed`, or a name in ROW_SCHEMAS: docs/contracts/polaris-logs-<name>.schema.json."""
     with open(os.path.join(CONTRACTS, f"polaris-logs-{name}.schema.json")) as f:
         return json.load(f)
+
+
+def row_problems(row):
+    """A row of an aggregated file against the schema its report_type names."""
+    kind = row.get("report_type") if isinstance(row, dict) else None
+    if kind not in ROW_SCHEMAS:
+        return [f"report_type: {kind!r} is no row type of the contract"]
+    return problems(row, load(ROW_SCHEMAS[kind]))
 
 
 def _is(value, kind):
