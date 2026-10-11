@@ -194,16 +194,44 @@ class Steps(unittest.TestCase):
         self.assertTrue(all(c[0] == "kubectl" and "crd" in c for c in calls))
 
     def test_every_step_passes_in_order(self):
-        step0, step1, endpoints = FakeKubectl(), FakeCalls(), FakeRun()
+        step0, pg, endpoints = FakeKubectl(), FakeCalls(), FakeRun()
+        boot, pol = FakeBootstrap(), FakePolaris()
 
         def run(argv, stdin=None):
             if "crd" in argv or "deployments" in argv:
                 return step0(argv)
-            return endpoints(argv, stdin) if "run" in argv else step1(argv)
-        problems, notes = release.install(ENDPOINT_ENV, run, ["1.30"], dry_run=False)
+            if "endpoint-check" in " ".join(argv):
+                return endpoints(argv, stdin)
+            if "polaris-root" in argv or "run" in argv:
+                return boot(argv, stdin)
+            if "polaris-s3" in argv or "rollout" in argv or release.POLARIS_CHART in argv:
+                return pol(argv, stdin)
+            return pg(argv)
+        problems, notes = release.install(BOOTSTRAP_ENV, run, ["1.30"], dry_run=False)
         self.assertEqual(problems, [])
-        self.assertEqual([n.split(":")[0] for n in notes], ["Step 0", "Step 1", "Step 1"])
+        self.assertEqual([n.split(":")[0] for n in notes], ["Step 0"] + ["Step 1"] * 4)
+        self.assertIn("polaris-pg", notes[1])
         self.assertIn("answer", notes[2])
+        self.assertIn("bootstrapped", notes[3])
+        self.assertIn("deployment/polaris", notes[4])
+
+    def test_a_failed_bootstrap_stops_before_polaris(self):
+        step0, pg, endpoints = FakeKubectl(), FakeCalls(), FakeRun()
+        boot, pol = FakeBootstrap(answer=(1, "connection refused")), FakePolaris()
+
+        def run(argv, stdin=None):
+            if "crd" in argv or "deployments" in argv:
+                return step0(argv)
+            if "endpoint-check" in " ".join(argv):
+                return endpoints(argv, stdin)
+            if "polaris-root" in argv or "run" in argv:
+                return boot(argv, stdin)
+            if "polaris-s3" in argv or "rollout" in argv or release.POLARIS_CHART in argv:
+                return pol(argv, stdin)
+            return pg(argv)
+        problems, _ = release.install(BOOTSTRAP_ENV, run, ["1.30"], dry_run=False)
+        self.assertIn("connection refused", "\n".join(problems))
+        self.assertEqual(pol.calls, [])
 
     def test_endpoints_that_do_not_answer_stop_the_install(self):
         step0, step1 = FakeKubectl(), FakeCalls()
@@ -322,6 +350,234 @@ class EndpointScript(unittest.TestCase):
         finally:
             server.shutdown()
             server.server_close()
+
+
+BOOTSTRAP_ENV = {**ENDPOINT_ENV, "POLARIS_DB_HOST": "",
+                 "POLARIS_ROOT_CLIENT_ID": "rootid0123456789",
+                 "POLARIS_ROOT_CLIENT_SECRET": "RootSecretValue0123456789abcdefg",
+                 "POLARIS_DB_PASSWORD": "DbPasswordValue0123456789abcdefgh"}
+ADMIN = "apache/polaris-admin-tool:1.6.0@sha256:" + "c" * 64
+
+
+class FakeBootstrap:
+    """Answers the bootstrap's Secret check and its `kubectl run`; records every call."""
+
+    def __init__(self, secret=True, answer=(0, "Realm 'POLARIS' successfully bootstrapped.")):
+        self.secret, self.answer, self.calls, self.stdin = secret, answer, [], None
+
+    def __call__(self, argv, stdin=None):
+        self.calls.append(argv)
+        if "secret" in argv:
+            return (0, "secret/polaris-root") if self.secret else (1, "NotFound")
+        if "run" in argv:
+            self.stdin = stdin
+            return self.answer
+        raise AssertionError(f"unexpected call {argv}")
+
+
+class Bootstrap(unittest.TestCase):
+    """ADR-026: the realm and root principal, by Polaris's admin tool, once."""
+
+    def step(self, calls, env=BOOTSTRAP_ENV, dry_run=False):
+        return release.bootstrap(env, calls, image=ADMIN, name="polaris-bootstrap-test",
+                                 dry_run=dry_run)
+
+    def run_call(self, calls):
+        (argv,) = [c for c in calls.calls if "run" in c]
+        return argv
+
+    def overrides(self, argv):
+        flag = next(a for a in argv if a.startswith("--overrides="))
+        return json.loads(flag.split("=", 1)[1])
+
+    def test_one_short_lived_admin_tool_pod_in_polaris_namespace(self):
+        calls = FakeBootstrap()
+        problems, notes = self.step(calls)
+        self.assertEqual(problems, [])
+        argv = self.run_call(calls)
+        self.assertEqual(argv[:5], ["kubectl", "--context", "kind-lakehouse-gate",
+                                    "-n", "catalog-polaris"])
+        self.assertEqual(argv[5:7], ["run", "polaris-bootstrap-test"])
+        for flag in ("--rm", "-i", "--restart=Never", f"--image={ADMIN}",
+                     "--override-type=strategic"):
+            self.assertIn(flag, argv)
+        self.assertIn("bootstrapped", "\n".join(notes))
+
+    def test_it_bootstraps_the_realm_with_the_root_credential_from_its_secret(self):
+        calls = FakeBootstrap()
+        self.step(calls)
+        argv = self.run_call(calls)
+        tail = argv[argv.index("--") + 1:]
+        self.assertEqual(tail[-5:], ["bootstrap", "-r", "POLARIS", "-c",
+                                     "POLARIS,$(POLARIS_ROOT_CLIENT_ID),"
+                                     "$(POLARIS_ROOT_CLIENT_SECRET)"])
+        (container,) = self.overrides(argv)["spec"]["containers"]
+        self.assertEqual((container["name"], container["image"], container["stdin"],
+                          container["stdinOnce"]), ("polaris-bootstrap-test", ADMIN, True, True))
+        env = {e["name"]: e for e in container["env"]}
+        self.assertEqual(env["POLARIS_ROOT_CLIENT_ID"]["valueFrom"]["secretKeyRef"],
+                         {"name": "polaris-root", "key": "clientId"})
+        self.assertEqual(env["POLARIS_ROOT_CLIENT_SECRET"]["valueFrom"]["secretKeyRef"],
+                         {"name": "polaris-root", "key": "clientSecret"})
+
+    def test_it_reaches_the_database_as_polaris_does(self):
+        calls = FakeBootstrap()
+        self.step(calls, env={**BOOTSTRAP_ENV, "POLARIS_DB_HOST": "recorder.standins.svc"})
+        (container,) = self.overrides(self.run_call(calls))["spec"]["containers"]
+        env = {e["name"]: e for e in container["env"]}
+        self.assertEqual(env["QUARKUS_DATASOURCE_JDBC_URL"]["value"],
+                         "jdbc:postgresql://recorder.standins.svc:5432/polaris?sslmode=require")
+        self.assertEqual(env["QUARKUS_DATASOURCE_USERNAME"]["valueFrom"]["secretKeyRef"],
+                         {"name": "polaris-db", "key": "username"})
+        self.assertEqual(env["QUARKUS_DATASOURCE_PASSWORD"]["valueFrom"]["secretKeyRef"],
+                         {"name": "polaris-db", "key": "password"})
+
+    def test_no_credential_is_in_the_command_line(self):
+        calls = FakeBootstrap()
+        self.step(calls)
+        text = " ".join(self.run_call(calls))
+        for var in ("POLARIS_ROOT_CLIENT_ID", "POLARIS_ROOT_CLIENT_SECRET", "POLARIS_DB_PASSWORD"):
+            self.assertNotIn(BOOTSTRAP_ENV[var], text)
+
+    def test_the_tool_starts_only_once_kubectl_has_attached(self):
+        calls = FakeBootstrap()
+        self.step(calls)
+        self.assertIsNotNone(calls.stdin)
+        argv = self.run_call(calls)
+        tail = argv[argv.index("--") + 1:]
+        self.assertEqual(tail[:3], ["sh", "-c", release.BOOTSTRAP_WRAPPER])
+
+    def test_an_already_bootstrapped_realm_is_kept(self):
+        answer = (3, "java.lang.IllegalArgumentException: It appears this metastore manager "
+                     "has already been bootstrapped. To continue bootstrapping, please first "
+                     "purge the metastore with the `purge` command.")
+        problems, notes = self.step(FakeBootstrap(answer=answer))
+        self.assertEqual(problems, [])
+        self.assertIn("already bootstrapped", "\n".join(notes))
+
+    def test_any_other_failure_stops_and_never_prints_a_credential(self):
+        answer = (3, "Invalid credentials format: POLARIS,rootid0123456789,"
+                     "RootSecretValue0123456789abcdefg\nBootstrap encountered errors")
+        problems, _ = self.step(FakeBootstrap(answer=answer))
+        text = "\n".join(problems)
+        self.assertIn("Bootstrap encountered errors", text)
+        self.assertNotIn("RootSecretValue0123456789abcdefg", text)
+        self.assertNotIn("rootid0123456789", text)
+
+    def test_a_missing_root_secret_stops_before_the_pod_and_names_init_env(self):
+        calls = FakeBootstrap(secret=False)
+        problems, _ = self.step(calls)
+        self.assertIn("polaris-root", "\n".join(problems))
+        self.assertIn("init_env.py --apply-secrets", "\n".join(problems))
+        self.assertFalse(any("run" in c for c in calls.calls))
+
+    def test_a_dry_run_makes_no_call(self):
+        calls = FakeBootstrap()
+        problems, notes = self.step(calls, dry_run=True)
+        self.assertEqual((problems, calls.calls), ([], []))
+        self.assertIn("dry-run", "\n".join(notes))
+
+    def test_the_admin_tool_is_pinned_by_digest(self):
+        self.assertRegex(release.images()["polaris_admin_tool"],
+                         r"^apache/polaris-admin-tool:\d+\.\d+\.\d+@sha256:[0-9a-f]{64}$")
+
+
+class BootstrapWrapper(unittest.TestCase):
+    """The wrapper, run here with sh: the tool starts after stdin ends, with its arguments."""
+
+    def test_the_entrypoint_gets_the_arguments_after_stdin_ends(self):
+        with tempfile.TemporaryDirectory() as d:
+            entrypoint = os.path.join(d, "run-java.sh")
+            with open(entrypoint, "w", encoding="utf-8") as f:
+                f.write('#!/bin/sh\necho "args: $*"\nexit 3\n')
+            os.chmod(entrypoint, 0o755)
+            wrapper = release.BOOTSTRAP_WRAPPER.replace(release.ADMIN_TOOL_ENTRYPOINT, entrypoint)
+            result = subprocess.run(["sh", "-c", wrapper, "admin-tool", "bootstrap", "-r", "R"],
+                                    input="\n", capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 3)
+        self.assertEqual(result.stdout, "args: bootstrap -r R\n")
+
+
+class FakePolaris:
+    """Answers the Polaris step's Secret check, helm and the rollout wait; records every call."""
+
+    def __init__(self, secrets_found=True, helm=(0, ""), rollout=(0, "")):
+        self.secrets_found, self.helm, self.rollout = secrets_found, helm, rollout
+        self.calls, self.values = [], []
+
+    def __call__(self, argv, stdin=None):
+        self.calls.append(argv)
+        if argv[0] == "helm":
+            files = [argv[i + 1] for i, a in enumerate(argv) if a == "-f"]
+            with open(files[-1], encoding="utf-8") as f:
+                self.values.append(json.load(f))
+            return self.helm
+        if "secret" in argv:
+            return (0, "") if self.secrets_found else (1, "NotFound")
+        if "rollout" in argv:
+            return self.rollout
+        raise AssertionError(f"unexpected call {argv}")
+
+
+class Polaris(unittest.TestCase):
+    def step(self, calls, env=BOOTSTRAP_ENV, dry_run=False):
+        return release.polaris(env, calls, dry_run=dry_run)
+
+    def test_installs_the_chart_with_both_values_files_then_waits_for_the_rollout(self):
+        calls = FakePolaris()
+        problems, notes = self.step(calls)
+        self.assertEqual(problems, [])
+        self.assertEqual([c[0] for c in calls.calls], ["kubectl", "helm", "kubectl"])
+        helm = calls.calls[1]
+        self.assertEqual(helm[:3], ["helm", "--kube-context", "kind-lakehouse-gate"])
+        self.assertEqual(helm[helm.index("-n") + 1], "catalog-polaris")
+        self.assertEqual(helm[helm.index("upgrade"):helm.index("upgrade") + 4],
+                         ["upgrade", "--install", "polaris", release.POLARIS_CHART])
+        files = [helm[i + 1] for i, a in enumerate(helm) if a == "-f"]
+        self.assertEqual(files[0], release.POLARIS_VALUES)
+        self.assertEqual(calls.values, [release.polaris_values(BOOTSTRAP_ENV)])
+        self.assertFalse(os.path.exists(files[1]), "the generated values file is left behind")
+        rollout = calls.calls[2]
+        self.assertEqual(rollout[rollout.index("rollout"):rollout.index("rollout") + 3],
+                         ["rollout", "status", "deployment/polaris"])
+        self.assertIn("polaris", "\n".join(notes))
+
+    def test_every_call_names_the_context_and_the_namespace(self):
+        calls = FakePolaris()
+        self.step(calls)
+        for argv in calls.calls:
+            flag = "--kube-context" if argv[0] == "helm" else "--context"
+            self.assertEqual(argv[1:3], [flag, "kind-lakehouse-gate"])
+            self.assertEqual(argv[argv.index("-n") + 1], "catalog-polaris")
+
+    def test_the_secrets_the_chart_reads_are_checked_first(self):
+        calls = FakePolaris()
+        self.step(calls)
+        check = calls.calls[0]
+        for name in ("polaris-db", "polaris-s3", "polaris-token-signing"):
+            self.assertIn(name, check)
+
+    def test_a_missing_secret_stops_before_helm_and_names_init_env(self):
+        calls = FakePolaris(secrets_found=False)
+        problems, _ = self.step(calls)
+        self.assertIn("init_env.py --apply-secrets", "\n".join(problems))
+        self.assertFalse(any(c[0] == "helm" for c in calls.calls))
+
+    def test_dry_run_is_server_side_and_does_not_wait(self):
+        calls = FakePolaris()
+        problems, notes = self.step(calls, dry_run=True)
+        self.assertEqual(problems, [])
+        self.assertIn("--dry-run=server", calls.calls[1])
+        self.assertFalse(any("rollout" in c for c in calls.calls))
+        self.assertIn("dry-run", "\n".join(notes))
+
+    def test_a_failed_helm_stops_with_its_error(self):
+        problems, _ = self.step(FakePolaris(helm=(1, "admission webhook denied")))
+        self.assertIn("admission webhook denied", "\n".join(problems))
+
+    def test_a_rollout_that_never_finishes_stops(self):
+        problems, _ = self.step(FakePolaris(rollout=(1, "timed out waiting")))
+        self.assertIn("timed out waiting", "\n".join(problems))
 
 
 class LoadEnv(unittest.TestCase):

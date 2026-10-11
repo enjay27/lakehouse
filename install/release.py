@@ -4,16 +4,22 @@
    operator in `NS_CNPG_SYSTEM` runs a version this release supports (install/supported.json).
    On the target clusters the operator is the operator team's; on the gate, gates/gate.py
    installs it first.
-1. Polaris: its PostgreSQL, the `Cluster` polaris-pg from charts/polaris-postgres in
-   `NS_CATALOG_POLARIS` (ADR-008, ADR-010), installed with helm and waited on until Ready. The
-   `polaris-db` Secret must exist first (scripts/init_env.py --apply-secrets, ADR-006). Polaris
-   itself follows in P2; Datahub adds its steps in P3. The gates run this same script (ADR-018).
-   Then, before Polaris, the S3 endpoint and the policy endpoint from `.env` must answer, asked
-   from Polaris's namespace by one short-lived curl pod (install/images.json): any HTTP status
-   is an answer, no connection is not (ADR-029, ADR-031). It runs with --dry-run too.
+1. Polaris, in `NS_CATALOG_POLARIS`. Its Secrets come first (scripts/init_env.py
+   --apply-secrets, ADR-006). Datahub adds its steps in P3. The gates run this same script
+   (ADR-018).
+   a. Its PostgreSQL: the `Cluster` polaris-pg from charts/polaris-postgres (ADR-008,
+      ADR-010), installed with helm and waited on until Ready.
+   b. The S3 endpoint and the policy endpoint from `.env` must answer, asked from Polaris's
+      namespace by one short-lived curl pod (install/images.json): any HTTP status is an
+      answer, no connection is not (ADR-029, ADR-031). It runs with --dry-run too.
+   c. The bootstrap (ADR-026): Polaris's admin tool, in a short-lived pod, creates the schema,
+      the realm and its root principal from the `polaris-root` Secret. A realm already
+      bootstrapped is kept.
+   d. Polaris 1.6.0 from charts/polaris (ADR-009), with values-lakehouse.yaml and the values
+      from `.env` (the database host, the policy endpoint), waited on until rolled out.
 
-With --dry-run, step 1 is a server-side dry-run of the helm upgrade and nothing waits: the
-dry-run gate (ADR-018).
+With --dry-run, the helm upgrades are server-side dry-runs, the bootstrap does not run and
+nothing waits: the dry-run gate (ADR-018).
 
 Settings come from `.env` at the repository root, then the environment, which wins. Every
 kubectl and helm call names `$KUBE_CONTEXT` (no default, ADR-004) and its namespace (ADR-007).
@@ -29,11 +35,12 @@ import re
 import secrets
 import subprocess
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
-from init_env import parse  # noqa: E402
+from init_env import SECRETS, parse  # noqa: E402
 
 CNPG_CRD = "clusters.postgresql.cnpg.io"
 OPERATOR_LABEL = "app.kubernetes.io/name=cloudnative-pg"
@@ -41,6 +48,25 @@ POLARIS_PG = "polaris-pg"
 POLARIS_PG_RELEASE = "polaris-postgres"
 POLARIS_PG_CHART = os.path.join(ROOT, "charts", "polaris-postgres")
 POLARIS_DB_SECRET = "polaris-db"
+POLARIS = "polaris"
+POLARIS_REALM = "POLARIS"
+POLARIS_DATABASE = "polaris"
+POLARIS_PG_SERVICE = f"{POLARIS_PG}-rw"
+POLARIS_ROOT_SECRET = "polaris-root"
+# The Secrets the chart reads (charts/polaris/values-lakehouse.yaml), from init_env.py.
+POLARIS_SECRETS = (POLARIS_DB_SECRET, "polaris-s3", "polaris-token-signing")
+# Every `.env` variable that holds a credential: what goes into a Secret.
+CREDENTIAL_VARS = sorted({var for s in SECRETS for var in s.from_env.values()})
+# The admin tool image's entrypoint. The bootstrap pod runs it only once stdin ends, that is
+# once kubectl is attached, so none of its output is lost.
+ADMIN_TOOL_ENTRYPOINT = "/opt/jboss/container/java/run/run-java.sh"
+BOOTSTRAP_WRAPPER = f'cat >/dev/null; exec {ADMIN_TOOL_ENTRYPOINT} "$@"'
+# What Polaris 1.6.0's admin tool says, exit 3, for a realm that has its root principal
+# (polaris-core AuthBootstrapUtil.java); the schema script it ran first changes nothing.
+ALREADY_BOOTSTRAPPED = "It appears this metastore manager has already been bootstrapped"
+BOOTSTRAP_TAIL = 20
+POLARIS_CHART = os.path.join(ROOT, "charts", "polaris")
+POLARIS_VALUES = os.path.join(POLARIS_CHART, "values-lakehouse.yaml")
 READY_TIMEOUT = "900s"
 # The endpoint check's pod reads this script on stdin (`sh -s`), so it starts only once kubectl
 # is attached and no output is lost. Each URL in its arguments gets one request; any HTTP
@@ -148,6 +174,20 @@ def polaris_postgres(env, run, dry_run=False):
     return [], [f"Step 1: Cluster {POLARIS_PG} in {namespace} is Ready."]
 
 
+def jdbc_url(env):
+    """Polaris's database: POLARIS_DB_HOST, or the Cluster's read-write service when empty.
+    TLS is required and the server's certificate is not verified (Kade, 2026-10-11), so it
+    passes the gate's recorder (ADR-035)."""
+    host = env.get("POLARIS_DB_HOST") or POLARIS_PG_SERVICE
+    return f"jdbc:postgresql://{host}:5432/{POLARIS_DATABASE}?sslmode=require"
+
+
+def polaris_values(env):
+    """The chart values that come from `.env`, on top of charts/polaris/values-lakehouse.yaml."""
+    return {"advancedConfig": {"quarkus.datasource.jdbc.url": jdbc_url(env),
+                               "polaris.authorization.opa.policy-uri": env["POLARIS_OPA_URL"]}}
+
+
 def endpoints_answer(env, run, image=None, name=None):
     """Before Polaris: the S3 and policy endpoints answer from Polaris's namespace (ADR-029).
 
@@ -170,12 +210,99 @@ def endpoints_answer(env, run, image=None, name=None):
     return [], [f"Step 1: the S3 endpoint and the policy endpoint answer from {namespace}."]
 
 
+def masked(text, env):
+    """`text` with every credential from `.env` replaced, before it is printed (ADR-002)."""
+    for var in CREDENTIAL_VARS:
+        if env.get(var):
+            text = text.replace(env[var], "<redacted>")
+    return text
+
+
+def secret_ref(secret, key):
+    return {"valueFrom": {"secretKeyRef": {"name": secret, "key": key}}}
+
+
+def bootstrap(env, run, image=None, name=None, dry_run=False):
+    """Step 1, after the endpoints: the realm and its root principal (ADR-026), created by
+    Polaris's admin tool in the database Polaris uses. A realm already bootstrapped is kept.
+
+    Returns (problems, notes); a dry-run makes no call, since the tool has no dry-run.
+    """
+    namespace, context = env["NS_CATALOG_POLARIS"], env["KUBE_CONTEXT"]
+    if dry_run:
+        return [], [f"Step 1: the bootstrap of realm {POLARIS_REALM} does not run in a dry-run."]
+    code, _ = run(["kubectl", "--context", context, "-n", namespace, "get", "secret",
+                   POLARIS_ROOT_SECRET, "-o", "name"])
+    if code != 0:
+        return [f"Secret {POLARIS_ROOT_SECRET} not found in {namespace}: run "
+                "scripts/init_env.py --apply-secrets first (ADR-006)"], []
+    image = image or images()["polaris_admin_tool"]
+    name = name or f"polaris-bootstrap-{secrets.token_hex(4)}"
+    container = {"name": name, "image": image, "stdin": True, "stdinOnce": True, "env": [
+        {"name": "QUARKUS_DATASOURCE_JDBC_URL", "value": jdbc_url(env)},
+        {"name": "QUARKUS_DATASOURCE_USERNAME", **secret_ref(POLARIS_DB_SECRET, "username")},
+        {"name": "QUARKUS_DATASOURCE_PASSWORD", **secret_ref(POLARIS_DB_SECRET, "password")},
+        {"name": "POLARIS_ROOT_CLIENT_ID", **secret_ref(POLARIS_ROOT_SECRET, "clientId")},
+        {"name": "POLARIS_ROOT_CLIENT_SECRET", **secret_ref(POLARIS_ROOT_SECRET, "clientSecret")},
+    ]}
+    # Kubernetes expands $(VAR) from the container's env, so no credential is on this command
+    # line or in the pod's spec.
+    credential = f"{POLARIS_REALM},$(POLARIS_ROOT_CLIENT_ID),$(POLARIS_ROOT_CLIENT_SECRET)"
+    code, out = run(["kubectl", "--context", context, "-n", namespace, "run", name,
+                     f"--image={image}", "--restart=Never", "--rm", "-i", "--quiet",
+                     "--pod-running-timeout=3m", "--override-type=strategic",
+                     "--overrides=" + json.dumps({"spec": {"containers": [container]}}),
+                     "--command", "--", "sh", "-c", BOOTSTRAP_WRAPPER, "admin-tool",
+                     "bootstrap", "-r", POLARIS_REALM, "-c", credential], "\n")
+    out = masked(out, env)
+    if code == 0:
+        return [], [f"Step 1: realm {POLARIS_REALM} bootstrapped in {namespace}: its schema "
+                    "and root principal."]
+    if ALREADY_BOOTSTRAPPED in out:
+        return [], [f"Step 1: realm {POLARIS_REALM} in {namespace} was already bootstrapped; "
+                    "kept as it is."]
+    tail = "\n".join(out.strip().splitlines()[-BOOTSTRAP_TAIL:])
+    return [f"the bootstrap of realm {POLARIS_REALM} in {namespace} failed (exit {code}):\n"
+            f"{tail}"], []
+
+
+def polaris(env, run, dry_run=False):
+    """Step 1, last: Polaris from charts/polaris with values-lakehouse.yaml and the values from
+    `.env`, waited on until its rollout is done. Returns (problems, notes)."""
+    namespace, context = env["NS_CATALOG_POLARIS"], env["KUBE_CONTEXT"]
+    code, out = run(["kubectl", "--context", context, "-n", namespace, "get", "secret",
+                     *POLARIS_SECRETS, "-o", "name"])
+    if code != 0:
+        return [f"Secrets {', '.join(POLARIS_SECRETS)} must exist in {namespace}: run "
+                f"scripts/init_env.py --apply-secrets first (ADR-006): {out.strip()}"], []
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+        json.dump(polaris_values(env), f)
+    try:
+        helm = ["helm", "--kube-context", context, "-n", namespace, "upgrade", "--install",
+                POLARIS, POLARIS_CHART, "-f", POLARIS_VALUES, "-f", f.name]
+        code, out = run(helm + (["--dry-run=server"] if dry_run else []))
+    finally:
+        os.unlink(f.name)
+    if code != 0:
+        return [f"helm upgrade {POLARIS} in {namespace} failed: {out.strip()}"], []
+    if dry_run:
+        return [], [f"Step 1: Polaris in {namespace}, server-side dry-run passed."]
+    code, out = run(["kubectl", "--context", context, "-n", namespace, "rollout", "status",
+                     f"deployment/{POLARIS}", f"--timeout={READY_TIMEOUT}"])
+    if code != 0:
+        return [f"deployment/{POLARIS} in {namespace} did not finish its rollout: "
+                f"{out.strip()}"], []
+    return [], [f"Step 1: deployment/{POLARIS} in {namespace} rolled out."]
+
+
 def install(env, run, supported, dry_run):
     """Every step in order; the first step with problems stops the rest."""
     notes = []
     for step in (lambda: check_preconditions(env, run, supported),
                  lambda: polaris_postgres(env, run, dry_run),
-                 lambda: endpoints_answer(env, run)):
+                 lambda: endpoints_answer(env, run),
+                 lambda: bootstrap(env, run, dry_run=dry_run),
+                 lambda: polaris(env, run, dry_run)):
         problems, more = step()
         notes += more
         if problems:
