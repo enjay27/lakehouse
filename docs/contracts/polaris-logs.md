@@ -98,7 +98,9 @@ Polaris's `loggerClassName`, `ndc`, `processName` and `processId` are removed. O
 appear, and a reader must accept fields it does not know. One is known: `exception`, which
 Polaris's JSON format adds when a log record carries one. Measured on 2026-10-11: a request
 Polaris 1.6.0 answered 503 wrote one such line, `IcebergExceptionMapper`'s `Full
-RuntimeException` at `INFO`, which rule 2b keeps; its 400, 404 and 409 answers wrote none. Its
+RuntimeException` at `INFO`, which rule 2b keeps; one it answered 500 (its S3 endpoint did not
+answer) wrote `Unhandled exception returning INTERNAL_SERVER_ERROR` at `ERROR`, which rule 1
+keeps (`gates/fixtures/polaris-1.6.0-roll/`); its 400, 404 and 409 answers wrote none. Its
 shape:
 
 | Field | Type | What |
@@ -107,9 +109,10 @@ shape:
 | `message` | string | The exception's message |
 | `frames` | array | The stack, each `{"class", "method", "line"}`: 65 frames on the line measured |
 | `causedBy` | object | `{"exception": {...}}`, the cause in the same shape, when there is one |
+| `suppressed` | array | The suppressed exceptions in the same shape, when there are some: the S3 client's failed attempts on the 500 |
 | `refId` | integer | The exception's number within the record, from 1 |
 
-Such a line is long: about 15 KB with one cause.
+Such a line is long: about 15 KB on the 503, 40 KB on the 500 with five suppressed.
 
 **Every HTTP request** Polaris serves on its API port writes one access line, whose `message`
 is the access log line (`client - principal [time] "METHOD path HTTP/1.1" status bytes`) and

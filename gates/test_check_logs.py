@@ -3,9 +3,12 @@ logs_traffic.sh run here with this machine's curl against local fakes of Polaris
 Run: python3 -m unittest discover -s gates"""
 
 import datetime as dt
+import gzip
+import hashlib
 import http.server
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -613,6 +616,111 @@ class Problems(unittest.TestCase):
         problems, _ = self.f.problems(before=after, after=after, records=[
             r for r in self.f.records if "aggregated-logs" not in r["source_file"]])
         self.assertIn("aggregated-logs/", "\n".join(problems))
+
+
+ROLL_FIXTURE = os.path.join(HERE, "fixtures", "polaris-1.6.0-roll")
+
+
+def file_lines(path):
+    with (gzip.open(path, "rt", encoding="utf-8") if path.endswith(".gz")
+          else open(path, encoding="utf-8")) as f:
+        return [json.loads(line) for line in f]
+
+
+class Roll(unittest.TestCase):
+    """Polaris 1.6.0's own files across an hourly roll, captured once and replayed through the
+    real batch as check-logs runs it (gates/fixtures/polaris-1.6.0-roll/README.md, #54)."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(ROLL_FIXTURE, "manifest.json"), encoding="utf-8") as f:
+            cls.m = json.load(f)
+        cls.dir = tempfile.TemporaryDirectory()
+        for name, entry in cls.m["files"].items():
+            path = os.path.join(cls.dir.name, name)
+            shutil.copyfile(os.path.join(ROLL_FIXTURE, name), path)
+            os.utime(path, (entry["mtime"], entry["mtime"]))
+        script = os.path.join(ROOT, "images", "polaris-log-batch", "polaris_log_batch.py")
+        events, listings = [], []
+        for _ in range(2):
+            out = subprocess.run([sys.executable, script, "--log-dir", cls.dir.name,
+                                  "--no-pod-list", "--now", cls.m["now"]],
+                                 capture_output=True, text=True, check=True).stdout
+            events.append(gate.batch_events(out))
+            listings.append(listing(cls.dir.name))
+        cls.events, cls.before, cls.after = events, listings[0], listings[1]
+        cls.records = read_as_fluent_bit(cls.dir.name)
+        # Each local Polaris kept its own catalog, so each pod's run made gate_logs: the setup
+        # request IDs repeat across pods and are checked apart from logs_problems.
+        cls.sent = {rid: v for prefix in (cls.m["before"], cls.m["after"])
+                    for rid, v in gate.logs_request_ids(prefix, cls.m["count"],
+                                                        cls.m["pods"]).items()
+                    if v[1] != "catalog"}
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.dir.cleanup()
+
+    def test_the_files_are_as_captured(self):
+        for name, entry in self.m["files"].items():
+            with open(os.path.join(ROLL_FIXTURE, name), "rb") as f:
+                self.assertEqual(hashlib.sha256(f.read()).hexdigest(), entry["sha256"], name)
+
+    def test_each_pod_rolled_once_at_the_boundary(self):
+        boundary = self.m["boundary"].replace("Z", "")
+        for pod in self.m["pods"]:
+            rolls = [n for n in self.m["files"] if n.startswith(f"polaris-{pod}.log.")]
+            self.assertEqual(rolls, [f"polaris-{pod}.log.2026-10-11-17.gz"])
+            before = file_lines(os.path.join(ROLL_FIXTURE, rolls[0]))
+            after = file_lines(os.path.join(ROLL_FIXTURE, f"polaris-{pod}.log"))
+            self.assertLess(before[-1]["timestamp"][:19], boundary)
+            self.assertGreaterEqual(after[0]["timestamp"][:19], boundary)
+            ids = {r.get("mdc", {}).get("requestId", "") for r in before}
+            self.assertTrue(any(i.startswith(f"{self.m['before']}-{pod}-") for i in ids))
+            self.assertFalse(any(i.startswith(self.m["after"]) for i in ids))
+
+    def test_the_batch_publishes_the_hour_from_each_roll_and_current_file_then_files_the_rolls(
+            self):
+        published = [e for e in self.events[0] if e.get("event") == "published"]
+        self.assertIn(self.m["hour"], [e["hour"] for e in published])
+        [summary] = [e for e in published if e["hour"] == self.m["hour"]]
+        self.assertEqual({s["file"]: s["lines"] for s in summary["sources"]},
+                         {name: e["lines"] for name, e in self.m["files"].items()})
+        for pod in self.m["pods"]:
+            self.assertTrue(os.path.exists(os.path.join(
+                self.dir.name, "done", "20261011", f"polaris-{pod}.log.2026-10-11-17.gz")))
+
+    def test_the_gates_checks_pass_on_both_sides_of_the_roll(self):
+        problems, notes = gate.logs_problems(self.sent, self.m["pods"], self.events,
+                                             self.before, self.after, self.records)
+        self.assertEqual(problems, [])
+        self.assertIn("4 404s dropped with their application lines, 4 400s kept with theirs, "
+                      "4 commits on their tables' rows", notes[-1])
+
+    def test_the_catalogs_made_are_kept_with_their_application_lines(self):
+        for prefix, logger in ((self.m["before"], "PolarisServiceImpl"),
+                               (self.m["after"], "IcebergExceptionMapper")):
+            lines = [r for r in self.records
+                     if r.get("mdc", {}).get("requestId") == f"{prefix}-setup-catalog"]
+            for pod in self.m["pods"]:
+                mine = [r for r in lines if r["hostName"] == pod]
+                self.assertEqual(sorted(r["loggerName"].rsplit(".", 1)[-1] for r in mine),
+                                 sorted([logger, "access-log"]), (prefix, pod))
+
+    def test_a_500_keeps_its_line_with_the_exception(self):
+        lines = [r for r in self.records
+                 if r.get("mdc", {}).get("requestId") == self.m["failed"]]
+        [error] = [r for r in lines if r["level"] == "ERROR"]
+        self.assertEqual(error["message"], "Unhandled exception returning INTERNAL_SERVER_ERROR")
+        self.assertEqual(sorted(error["exception"]),
+                         ["causedBy", "exceptionType", "frames", "message", "refId",
+                          "suppressed"])
+        self.assertEqual(sorted(error["exception"]["frames"][0]), ["class", "line", "method"])
+        self.assertIn("exception", error["exception"]["causedBy"])
+        self.assertEqual(sorted(error["exception"]["suppressed"][0]),
+                         ["exceptionType", "frames", "message", "refId"])
+        [access] = [r for r in lines if "http_status" in r]
+        self.assertEqual(access["http_status"], 500)
 
 
 if __name__ == "__main__":

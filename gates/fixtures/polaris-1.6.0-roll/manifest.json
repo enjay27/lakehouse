@@ -1,0 +1,39 @@
+{
+  "polaris_image": "apache/polaris:1.6.0@sha256:9738b2052dea20aabf0cd42521424ff963fee41b0ee888fef9f512efb256602a",
+  "seaweedfs_image": "chrislusf/seaweedfs:4.47@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882",
+  "captured": "2026-10-11",
+  "clock": "GMT+00:37",
+  "boundary": "2026-10-11T17:23:00Z",
+  "hour": "20261011-17",
+  "now": "2026-10-11T18:01:01Z",
+  "pods": [
+    "polaris-5f7c9d8b6-aaaaa",
+    "polaris-5f7c9d8b6-bbbbb"
+  ],
+  "count": 2,
+  "before": "fx-pre",
+  "after": "fx-post",
+  "failed": "fx-post-polaris-5f7c9d8b6-aaaaa-fail-1",
+  "files": {
+    "polaris-polaris-5f7c9d8b6-aaaaa.log": {
+      "sha256": "26a57be5f994d5f8e633a8d351d1239e793d0601be753c5c60c23726de2ef112",
+      "mtime": 1791739404,
+      "lines": 26
+    },
+    "polaris-polaris-5f7c9d8b6-aaaaa.log.2026-10-11-17.gz": {
+      "sha256": "d6a7e776591adf9d84a4f91bacf92a04deefdee01595b82adaeb07adfd9a60bf",
+      "mtime": 1791739386,
+      "lines": 34
+    },
+    "polaris-polaris-5f7c9d8b6-bbbbb.log": {
+      "sha256": "60b4c02553fdfaef28303c62a0c1faf80b33bad1b154bf870b5941088aaa15cc",
+      "mtime": 1791739404,
+      "lines": 19
+    },
+    "polaris-polaris-5f7c9d8b6-bbbbb.log.2026-10-11-17.gz": {
+      "sha256": "0ede2ed3ed815be93fa95be50ae61b5fe26a90ab5801de07a1632eef85110f3b",
+      "mtime": 1791739386,
+      "lines": 34
+    }
+  }
+}
