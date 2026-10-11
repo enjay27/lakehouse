@@ -195,31 +195,57 @@ class Steps(unittest.TestCase):
 
     def test_every_step_passes_in_order(self):
         step0, pg, endpoints = FakeKubectl(), FakeCalls(), FakeRun()
-        boot, pol = FakeBootstrap(), FakePolaris()
+        boot, pol, claim = FakeBootstrap(), FakePolaris(), FakeClaim()
 
         def run(argv, stdin=None):
             if "crd" in argv or "deployments" in argv:
                 return step0(argv)
             if "endpoint-check" in " ".join(argv):
                 return endpoints(argv, stdin)
+            if "storageclass" in argv or "apply" in argv:
+                return claim(argv, stdin)
             if "polaris-root" in argv or "run" in argv:
                 return boot(argv, stdin)
             if "polaris-s3" in argv or "rollout" in argv or release.POLARIS_CHART in argv:
                 return pol(argv, stdin)
             return pg(argv)
-        problems, notes = release.install(BOOTSTRAP_ENV, run, ["1.30"], dry_run=False)
+        problems, notes = release.install({**BOOTSTRAP_ENV, **LOGS_ENV}, run, ["1.30"],
+                                          dry_run=False)
         self.assertEqual(problems, [])
         self.assertEqual([n.split(":")[0] for n in notes],
-                         ["Step 0"] + ["Step 1"] * 4 + ["Step 2"])
+                         ["Step 0"] + ["Step 1"] * 5 + ["Step 2"])
         self.assertIn("polaris-pg", notes[1])
         self.assertIn("answer", notes[2])
         self.assertIn("bootstrapped", notes[3])
-        self.assertIn("deployment/polaris", notes[4])
-        self.assertIn("console is not enabled", notes[5])
+        self.assertIn("polaris-logs", notes[4])
+        self.assertIn("deployment/polaris", notes[5])
+        self.assertIn("console is not enabled", notes[6])
+
+    def test_a_missing_storage_class_stops_before_polaris(self):
+        step0, pg, endpoints = FakeKubectl(), FakeCalls(), FakeRun()
+        boot, pol = FakeBootstrap(), FakePolaris()
+        claim = FakeClaim(storage_class=(1, "NotFound"))
+
+        def run(argv, stdin=None):
+            if "crd" in argv or "deployments" in argv:
+                return step0(argv)
+            if "endpoint-check" in " ".join(argv):
+                return endpoints(argv, stdin)
+            if "storageclass" in argv or "apply" in argv:
+                return claim(argv, stdin)
+            if "polaris-root" in argv or "run" in argv:
+                return boot(argv, stdin)
+            if "polaris-s3" in argv or "rollout" in argv or release.POLARIS_CHART in argv:
+                return pol(argv, stdin)
+            return pg(argv)
+        problems, _ = release.install({**BOOTSTRAP_ENV, **LOGS_ENV}, run, ["1.30"],
+                                      dry_run=False)
+        self.assertIn("ReadWriteMany", "\n".join(problems))
+        self.assertEqual(pol.calls, [])
 
     def test_a_console_that_fails_is_reported_and_the_install_still_passes(self):
         step0, pg, endpoints = FakeKubectl(), FakeCalls(), FakeRun()
-        boot, pol = FakeBootstrap(), FakePolaris()
+        boot, pol, claim = FakeBootstrap(), FakePolaris(), FakeClaim()
         console = FakeConsole(rollout=(1, "ErrImageNeverPull"))
 
         def run(argv, stdin=None):
@@ -227,6 +253,8 @@ class Steps(unittest.TestCase):
                 return step0(argv)
             if "endpoint-check" in " ".join(argv):
                 return endpoints(argv, stdin)
+            if "storageclass" in argv or "apply" in argv:
+                return claim(argv, stdin)
             if "polaris-root" in argv or "run" in argv:
                 return boot(argv, stdin)
             if release.CONSOLE_CHART in argv or "deployment/polaris-console" in argv:
@@ -234,8 +262,8 @@ class Steps(unittest.TestCase):
             if "polaris-s3" in argv or "rollout" in argv or release.POLARIS_CHART in argv:
                 return pol(argv, stdin)
             return pg(argv)
-        problems, notes = release.install({**BOOTSTRAP_ENV, **CONSOLE_ENV}, run, ["1.30"],
-                                          dry_run=False)
+        problems, notes = release.install({**BOOTSTRAP_ENV, **LOGS_ENV, **CONSOLE_ENV}, run,
+                                          ["1.30"], dry_run=False)
         self.assertEqual(problems, [])
         self.assertIn("ErrImageNeverPull", notes[-1])
         self.assertIn("not blocking", notes[-1])
@@ -243,12 +271,15 @@ class Steps(unittest.TestCase):
     def test_a_failed_bootstrap_stops_before_polaris(self):
         step0, pg, endpoints = FakeKubectl(), FakeCalls(), FakeRun()
         boot, pol = FakeBootstrap(answer=(1, "connection refused")), FakePolaris()
+        claim = FakeClaim()
 
         def run(argv, stdin=None):
             if "crd" in argv or "deployments" in argv:
                 return step0(argv)
             if "endpoint-check" in " ".join(argv):
                 return endpoints(argv, stdin)
+            if "storageclass" in argv or "apply" in argv:
+                return claim(argv, stdin)
             if "polaris-root" in argv or "run" in argv:
                 return boot(argv, stdin)
             if "polaris-s3" in argv or "rollout" in argv or release.POLARIS_CHART in argv:
@@ -270,13 +301,15 @@ class Steps(unittest.TestCase):
         self.assertIn("did not answer", "\n".join(problems))
 
     def test_a_dry_run_checks_the_endpoints_too(self):
-        step0, step1, endpoints = FakeKubectl(), FakeCalls(), FakeRun()
+        step0, step1, endpoints, claim = FakeKubectl(), FakeCalls(), FakeRun(), FakeClaim()
 
         def run(argv, stdin=None):
             if "crd" in argv or "deployments" in argv:
                 return step0(argv)
+            if "storageclass" in argv or "apply" in argv:
+                return claim(argv, stdin)
             return endpoints(argv, stdin) if "run" in argv else step1(argv)
-        problems, _ = release.install(ENDPOINT_ENV, run, ["1.30"], dry_run=True)
+        problems, _ = release.install({**ENDPOINT_ENV, **LOGS_ENV}, run, ["1.30"], dry_run=True)
         self.assertEqual(problems, [])
         self.assertEqual(len(endpoints.calls), 1)
 
@@ -604,6 +637,98 @@ class Polaris(unittest.TestCase):
     def test_a_rollout_that_never_finishes_stops(self):
         problems, _ = self.step(FakePolaris(rollout=(1, "timed out waiting")))
         self.assertIn("timed out waiting", "\n".join(problems))
+
+
+LOGS_ENV = {"POLARIS_LOGS_STORAGE_CLASS": "shared", "POLARIS_LOGS_SIZE": "1Gi"}
+
+
+class FakeClaim:
+    """Answers the claim step's storage class check and its apply; records every call."""
+
+    def __init__(self, storage_class=(0, "storageclass.storage.k8s.io/shared"),
+                 apply=(0, "persistentvolumeclaim/polaris-logs created")):
+        self.storage_class, self.apply, self.calls, self.stdin = storage_class, apply, [], []
+
+    def __call__(self, argv, stdin=None):
+        self.calls.append(argv)
+        self.stdin.append(stdin)
+        if "storageclass" in argv:
+            return self.storage_class
+        if "apply" in argv:
+            return self.apply
+        raise AssertionError(f"unexpected call {argv}")
+
+
+class LogsClaim(unittest.TestCase):
+    """Step 1, before Polaris: the claim polaris-logs that Polaris and the batch share
+    (ADR-036)."""
+
+    def step(self, calls, env=None, dry_run=False):
+        return release.logs_claim({**BOOTSTRAP_ENV, **LOGS_ENV, **(env or {})}, calls,
+                                  dry_run=dry_run)
+
+    def test_the_storage_class_is_checked_then_the_claim_applied(self):
+        calls = FakeClaim()
+        problems, notes = self.step(calls)
+        self.assertEqual(problems, [])
+        self.assertEqual(calls.calls[0][calls.calls[0].index("get"):],
+                         ["get", "storageclass", "shared", "-o", "name"])
+        apply = calls.calls[1]
+        self.assertEqual(apply[apply.index("apply"):], ["apply", "-f", "-"])
+        self.assertIn("polaris-logs", notes[0])
+        self.assertIn("shared", notes[0])
+
+    def test_the_claim_is_read_write_many_with_the_class_and_size_from_env(self):
+        calls = FakeClaim()
+        self.step(calls)
+        claim = json.loads(calls.stdin[1])
+        self.assertEqual((claim["kind"], claim["metadata"]["name"]),
+                         ("PersistentVolumeClaim", release.POLARIS_LOGS))
+        self.assertEqual(claim["metadata"]["namespace"], "catalog-polaris")
+        self.assertEqual(claim["spec"]["accessModes"], ["ReadWriteMany"])
+        self.assertEqual(claim["spec"]["storageClassName"], "shared")
+        self.assertEqual(claim["spec"]["resources"], {"requests": {"storage": "1Gi"}})
+
+    def test_the_claim_belongs_to_no_helm_release(self):
+        calls = FakeClaim()
+        self.step(calls)
+        claim = json.loads(calls.stdin[1])
+        self.assertFalse(any(k.startswith("meta.helm.sh")
+                             for k in claim["metadata"].get("annotations", {})))
+        self.assertFalse(any(c[0] == "helm" for c in calls.calls))
+
+    def test_every_call_names_the_context_and_the_namespace(self):
+        calls = FakeClaim()
+        self.step(calls)
+        for argv in calls.calls:
+            self.assertEqual(argv[1:3], ["--context", "kind-lakehouse-gate"])
+            self.assertEqual(argv[argv.index("-n") + 1], "catalog-polaris")
+
+    def test_an_empty_class_or_size_stops_before_any_call(self):
+        for var in LOGS_ENV:
+            calls = FakeClaim()
+            problems, _ = self.step(calls, env={var: ""})
+            self.assertIn(var, "\n".join(problems))
+            self.assertIn("ADR-036", "\n".join(problems))
+            self.assertEqual(calls.calls, [])
+
+    def test_a_missing_storage_class_stops_before_the_claim(self):
+        calls = FakeClaim(storage_class=(1, 'storageclasses.storage.k8s.io "shared" not found'))
+        problems, _ = self.step(calls)
+        self.assertIn("shared", "\n".join(problems))
+        self.assertIn("ReadWriteMany", "\n".join(problems))
+        self.assertEqual(len(calls.calls), 1)
+
+    def test_dry_run_applies_server_side(self):
+        calls = FakeClaim()
+        problems, notes = self.step(calls, dry_run=True)
+        self.assertEqual(problems, [])
+        self.assertIn("--dry-run=server", calls.calls[1])
+        self.assertIn("dry-run", "\n".join(notes))
+
+    def test_a_refused_apply_stops_with_its_error(self):
+        problems, _ = self.step(FakeClaim(apply=(1, "spec is immutable after creation")))
+        self.assertIn("spec is immutable", "\n".join(problems))
 
 
 CONSOLE_ENV = {"POLARIS_CONSOLE_ENABLED": "true",

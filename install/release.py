@@ -15,9 +15,12 @@
    c. The bootstrap (ADR-026): Polaris's admin tool, in a short-lived pod, creates the schema,
       the realm and its root principal from the `polaris-root` Secret. A realm already
       bootstrapped is kept.
-   d. Polaris 1.6.0 from charts/polaris (ADR-009), with values-lakehouse.yaml and the values
+   d. The claim polaris-logs (ADR-036): ReadWriteMany, its storage class (which must exist)
+      and size from `.env`, applied outside any Helm release so an uninstall keeps the logs.
+   e. Polaris 1.6.0 from charts/polaris (ADR-009), with values-lakehouse.yaml and the values
       from `.env` (the database host, the policy endpoint, and the console's origin, allowed
-      by CORS only while the console is enabled), waited on until rolled out.
+      by CORS only while the console is enabled), waited on until rolled out. Its pods write
+      their log files to the claim.
 2. The console, when `POLARIS_CONSOLE_ENABLED=true` (ADR-028): charts/polaris-console with its
    values-lakehouse.yaml and the URL at which the browser reaches Polaris, waited on until
    rolled out. A maintainer tool, never part of how Polaris operates: its problems are printed
@@ -34,6 +37,7 @@ Usage: python3 install/release.py [--dry-run]
        Exits 0 when every step passed, 1 with the problems, 2 on an unknown option.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -71,6 +75,16 @@ BOOTSTRAP_WRAPPER = f'cat >/dev/null; exec {ADMIN_TOOL_ENTRYPOINT} "$@" 1>&2'
 # (polaris-core AuthBootstrapUtil.java); the schema script it ran first changes nothing.
 ALREADY_BOOTSTRAPPED = "It appears this metastore manager has already been bootstrapped"
 BOOTSTRAP_TAIL = 20
+# The claim Polaris writes its log files to and the batch reads (ADR-036); its name is also
+# in charts/polaris/values-lakehouse.yaml.
+POLARIS_LOGS = "polaris-logs"
+# The log batch (ADR-014, ADR-036): its chart, and its image built from this repository,
+# tagged by a hash of the files that go into it.
+BATCH = "polaris-log-batch"
+BATCH_CHART = os.path.join(ROOT, "charts", BATCH)
+BATCH_IMAGE_DIR = os.path.join(ROOT, "images", BATCH)
+BATCH_IMAGE_FILES = ("Dockerfile", "polaris_log_batch.py")
+BATCH_IMAGE_REPOSITORY = f"lakehouse/{BATCH}"
 POLARIS_CHART = os.path.join(ROOT, "charts", "polaris")
 POLARIS_VALUES = os.path.join(POLARIS_CHART, "values-lakehouse.yaml")
 CONSOLE = "polaris-console"
@@ -214,6 +228,23 @@ def console_values(env):
                                "polarisRealm": POLARIS_REALM}}}
 
 
+def batch_image(directory=BATCH_IMAGE_DIR):
+    """The batch's image: its repository, and the first 12 hex digits of a SHA-256 over the
+    names and contents of the files that go into it."""
+    digest = hashlib.sha256()
+    for name in BATCH_IMAGE_FILES:
+        with open(os.path.join(directory, name), "rb") as f:
+            data = f.read()
+        digest.update(f"{name}\0{len(data)}\0".encode() + data)
+    return f"{BATCH_IMAGE_REPOSITORY}:{digest.hexdigest()[:12]}"
+
+
+def batch_values():
+    """The batch chart's values from this checkout: the image built from it."""
+    repository, tag = batch_image().rsplit(":", 1)
+    return {"image": {"repository": repository, "tag": tag}}
+
+
 def endpoints_answer(env, run, image=None, name=None):
     """Before Polaris: the S3 and policy endpoints answer from Polaris's namespace (ADR-029).
 
@@ -292,6 +323,45 @@ def bootstrap(env, run, image=None, name=None, dry_run=False):
             f"{tail}"], []
 
 
+def logs_claim_manifest(env):
+    """The claim polaris-logs: ReadWriteMany, its class and size from `.env`, outside any Helm
+    release so an uninstall keeps the logs (ADR-036)."""
+    return {"apiVersion": "v1", "kind": "PersistentVolumeClaim",
+            "metadata": {"name": POLARIS_LOGS, "namespace": env["NS_CATALOG_POLARIS"],
+                         "labels": {"app.kubernetes.io/name": "polaris",
+                                    "app.kubernetes.io/component": "logs"}},
+            "spec": {"accessModes": ["ReadWriteMany"], "volumeMode": "Filesystem",
+                     "storageClassName": env["POLARIS_LOGS_STORAGE_CLASS"],
+                     "resources": {"requests": {"storage": env["POLARIS_LOGS_SIZE"]}}}}
+
+
+def logs_claim(env, run, dry_run=False):
+    """Step 1, before Polaris: the claim Polaris and the log batch share (ADR-036). Its storage
+    class must exist; the claim binds once Polaris's pods mount it. Returns (problems, notes);
+    no call is made while the class or the size is empty."""
+    empty = [f"{var} is empty: set the claim's {what} in .env (ADR-036)"
+             for var, what in (("POLARIS_LOGS_STORAGE_CLASS", "ReadWriteMany storage class"),
+                               ("POLARIS_LOGS_SIZE", "size")) if not env.get(var)]
+    if empty:
+        return empty, []
+    namespace, context = env["NS_CATALOG_POLARIS"], env["KUBE_CONTEXT"]
+    cls = env["POLARIS_LOGS_STORAGE_CLASS"]
+    code, out = run(["kubectl", "--context", context, "-n", namespace, "get", "storageclass",
+                     cls, "-o", "name"])
+    if code != 0:
+        return [f"the storage class {cls} does not exist: the log claim needs a ReadWriteMany "
+                f"class (ADR-036): {out.strip()}"], []
+    code, out = run(["kubectl", "--context", context, "-n", namespace, "apply", "-f", "-"]
+                    + (["--dry-run=server"] if dry_run else []),
+                    json.dumps(logs_claim_manifest(env)))
+    if code != 0:
+        return [f"the claim {POLARIS_LOGS} in {namespace} was refused: {out.strip()}"], []
+    what = (f"the claim {POLARIS_LOGS} in {namespace}: ReadWriteMany, class {cls}, "
+            f"{env['POLARIS_LOGS_SIZE']}")
+    return [], [f"Step 1: {what}, server-side dry-run passed." if dry_run
+                else f"Step 1: {what}."]
+
+
 def polaris(env, run, dry_run=False):
     """Step 1, last: Polaris from charts/polaris with values-lakehouse.yaml and the values from
     `.env`, waited on until its rollout is done. Returns (problems, notes)."""
@@ -362,6 +432,7 @@ def install(env, run, supported, dry_run):
                  lambda: polaris_postgres(env, run, dry_run),
                  lambda: endpoints_answer(env, run),
                  lambda: bootstrap(env, run, dry_run=dry_run),
+                 lambda: logs_claim(env, run, dry_run),
                  lambda: polaris(env, run, dry_run)):
         problems, more = step()
         notes += more

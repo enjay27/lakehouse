@@ -9,7 +9,9 @@
                   PostgreSQL instances apart, then installs the CNPG operator from its pinned
                   chart archive into NS_CNPG_SYSTEM and waits for it. The operator exists here
                   only because the gate has no operator team (ADR-029); a release never
-                  installs it.
+                  installs it. Before CNPG, kind's local-path-provisioner gets the class
+                  `shared` on a runner directory every node mounts: ReadWriteMany for the
+                  log claim (ADR-036).
   secrets         writes `.env` for the gate (its context, the stand-ins' endpoints and
                   the S3 stand-in's two keys, Polaris's and the smoke tests', which are the
                   gate's own, ADR-031), then runs
@@ -103,6 +105,16 @@ POLARIS_POD_LABELS = "app.kubernetes.io/name=polaris,app.kubernetes.io/instance=
 POLARIS_API_PORT, POLARIS_MGMT_PORT = 8181, 8182
 # The catalog the smoke tests create and the gate's policy names (gates/opa/policy.rego).
 ICEBERG_CATALOG = "gate_catalog"
+# ReadWriteMany on kind for the log claim (ADR-036): one runner directory mounted into every
+# node (gates/kind.yaml), offered by kind's local-path-provisioner as the class `shared`
+# through its sharedFileSystemPath. A stand-in, never released (ADR-031).
+SHARED_HOST_DIR = "/tmp/lakehouse-gate-shared"
+SHARED_NODE_DIR = "/var/local-path-shared"
+SHARED_CLASS = "shared"
+GATE_LOGS_SIZE = "1Gi"
+# kind's own default, which the class `standard` keeps.
+STANDARD_NODE_PATHS = [{"node": "DEFAULT_PATH_FOR_NON_LISTED_NODES",
+                        "paths": ["/var/local-path-provisioner"]}]
 # The Polaris console's image, built here from a pinned polaris-tools commit (ADR-028).
 CONSOLE_IMAGE_DIR = os.path.join(ROOT, "images", "polaris-console")
 CONSOLE_IMAGE_REPOSITORY = "lakehouse/polaris-console"
@@ -145,15 +157,34 @@ def tools(pins, bin_dir, names=TOOLS, get=download):
         os.chmod(path, 0o755)
 
 
+def shared_storage_class():
+    return {"apiVersion": "storage.k8s.io/v1", "kind": "StorageClass",
+            "metadata": {"name": SHARED_CLASS}, "provisioner": "rancher.io/local-path",
+            "reclaimPolicy": "Delete", "volumeBindingMode": "WaitForFirstConsumer"}
+
+
 def up_commands(pins, chart_path, namespace):
+    """(argv, stdin) in order: the cluster, the control-plane taken off NoSchedule, the shared
+    class next to kind's `standard` (the provisioner restarted to read it), then CNPG."""
+    config = {"nodePathMap": [],
+              "storageClassConfigs": {"standard": {"nodePathMap": STANDARD_NODE_PATHS},
+                                      SHARED_CLASS: {"sharedFileSystemPath": SHARED_NODE_DIR}}}
+    provisioner = ["kubectl", "--context", CONTEXT, "-n", "local-path-storage"]
     return [
-        ["kind", "create", "cluster", "--name", CLUSTER,
-         "--config", os.path.join(HERE, "kind.yaml"),
-         "--image", pins["node_image"]["image"], "--wait", "180s"],
-        ["kubectl", "--context", CONTEXT, "taint", "nodes", f"{CLUSTER}-control-plane",
-         "node-role.kubernetes.io/control-plane:NoSchedule-"],
-        ["helm", "--kube-context", CONTEXT, "install", "cnpg", chart_path,
-         "--namespace", namespace, "--create-namespace", "--wait", "--timeout", "5m"],
+        (["kind", "create", "cluster", "--name", CLUSTER,
+          "--config", os.path.join(HERE, "kind.yaml"),
+          "--image", pins["node_image"]["image"], "--wait", "180s"], None),
+        (["kubectl", "--context", CONTEXT, "taint", "nodes", f"{CLUSTER}-control-plane",
+          "node-role.kubernetes.io/control-plane:NoSchedule-"], None),
+        (provisioner + ["patch", "configmap", "local-path-config", "--type", "merge", "-p",
+                        json.dumps({"data": {"config.json": json.dumps(config)}})], None),
+        (["kubectl", "--context", CONTEXT, "apply", "-f", "-"],
+         json.dumps(shared_storage_class())),
+        (provisioner + ["rollout", "restart", "deployment/local-path-provisioner"], None),
+        (provisioner + ["rollout", "status", "deployment/local-path-provisioner",
+                        "--timeout=3m"], None),
+        (["helm", "--kube-context", CONTEXT, "install", "cnpg", chart_path,
+          "--namespace", namespace, "--create-namespace", "--wait", "--timeout", "5m"], None),
     ]
 
 
@@ -183,10 +214,12 @@ def console_settings(ns):
 
 def gate_env(template_text, gen=init_env.generate):
     """`.env` for the gate: its context, the stand-ins' endpoints, the S3 stand-in's
-    credentials and the console's settings; init_env fills the rest."""
+    credentials, the console's settings and the log claim's shared class; init_env fills the
+    rest."""
     template = init_env.parse(template_text)
     fixed = {"KUBE_CONTEXT": CONTEXT, **standin_endpoints(template["NS_STANDINS"]),
-             **console_settings(template["NS_CATALOG_POLARIS"])}
+             **console_settings(template["NS_CATALOG_POLARIS"]),
+             "POLARIS_LOGS_STORAGE_CLASS": SHARED_CLASS, "POLARIS_LOGS_SIZE": GATE_LOGS_SIZE}
     lines = []
     for line in template_text.splitlines():
         name = line.split("=", 1)[0]
@@ -569,8 +602,10 @@ def main(argv):
             chart_path = os.path.join(d, os.path.basename(chart["url"]))
             with open(chart_path, "wb") as f:
                 f.write(fetch(chart["url"], chart["sha256"]))
-            for command in up_commands(pins, chart_path, namespace):
-                run(command)
+            os.makedirs(SHARED_HOST_DIR, exist_ok=True)
+            os.chmod(SHARED_HOST_DIR, 0o777)
+            for command, stdin in up_commands(pins, chart_path, namespace):
+                run(command, stdin)
         return 0
     if argv[1:] == ["secrets"]:
         with open(os.path.join(ROOT, ".env.template"), encoding="utf-8") as f:
