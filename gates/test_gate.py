@@ -180,6 +180,7 @@ S3_ENDPOINT=
 S3_REGION=
 POLARIS_WAREHOUSE_BUCKET=
 POLARIS_OPA_URL=
+POLARIS_DB_HOST=
 POLARIS_S3_ACCESS_KEY_ID=
 POLARIS_S3_SECRET_ACCESS_KEY=
 POLARIS_DB_PASSWORD=
@@ -194,14 +195,15 @@ class GateEnv(unittest.TestCase):
         self.assertEqual(env["POLARIS_S3_SECRET_ACCESS_KEY"],
                          "gen-POLARIS_S3_SECRET_ACCESS_KEY")
 
-    def test_the_endpoints_name_the_stand_ins_in_their_namespace(self):
+    def test_the_endpoints_name_the_recorder_in_the_stand_ins_namespace(self):
         env = gate.init_env.parse(gate.gate_env(TEMPLATE.replace("NS_STANDINS=standins",
                                                                  "NS_STANDINS=si")))
-        self.assertEqual(env["S3_ENDPOINT"], "http://seaweedfs.si.svc.cluster.local:8333")
+        self.assertEqual(env["S3_ENDPOINT"], "http://recorder.si.svc.cluster.local:8333")
         self.assertEqual(env["S3_REGION"], "us-east-1")
         self.assertEqual(env["POLARIS_WAREHOUSE_BUCKET"], "polaris-warehouse")
         self.assertEqual(env["POLARIS_OPA_URL"],
-                         "http://opa.si.svc.cluster.local:8181/v1/data/polaris/authz")
+                         "http://recorder.si.svc.cluster.local:8181/v1/data/polaris/authz")
+        self.assertEqual(env["POLARIS_DB_HOST"], "recorder.si.svc.cluster.local")
 
     def test_everything_else_is_left_to_init_env(self):
         env = gate.init_env.parse(gate.gate_env(TEMPLATE, gen=lambda name: "x"))
@@ -212,7 +214,8 @@ class GateEnv(unittest.TestCase):
         with open(os.path.join(HERE, "..", ".env.template"), encoding="utf-8") as f:
             env = gate.init_env.parse(gate.gate_env(f.read()))
         for name in gate.GATE_ENV_GENERATED + ("KUBE_CONTEXT", "S3_ENDPOINT", "S3_REGION",
-                                               "POLARIS_WAREHOUSE_BUCKET", "POLARIS_OPA_URL"):
+                                               "POLARIS_WAREHOUSE_BUCKET", "POLARIS_OPA_URL",
+                                               "POLARIS_DB_HOST"):
             with self.subTest(name=name):
                 self.assertTrue(env[name])
 
@@ -332,7 +335,8 @@ class ReleasedTags(unittest.TestCase):
 STANDIN_ENV = {"NS_STANDINS": "standins", "NS_CATALOG_POLARIS": "catalog-polaris",
                "S3_ENDPOINT": "http://seaweedfs.standins.svc.cluster.local:8333",
                "S3_REGION": "us-east-1", "POLARIS_WAREHOUSE_BUCKET": "polaris-warehouse",
-               "POLARIS_OPA_URL": "http://opa.standins.svc.cluster.local:8181/v1/data/polaris/authz"}
+               "POLARIS_OPA_URL": "http://opa.standins.svc.cluster.local:8181/v1/data/polaris/authz",
+               "POLARIS_DB_HOST": "recorder.standins.svc.cluster.local"}
 CURL = "curlimages/curl:8.22.0@sha256:" + "c" * 64
 
 
@@ -343,8 +347,33 @@ class Standins(unittest.TestCase):
         self.assertIn("--server-side", apply)
         self.assertEqual(apply[-2:], ["-f", "-"])
         self.assertEqual(wait[:5], ["kubectl", "--context", gate.CONTEXT, "-n", "standins"])
-        self.assertIn("deployment/seaweedfs", wait)
-        self.assertIn("deployment/opa", wait)
+        for name in ("seaweedfs", "opa", "recorder"):
+            self.assertIn(f"deployment/{name}", wait)
+
+    def test_the_recorder_certificate_is_made_here_for_its_service_name(self):
+        with tempfile.TemporaryDirectory() as d:
+            cert, key = gate.recorder_certificate(STANDIN_ENV, d)
+        self.assertIn("BEGIN CERTIFICATE", cert)
+        self.assertIn("PRIVATE KEY", key)
+
+
+class CheckTraffic(unittest.TestCase):
+    def test_reads_every_line_the_recorder_wrote(self):
+        self.assertEqual(gate.recorder_logs_command(STANDIN_ENV),
+                         ["kubectl", "--context", gate.CONTEXT, "-n", "standins", "logs",
+                          "deployment/recorder", "--tail=-1"])
+
+    def test_every_expectation_file_is_checked_and_any_failure_fails(self):
+        log = "\n".join(json.dumps(r) for r in (
+            {"proto": "http", "listener": "opa", "status": 200},
+            {"proto": "pg", "event": "connect", "result": "ok"}))
+        good = [{"name": "opa answered", "must": "exist", "match": {"listener": "opa"}}]
+        bad = [{"name": "no pg", "must": "not_exist", "match": {"proto": "pg"}}]
+        problems, lines = gate.check_traffic(log, [good])
+        self.assertEqual(problems, [])
+        self.assertIn("2 records: 1 HTTP, 1 PostgreSQL", lines[0])
+        problems, _ = gate.check_traffic(log, [good, bad])
+        self.assertEqual(len(problems), 1)
 
 
 class CheckStandins(unittest.TestCase):
@@ -385,6 +414,25 @@ class CheckStandins(unittest.TestCase):
         self.assertEqual(tail[7:9], ["root", "true"])
         self.assertEqual(json.loads(tail[9]), self.CASES[0]["input"])
         self.assertEqual(tail[10:12], ["stranger", "false"])
+
+    def test_the_database_check_runs_psql_through_the_recorder_as_polaris(self):
+        argv = gate.check_db_command(STANDIN_ENV, "pg-image@sha256:" + "d" * 64, "polaris",
+                                     name="db-test")
+        self.assertEqual(argv[:7], ["kubectl", "--context", gate.CONTEXT, "-n",
+                                    "catalog-polaris", "run", "db-test"])
+        self.assertIn("--override-type=strategic", argv)
+        overrides = json.loads(argv[argv.index("--overrides") + 1])
+        refs = {e["name"]: e["valueFrom"]["secretKeyRef"]
+                for e in overrides["spec"]["containers"][0]["env"]}
+        self.assertEqual(refs, {"PGUSER": {"name": "polaris-db", "key": "username"},
+                                "PGPASSWORD": {"name": "polaris-db", "key": "password"}})
+        self.assertEqual(argv[-5:], ["sh", "-s", "--", STANDIN_ENV["POLARIS_DB_HOST"],
+                                     "polaris"])
+
+    def test_the_database_image_and_name_are_the_charts(self):
+        values = gate.polaris_pg_values()
+        self.assertRegex(values["image"], r"@sha256:[0-9a-f]{64}$")
+        self.assertEqual(values["database"], "polaris")
 
     def test_the_committed_cases_load(self):
         cases = gate.standins.load_cases(os.path.join(HERE, "opa", "cases.json"))

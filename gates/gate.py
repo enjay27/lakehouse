@@ -16,9 +16,16 @@
   standins        applies the stand-ins (gates/standins.py: SeaweedFS for S3, OPA with
                   gates/opa/policy.rego) in NS_STANDINS and waits for them (ADR-031). Never
                   part of a release; the install's endpoint check needs them on the gate.
+                  With them the recorder (ADR-034), with a TLS certificate made here.
   check-standins  runs gates/check_standins.sh in a short-lived curl pod in Polaris's namespace:
                   an S3 round trip with Polaris's credentials, and every case of
-                  gates/opa/cases.json against the policy endpoint (ADR-026, ADR-031).
+                  gates/opa/cases.json against the policy endpoint (ADR-026, ADR-031); then
+                  gates/check_db.sh in a pod on Polaris's PostgreSQL image: a login as Polaris
+                  with and without TLS, a row written and read. All through the recorder.
+  check-traffic FILE...
+                  reads every record the recorder wrote and matches them against each
+                  expectation file (gates/expectations/*.json, gates/traffic.py): exchanges that
+                  must have happened and ones that must not (ADR-034). Prints counts, never a body.
   install [--fresh] [--dry-run]
                   installs the latest release HEAD contains (released_tags) from a checkout of
                   its tag, then this commit's release over it (ADR-021); with no tag, or with
@@ -32,7 +39,7 @@
 Every kubectl and helm call names the gate's context, and a namespace where the object has
 one. Nothing here reaches any cluster but the kind cluster it creates (ADR-017).
 
-Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | install [--fresh] [--dry-run] | check-polaris-pg
+Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | check-polaris-pg
 """
 
 import hashlib
@@ -53,6 +60,7 @@ import init_env  # noqa: E402
 import release  # noqa: E402
 import release_tag  # noqa: E402
 import standins  # noqa: E402
+import traffic  # noqa: E402
 
 CLUSTER = "lakehouse-gate"
 CONTEXT = f"kind-{CLUSTER}"
@@ -116,13 +124,15 @@ def up_commands(pins, chart_path, namespace):
 
 
 def standin_endpoints(ns):
-    """The `.env` values naming the stand-ins in namespace `ns`."""
+    """The `.env` values for the gate: every connection Polaris makes goes through the
+    recorder in namespace `ns`, which forwards it to the stand-in or to polaris-pg (ADR-034)."""
+    recorder = f"recorder.{ns}.svc.cluster.local"
     return {
-        "S3_ENDPOINT": f"http://seaweedfs.{ns}.svc.cluster.local:{standins.S3_PORT}",
+        "S3_ENDPOINT": f"http://{recorder}:{standins.S3_PORT}",
         "S3_REGION": STANDIN_REGION,
         "POLARIS_WAREHOUSE_BUCKET": STANDIN_BUCKET,
-        "POLARIS_OPA_URL": (f"http://opa.{ns}.svc.cluster.local:{standins.OPA_PORT}"
-                            f"{standins.OPA_PACKAGE_PATH}"),
+        "POLARIS_OPA_URL": f"http://{recorder}:{standins.OPA_PORT}{standins.OPA_PACKAGE_PATH}",
+        "POLARIS_DB_HOST": recorder,
     }
 
 
@@ -154,8 +164,43 @@ def standins_commands(env):
         ["kubectl", "--context", CONTEXT, "apply", "--server-side", "--field-manager=gate",
          "-f", "-"],
         ["kubectl", "--context", CONTEXT, "-n", env["NS_STANDINS"], "rollout", "status",
-         "deployment/seaweedfs", "deployment/opa", "--timeout=5m"],
+         "deployment/seaweedfs", "deployment/opa", "deployment/recorder", "--timeout=5m"],
     ]
+
+
+def recorder_certificate(env, directory):
+    """A self-signed certificate and key (PEM) for the recorder's PostgreSQL TLS, made here for
+    this gate run only (ADR-017, ADR-034)."""
+    cert, key = os.path.join(directory, "tls.crt"), os.path.join(directory, "tls.key")
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2",
+                    "-subj", f"/CN=recorder.{env['NS_STANDINS']}.svc.cluster.local",
+                    "-keyout", key, "-out", cert], check=True, capture_output=True)
+    with open(cert, encoding="ascii") as c, open(key, encoding="ascii") as k:
+        return c.read(), k.read()
+
+
+def polaris_pg_values(path=os.path.join(ROOT, "charts", "polaris-postgres", "values.yaml")):
+    """The chart's top-level `image` and `database`, read without a YAML library."""
+    values = {}
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            for key in ("image", "database"):
+                if line.startswith(f"{key}:"):
+                    values[key] = line.split(":", 1)[1].strip().strip("\"'")
+    return values
+
+
+def check_db_command(env, image, database, name):
+    """The pod that runs check_db.sh (on stdin) as Polaris, through POLARIS_DB_HOST."""
+    creds = [{"name": var, "valueFrom": {"secretKeyRef": {"name": "polaris-db", "key": key}}}
+             for var, key in (("PGUSER", "username"), ("PGPASSWORD", "password"))]
+    overrides = {"spec": {"containers": [{"name": name, "image": image, "env": creds,
+                                          "stdin": True, "stdinOnce": True}]}}
+    return ["kubectl", "--context", CONTEXT, "-n", env["NS_CATALOG_POLARIS"], "run", name,
+            f"--image={image}", "--restart=Never", "--rm", "-i", "--quiet",
+            "--pod-running-timeout=3m", "--override-type=strategic",
+            "--overrides", json.dumps(overrides),
+            "--command", "--", "sh", "-s", "--", env["POLARIS_DB_HOST"], database]
 
 
 def check_standins_command(env, cases, image, name):
@@ -175,6 +220,27 @@ def check_standins_command(env, cases, image, name):
         argv += [case["name"], "true" if case["allow"] else "false",
                  json.dumps(case["input"], separators=(",", ":"))]
     return argv
+
+
+def recorder_logs_command(env):
+    return ["kubectl", "--context", CONTEXT, "-n", env["NS_STANDINS"], "logs",
+            "deployment/recorder", "--tail=-1"]
+
+
+def check_traffic(log_text, expectation_lists):
+    """(problems, lines): a count of the records, then one line per expectation."""
+    recorded = traffic.records(log_text)
+    by_proto = {p: sum(1 for r in recorded
+                       if r.get("proto") == p and r.get("event") != "listening")
+                for p in ("http", "pg")}
+    lines = [f"Recorder: {by_proto['http'] + by_proto['pg']} records: {by_proto['http']} HTTP, "
+             f"{by_proto['pg']} PostgreSQL."]
+    problems = []
+    for expectations in expectation_lists:
+        more_problems, more_lines = traffic.check(recorded, expectations)
+        problems += more_problems
+        lines += more_lines
+    return problems, lines
 
 
 def install_plan(previous, previous_dir, fresh, dry_run=False):
@@ -272,8 +338,11 @@ def main(argv):
         return 0
     if argv[1:] == ["standins"]:
         env = release.load_env(ROOT, os.environ)
-        with open(os.path.join(HERE, "opa", "policy.rego"), encoding="utf-8") as f:
-            manifest = json.dumps(standins.manifests(env, pins, f.read()))
+        with open(os.path.join(HERE, "opa", "policy.rego"), encoding="utf-8") as f, \
+                open(os.path.join(HERE, "recorder", "proxy.py"), encoding="utf-8") as code, \
+                tempfile.TemporaryDirectory() as d:
+            manifest = json.dumps(standins.manifests(env, pins, f.read(), code.read(),
+                                                     recorder_certificate(env, d)))
         apply, wait = standins_commands(env)
         print("+ " + " ".join(apply) + "  (the stand-ins' List on stdin)", flush=True)
         subprocess.run(apply, input=manifest, text=True, check=True)
@@ -286,8 +355,21 @@ def main(argv):
             script = f.read()
         command = check_standins_command(env, cases, release.images()["curl"],
                                          f"check-standins-{os.getpid()}")
-        result = subprocess.run(command, input=script, text=True, check=False)
-        return 1 if result.returncode else 0
+        failed = subprocess.run(command, input=script, text=True, check=False).returncode
+        with open(os.path.join(HERE, "check_db.sh"), encoding="utf-8") as f:
+            script = f.read()
+        pg = polaris_pg_values()
+        command = check_db_command(env, pg["image"], pg["database"], f"check-db-{os.getpid()}")
+        failed |= subprocess.run(command, input=script, text=True, check=False).returncode
+        return 1 if failed else 0
+    if argv[1:2] == ["check-traffic"] and len(argv) > 2:
+        env = release.load_env(ROOT, os.environ)
+        log = subprocess.run(recorder_logs_command(env), capture_output=True, text=True,
+                             check=True).stdout
+        problems, lines = check_traffic(log, [traffic.load(path) for path in argv[2:]])
+        for line in lines:
+            print(line)
+        return 1 if problems else 0
     if argv[1:2] == ["install"] and set(argv[2:]) <= {"--fresh", "--dry-run"} \
             and len(set(argv[2:])) == len(argv[2:]):
         with tempfile.TemporaryDirectory() as d:

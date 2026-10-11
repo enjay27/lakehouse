@@ -11,15 +11,22 @@ import gate  # noqa: E402
 import standins  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ENV = {"NS_STANDINS": "standins", "POLARIS_S3_ACCESS_KEY_ID": "gatekey",
+ENV = {"NS_STANDINS": "standins", "NS_CATALOG_POLARIS": "catalog-polaris",
+       "POLARIS_S3_ACCESS_KEY_ID": "gatekey",
        "POLARIS_S3_SECRET_ACCESS_KEY": "gatesecret",
        "POLARIS_WAREHOUSE_BUCKET": "polaris-warehouse"}
 PINS = gate.load_pins(os.path.join(HERE, "pins.json"))
 
 
+TLS = ("certificate-pem\n", "key-pem\n")
+
+
+def items(env=ENV):
+    return standins.manifests(env, PINS, "package polaris.authz\n", "# proxy.py\n", TLS)["items"]
+
+
 def objects(env=ENV):
-    return {(o["kind"], o["metadata"]["name"]): o
-            for o in standins.manifests(env, PINS, "package polaris.authz\n")["items"]}
+    return {(o["kind"], o["metadata"]["name"]): o for o in items(env)}
 
 
 def container(deployment):
@@ -29,18 +36,18 @@ def container(deployment):
 
 class Pins(unittest.TestCase):
     def test_each_stand_in_image_is_pinned_by_digest(self):
-        for name in ("seaweedfs", "opa"):
+        for name in ("seaweedfs", "opa", "recorder"):
             with self.subTest(name=name):
                 self.assertRegex(PINS["standin_images"][name]["image"],
-                                 r"^[a-z]+/[a-z]+:\d+\.\d+(\.\d+)?@sha256:[0-9a-f]{64}$")
+                                 r"^([a-z]+/)?[a-z]+:\d+\.\d+(\.\d+)?(-slim)?@sha256:[0-9a-f]{64}$")
 
 
 class Manifests(unittest.TestCase):
     def test_the_namespace_comes_first_and_holds_every_other_object(self):
-        items = standins.manifests(ENV, PINS, "")["items"]
-        self.assertEqual((items[0]["kind"], items[0]["metadata"]["name"]),
+        listed = items()
+        self.assertEqual((listed[0]["kind"], listed[0]["metadata"]["name"]),
                          ("Namespace", "standins"))
-        for o in items[1:]:
+        for o in listed[1:]:
             with self.subTest(object=o["metadata"]["name"]):
                 self.assertEqual(o["metadata"]["namespace"], "standins")
 
@@ -88,6 +95,28 @@ class Manifests(unittest.TestCase):
         self.assertEqual(o[("ConfigMap", "opa-policy")]["data"]["policy.rego"],
                          "package polaris.authz\n")
 
+    def test_the_recorder_listens_for_each_connection_and_forwards_to_its_service(self):
+        c = container(objects()[("Deployment", "recorder")])
+        self.assertEqual(c["image"], PINS["standin_images"]["recorder"]["image"])
+        self.assertEqual(c["command"][:2], ["python3", "/recorder/proxy.py"])
+        args = c["command"][2:]
+        pairs = list(zip(args[0::2], args[1::2]))
+        self.assertIn(("--http", "opa=8181:opa.standins.svc.cluster.local:8181"), pairs)
+        self.assertIn(("--http", "s3=8333:seaweedfs.standins.svc.cluster.local:8333"), pairs)
+        self.assertIn(("--pg", "pg=5432:polaris-pg-rw.catalog-polaris.svc.cluster.local:5432"),
+                      pairs)
+        self.assertIn(("--tls-cert", "/tls/tls.crt"), pairs)
+        self.assertIn(("--tls-key", "/tls/tls.key"), pairs)
+
+    def test_the_recorder_runs_its_code_from_a_configmap_and_its_certificate_from_a_secret(self):
+        o = objects()
+        self.assertEqual(o[("ConfigMap", "recorder-code")]["data"]["proxy.py"], "# proxy.py\n")
+        tls = o[("Secret", "recorder-tls")]
+        self.assertEqual(tls["type"], "kubernetes.io/tls")
+        self.assertEqual(base64.b64decode(tls["data"]["tls.crt"]).decode(), TLS[0])
+        mounts = {m["mountPath"] for m in container(o[("Deployment", "recorder")])["volumeMounts"]}
+        self.assertEqual(mounts, {"/recorder", "/tls"})
+
     def test_the_services_expose_s3_on_8333_and_opa_on_8181(self):
         o = objects()
         for name, port in (("seaweedfs", 8333), ("opa", 8181)):
@@ -95,6 +124,8 @@ class Manifests(unittest.TestCase):
                 svc = o[("Service", name)]["spec"]
                 self.assertEqual(svc["ports"][0]["port"], port)
                 self.assertEqual(svc["selector"], {"app.kubernetes.io/name": name})
+        ports = {p["port"] for p in o[("Service", "recorder")]["spec"]["ports"]}
+        self.assertEqual(ports, {8181, 8333, 5432})
 
     def test_the_committed_policy_is_the_package_polaris_reads(self):
         with open(os.path.join(HERE, "opa", "policy.rego"), encoding="utf-8") as f:

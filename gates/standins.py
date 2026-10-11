@@ -7,6 +7,11 @@ never part of a release. Built here as one v1 List that `gate.py standins` appli
   creates it after its services report ready, so its own health endpoint is not enough.
 - **Policy endpoint: OPA**, serving gates/opa/policy.rego (package `polaris.authz`, the URL
   Polaris posts to, docs/contracts/polaris-opa-input.md) from the ConfigMap `opa-policy`.
+- **The recorder** (ADR-034): gates/recorder/proxy.py from the ConfigMap `recorder-code`, on the
+  pinned Python image, one listener per connection Polaris makes: 8181 to OPA, 8333 to
+  SeaweedFS, 5432 to polaris-pg's read-write service in NS_CATALOG_POLARIS, with the TLS
+  certificate the gate generates (Secret `recorder-tls`). On the gate, `.env` names the
+  recorder, so every exchange with these three goes through it.
 
 Images are pinned by digest in gates/pins.json (`standin_images`). Everything lives in
 `NS_STANDINS`; credentials reach the cluster only inside the Secret, on stdin.
@@ -19,6 +24,7 @@ S3_PORT = 8333
 OPA_PORT = 8181
 OPA_PACKAGE_PATH = "/v1/data/polaris/authz"
 FILER_PORT = 8888
+PG_PORT = 5432
 
 
 def b64(value):
@@ -50,9 +56,11 @@ def _service(name, namespace, port):
                      "ports": [{"name": "http", "port": port, "targetPort": port}]}}
 
 
-def manifests(env, pins, policy_text):
-    """A v1 List: the Namespace, then the Secret, ConfigMap, Deployments and Services."""
+def manifests(env, pins, policy_text, recorder_code, tls):
+    """A v1 List: the Namespace, then the Secrets, ConfigMaps, Deployments and Services.
+    `tls` is the recorder's (certificate, key), PEM."""
     ns = env["NS_STANDINS"]
+    svc = f"{ns}.svc.cluster.local"
     bucket = env["POLARIS_WAREHOUSE_BUCKET"]
     images = pins["standin_images"]
     secret_env = [{"name": var, "valueFrom": {"secretKeyRef": {"name": "seaweedfs-s3",
@@ -80,6 +88,25 @@ def manifests(env, pins, policy_text):
                            "periodSeconds": 5},
         "volumeMounts": [{"name": "policy", "mountPath": "/policies", "readOnly": True}],
     }
+    recorder = {
+        "image": images["recorder"]["image"],
+        "command": ["python3", "/recorder/proxy.py",
+                    "--http", f"opa={OPA_PORT}:opa.{svc}:{OPA_PORT}",
+                    "--http", f"s3={S3_PORT}:seaweedfs.{svc}:{S3_PORT}",
+                    "--pg", (f"pg={PG_PORT}:polaris-pg-rw.{env['NS_CATALOG_POLARIS']}"
+                             f".svc.cluster.local:{PG_PORT}"),
+                    "--tls-cert", "/tls/tls.crt", "--tls-key", "/tls/tls.key"],
+        "env": [{"name": "PYTHONUNBUFFERED", "value": "1"}],
+        "ports": [{"name": name, "containerPort": port} for name, port in
+                  (("opa", OPA_PORT), ("s3", S3_PORT), ("pg", PG_PORT))],
+        "readinessProbe": {"tcpSocket": {"port": OPA_PORT}, "periodSeconds": 2},
+        "volumeMounts": [{"name": "code", "mountPath": "/recorder", "readOnly": True},
+                         {"name": "tls", "mountPath": "/tls", "readOnly": True}],
+    }
+    recorder_service = _service("recorder", ns, OPA_PORT)
+    recorder_service["spec"]["ports"] = [
+        {"name": name, "port": port, "targetPort": port}
+        for name, port in (("opa", OPA_PORT), ("s3", S3_PORT), ("pg", PG_PORT))]
     return {"apiVersion": "v1", "kind": "List", "items": [
         {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": ns}},
         {"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
@@ -93,4 +120,13 @@ def manifests(env, pins, policy_text):
         _deployment("opa", ns, opa, [{"name": "policy",
                                       "configMap": {"name": "opa-policy"}}]),
         _service("opa", ns, OPA_PORT),
+        {"apiVersion": "v1", "kind": "Secret", "type": "kubernetes.io/tls",
+         "metadata": _meta("recorder-tls", ns),
+         "data": {"tls.crt": b64(tls[0]), "tls.key": b64(tls[1])}},
+        {"apiVersion": "v1", "kind": "ConfigMap", "metadata": _meta("recorder-code", ns),
+         "data": {"proxy.py": recorder_code}},
+        _deployment("recorder", ns, recorder, [
+            {"name": "code", "configMap": {"name": "recorder-code"}},
+            {"name": "tls", "secret": {"secretName": "recorder-tls"}}]),
+        recorder_service,
     ]}

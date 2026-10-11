@@ -30,7 +30,7 @@ storage, observability, SSO and the catalog gateway are other teams' services, r
 | `scripts/auto_merge_gate.py` | Merge, wait or stop from a head's checks, drafts and paths (ADR-022, ADR-030) |
 | `scripts/gate_check.py` | gate-check: platform files need a dry-run covering the head (ADR-019) |
 | `scripts/branch_cleanup.py` | Which merged `claude/*` and stale `gate/*` branches to delete (ADR-032) |
-| `gates/` | The kind gate: pinned tools and node image, the cluster, CNPG and the stand-ins (SeaweedFS, OPA with `gates/opa/policy.rego`) on the gate only, the gate's Secrets (ADR-017, ADR-029, ADR-031) |
+| `gates/` | The kind gate: pinned tools and node image, the cluster, CNPG, the stand-ins (SeaweedFS, OPA with `gates/opa/policy.rego`) and the recorder that `check-traffic` reads, on the gate only, the gate's Secrets (ADR-017, ADR-029, ADR-031, ADR-034) |
 | `charts/` | Local charts, `polaris-postgres` first (ADR-010); tests render each, check its values schema, run kubeconform on CNPG's CRD (ADR-016) |
 | `install/` | `release.py` installs a release in ADR-029's order (step 0 the CNPG precondition, step 1 Polaris's PostgreSQL, then the S3 and policy endpoints must answer); `release_tag.py` names tags, reads the release gate, writes notes (ADR-033) |
 | `scripts/init_env.py` | init-env: `.env` with credentials per clone; `--apply-secrets` (ADR-006) |
