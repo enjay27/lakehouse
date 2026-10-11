@@ -135,6 +135,10 @@ source does not matter for operation. What follows is the list they cover.
   Polaris unless the S3 and policy endpoints answer from Polaris's namespace (ADR-029); the
   smoke gate's `check-standins` makes an S3 round trip with Polaris's credentials and checks
   the policy's allowed and refused cases.
+  Gates on commit `4f173d8` (2026-10-11), both upgrading from `platform-2026.10.10`: dry-run
+  [38121760939](https://github.com/enjay27/lakehouse/actions/runs/38121760939), smoke
+  [38121760980](https://github.com/enjay27/lakehouse/actions/runs/38121760980) (the stand-ins
+  ready in seconds; the S3 round trip and all 7 policy cases, 3 allowed and 4 refused, ok).
 - The recorder (2026-10-11, ADR-034, ADR-035): `gates/recorder/proxy.py`, Python standard
   library only, forwards every byte unchanged between Polaris's three connections and their
   services (OPA, SeaweedFS, polaris-pg; PostgreSQL TLS ends at the recorder, plain TCP to
@@ -144,10 +148,11 @@ source does not matter for operation. What follows is the list they cover.
   as Polaris with and without TLS through it; `check-traffic` matches the records against
   `gates/expectations/standins.json` (9 exchanges that must exist, 6 that must not). Polaris's
   own expectations come with its chart.
-  Gates on commit `4f173d8` (2026-10-11), both upgrading from `platform-2026.10.10`: dry-run
-  [38121760939](https://github.com/enjay27/lakehouse/actions/runs/38121760939), smoke
-  [38121760980](https://github.com/enjay27/lakehouse/actions/runs/38121760980) (the stand-ins
-  ready in seconds; the S3 round trip and all 7 policy cases, 3 allowed and 4 refused, ok).
+  Gates on commit `f30915a` (2026-10-11), both upgrading from `platform-2026.10.10`: dry-run
+  [38123639581](https://github.com/enjay27/lakehouse/actions/runs/38123639581), smoke
+  [38123641118](https://github.com/enjay27/lakehouse/actions/runs/38123641118) (logins as
+  Polaris through the recorder with `sslmode=require` and `disable` ok, so polaris-pg accepts
+  the recorder's plain TCP; 21 records, 13 HTTP and 8 PostgreSQL; all 15 expectations ok).
 - Bootstrap: the realm and root principal from Secrets (ADR-006), then a catalog on the S3
   endpoint (SeaweedFS stand-in on the gate, ADR-031).
 - Smoke tests through the Iceberg REST API, as an ordinary principal: create a namespace and
