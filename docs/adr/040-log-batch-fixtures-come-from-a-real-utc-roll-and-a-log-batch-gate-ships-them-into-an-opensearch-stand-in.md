@@ -193,6 +193,11 @@ flowchart TD
   for the Log Batch Gate.
 - **If the monthly run fails** and the artifact expires, every batch PR fails at the download
   until Create Fixtures is run by hand.
+- **GitHub disables the schedule after 60 days without activity** in a public repository, and
+  its own scheduled runs do not count. A quiet repository then loses the monthly run, and the
+  last artifact expires two to three months later. The workflow is re-enabled in the Actions
+  tab, or run by hand. Scheduled runs are also best-effort: one can start late, so the wait for
+  the hour stays bounded at 60 minutes whatever the start.
 - **`log-batch.yml` and the Create Fixtures workflow run on gate branches and `main`, not on
   PRs,** so they do not join `auto-merge.yml`'s list; gate-check, which does, reads them.
 - **Code follows once this ADR is Accepted,** after ADR-039's smoke requirement (#53):
