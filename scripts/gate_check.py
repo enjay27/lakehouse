@@ -1,13 +1,15 @@
-"""gate-check (ADR-039): a platform PR passes only when passing dry-run and smoke runs cover its
-head.
+"""gate-check (ADR-039, amended by ADR-040 §5): a PR passes only when passing runs of the gates
+its files need cover its head.
 
 1. Fails if the head branch starts with `gate/`.
-2. Passes if the PR changes no platform file (PLATFORM below).
-3. Otherwise, for each gate (GATES below: dry-run on `gate/dry-run/<task>`, smoke on
-   `gate/smoke/<task>`), takes the latest successful run of its workflow on its branch and that
-   run's commit X.
-4. Passes only if, for every gate, X is an ancestor of the head and every file changed since X
-   is `*.md`. The gates may cover the head from different commits.
+2. Picks the gates the PR needs: dry-run on `gate/dry-run/<task>` and smoke on
+   `gate/smoke/<task>` when it changes a platform file (PLATFORM below); log-batch on
+   `gate/log-batch/<task>` when it changes a batch file or a fixture spec file (BATCH_DIRS
+   and SPEC_FILES below). Passes if it needs none.
+3. For each gate it needs, takes the latest successful run of its workflow on its branch and
+   that run's commit X.
+4. Passes only if, for every gate it needs, X is an ancestor of the head and every file changed
+   since X is `*.md`. The gates may cover the head from different commits.
 5. Prints which commits and runs it relied on; the workflow adds it to the job summary.
 
 `<task>` is the head branch without its first segment: `claude/<task>` (ADR-038), and the
@@ -15,7 +17,8 @@ same for Kade's own branches (`kade/x` -> `x`); a branch without `/` is its own 
 
 Usage:
   python3 gate_check.py --gate-branch HEAD_BRANCH
-      prints each gate's branch, one per line: `gate/dry-run/<task>`, `gate/smoke/<task>`.
+      prints each gate's branch, one per line: `gate/dry-run/<task>`, `gate/smoke/<task>`,
+      `gate/log-batch/<task>`.
   python3 gate_check.py HEAD_BRANCH BASE_SHA HEAD_SHA RUNS_JSON [REPO_DIR]
       RUNS_JSON is `GET /repos/{repo}/actions/runs?branch=<gate branch>` for each gate branch,
       merged (the object or its `workflow_runs` list); REPO_DIR holds the PR head with full
@@ -28,11 +31,20 @@ import sys
 
 DRY_RUN_WORKFLOW = ".github/workflows/dry-run.yml"
 SMOKE_WORKFLOW = ".github/workflows/smoke.yml"
-# Each gate: its name, its workflow, its branch prefix (ADR-038).
+LOG_BATCH_WORKFLOW = ".github/workflows/log-batch.yml"
+# Each gate: its name, its workflow, its branch prefix (ADR-038, ADR-040 §5).
 GATES = (("dry-run", DRY_RUN_WORKFLOW, "gate/dry-run/"),
-         ("smoke", SMOKE_WORKFLOW, "gate/smoke/"))
+         ("smoke", SMOKE_WORKFLOW, "gate/smoke/"),
+         ("log-batch", LOG_BATCH_WORKFLOW, "gate/log-batch/"))
 PLATFORM_DIRS = ("charts/", "images/", "install/", "gates/")
 GATE_WORKFLOWS = (DRY_RUN_WORKFLOW, SMOKE_WORKFLOW)
+PLATFORM_GATES = ("dry-run", "smoke")
+# ADR-040 §4 and §5: the batch files, and the fixture spec files by path (gates/fixtures.py's
+# SPEC_FILES and VALUES, values-lakehouse.yaml whole). They need the log-batch gate.
+BATCH_DIRS = ("images/polaris-log-batch/", "charts/polaris-log-batch/", "docs/contracts/")
+SPEC_FILES = ("gates/logs_traffic.sh", ".github/workflows/create-fixtures.yml",
+              "gates/fixtures.py", "charts/polaris/values-lakehouse.yaml")
+LOG_BATCH_GATES = ("log-batch",)
 
 
 def task_of(head_branch):
@@ -45,6 +57,10 @@ def gate_branches(head_branch):
 
 def is_platform(path):
     return path.startswith(PLATFORM_DIRS) or path in GATE_WORKFLOWS
+
+
+def is_log_batch(path):
+    return path.startswith(BATCH_DIRS) or path in SPEC_FILES
 
 
 def latest_run(runs, workflow, branch):
@@ -80,15 +96,25 @@ def decide(head_branch, changed, runs, git):
         return False, [f"Head branch `{head_branch}` is a gate/ branch: never opened as a PR "
                        "(ADR-038)."]
     platform = sorted(p for p in changed if is_platform(p))
-    if not platform:
-        return True, ["The PR changes no platform file; no gate run needed."]
-    lines = ["Platform files changed: " + ", ".join(f"`{p}`" for p in platform) + "."]
+    batch = sorted(p for p in changed if is_log_batch(p))
+    if not platform and not batch:
+        return True, ["The PR changes no platform, batch or fixture spec file; no gate run "
+                      "needed."]
+    lines, needed = [], []
+    if platform:
+        lines.append("Platform files changed: " + ", ".join(f"`{p}`" for p in platform) + ".")
+        needed += PLATFORM_GATES
+    if batch:
+        lines.append("Batch or fixture spec files changed: "
+                     + ", ".join(f"`{p}`" for p in batch) + ".")
+        needed += LOG_BATCH_GATES
     passed = True
     for (name, workflow, _), branch in zip(GATES, gate_branches(head_branch)):
-        ok, gate_lines = covers(name, workflow, branch, runs, git)
-        passed, lines = passed and ok, lines + gate_lines
-    verdict = ("Passed: every gate covers the head." if passed
-               else "Failed: not every gate covers the head.")
+        if name in needed:
+            ok, gate_lines = covers(name, workflow, branch, runs, git)
+            passed, lines = passed and ok, lines + gate_lines
+    verdict = ("Passed: every gate the PR needs covers the head." if passed
+               else "Failed: not every gate the PR needs covers the head.")
     return passed, lines + [verdict]
 
 
