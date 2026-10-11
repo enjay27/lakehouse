@@ -135,6 +135,10 @@ source does not matter for operation. What follows is the list they cover.
   Polaris unless the S3 and policy endpoints answer from Polaris's namespace (ADR-029); the
   smoke gate's `check-standins` makes an S3 round trip with Polaris's credentials and checks
   the policy's allowed and refused cases. The recorders of ADR-034 come next, in their own PR.
+  Gates on commit `4f173d8` (2026-10-11), both upgrading from `platform-2026.10.10`: dry-run
+  [38121760939](https://github.com/enjay27/lakehouse/actions/runs/38121760939), smoke
+  [38121760980](https://github.com/enjay27/lakehouse/actions/runs/38121760980) (the stand-ins
+  ready in seconds; the S3 round trip and all 7 policy cases, 3 allowed and 4 refused, ok).
 - Bootstrap: the realm and root principal from Secrets (ADR-006), then a catalog on the S3
   endpoint (SeaweedFS stand-in on the gate, ADR-031).
 - Smoke tests through the Iceberg REST API, as an ordinary principal: create a namespace and
