@@ -253,8 +253,9 @@ def processed_doc(rec, raw, key):
 #   * an error request joins its resource row if that resource had a success or a commit
 #     anywhere in the hour;
 #   * records are evaluated in timestamp order, so caps and role forcing are deterministic.
-# What this repository changes from the archive: UTC hours, and contract v2's row fields
-# (contract_version instead of schema_version, no _time).
+# What this repository changes from the archive: UTC hours, contract v2's row fields
+# (contract_version instead of schema_version, no _time), and the commit logger: Polaris 1.6.0
+# writes commits from LocalIcebergCatalog, where the archive's Polaris had IcebergCatalog.
 
 POLICY = "policy-v5"
 ACCESS_LOGGER = "io.quarkus.http.access-log"
@@ -262,7 +263,7 @@ ACCESS_RE = re.compile(r'^(\S+) \S+ (\S+) \[[^\]]*\] "([A-Z]+) (\S+)[^"]*" (\d+)
 
 APP_ALLOW = frozenset({"org.apache.polaris.service.exception.IcebergExceptionMapper",
                        "org.apache.polaris.service.admin.PolarisServiceImpl"})
-COMMIT_LOGGER = "org.apache.polaris.service.catalog.iceberg.IcebergCatalog"
+COMMIT_LOGGER = "org.apache.polaris.service.catalog.iceberg.LocalIcebergCatalog"
 COMMIT_RE = re.compile(r"^Successfully committed to ([A-Za-z]+) (\S+) in (\d+) ms")
 COMMIT_KINDS = {"table": "tables", "view": "views"}
 CATALOG_API = "/api/catalog/v1/"

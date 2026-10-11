@@ -196,6 +196,24 @@ class Policy(unittest.TestCase):
                           drop["org.apache.iceberg.CatalogUtil"]["dropped"]), (3, 1))
         self.assertEqual((s["app_dropped_total"], s["distinct_resources"]), (4, 0))
 
+    def test_polaris_1_6_0s_commit_lines_are_harvested(self):
+        # The logger and messages Polaris 1.6.0 writes for a table create, then a commit to it
+        # (measured on 2026-10-11, the image pinned in charts/polaris/values-lakehouse.yaml).
+        t, logger = "2026-09-28 10:40:00", \
+            "org.apache.polaris.service.catalog.iceberg.LocalIcebergCatalog"
+        self.drive([
+            app(t, logger, "Successfully committed to table gate_logs.logs.t1 in 311 ms", ms=1),
+            app(t, logger, "Refreshing table metadata from new version: file:/wh/gate_logs/logs/"
+                           "t1/metadata/00000-9cab8529.metadata.json", ms=2),
+            app(t, logger, "Successfully committed to table gate_logs.logs.t1 in 25 ms", ms=3),
+        ])
+        s, res, _, drop = self.report()
+        row = res["/api/catalog/v1/gate_logs/namespaces/logs/tables/t1"]
+        self.assertEqual((row["commit_count"], row["commit_ms_sum"], row["commit_ms_min"],
+                          row["commit_ms_max"]), (2, 336, 25, 311))
+        self.assertEqual(drop[logger]["dropped"], 3)
+        self.assertEqual(s["app_dropped_total"], 3)
+
     # ------------------------------------------------------------------ rows
 
     def test_an_error_joins_its_row_if_the_resource_succeeds_anywhere_in_the_hour(self):

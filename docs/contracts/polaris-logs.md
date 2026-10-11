@@ -42,13 +42,16 @@ The batch reads every line of the hour, then keeps some and counts the rest; not
 without a number in the aggregated file. The policy is the archive's policy v5
 (`enjay27/lakehouse-k8s` at `09a4773`), the batch port of the Fluent Bit Lua filter it ran
 before, and gives the same lines and counters as that filter (checked again on 2026-10-11 with
-the archive's `logging/scripts/step16-batch-lua-parity.py`). The first rule that matches wins:
+the archive's `logging/scripts/step16-batch-lua-parity.py`), with one change: Polaris 1.6.0 logs
+commits from `org.apache.polaris.service.catalog.iceberg.LocalIcebergCatalog`, where the
+archive's Polaris had `IcebergCatalog` (measured on 2026-10-11). The first rule that matches
+wins:
 
 | # | A line that is | Kept? |
 |---|---|---|
 | * | any line whose message holds an unmasked `clientSecret` | The value becomes `<redacted>` and `secret_redacted: true` is added, before any rule |
 | 1 | level `ERROR` or `WARN` | **Kept** |
-| 2a | from `IcebergCatalog`: `Successfully committed to table/view ... in N ms` | Its time is counted on the table's or view's row, then 2c |
+| 2a | from `LocalIcebergCatalog`: `Successfully committed to table/view ... in N ms` | Its time is counted on the table's or view's row, then 2c |
 | 2b | from `IcebergExceptionMapper` or `PolarisServiceImpl` | Decided by its request's access line (below) |
 | 2c | from any other application logger | Dropped, counted per logger (`app_dropped`) |
 | 3' | an access line with status 404 | Dropped, counted (`counted_404`) |
@@ -92,8 +95,21 @@ object per line.
 | `log_hour` | string | the batch | The hour the line was published in, `YYYYMMDD-HH` |
 
 Polaris's `loggerClassName`, `ndc`, `processName` and `processId` are removed. Other fields may
-appear: Polaris's JSON format adds `exception` when a log record carries one (not seen in what
-was measured). A reader must accept fields it does not know.
+appear, and a reader must accept fields it does not know. One is known: `exception`, which
+Polaris's JSON format adds when a log record carries one. Measured on 2026-10-11: a request
+Polaris 1.6.0 answered 503 wrote one such line, `IcebergExceptionMapper`'s `Full
+RuntimeException` at `INFO`, which rule 2b keeps; its 400, 404 and 409 answers wrote none. Its
+shape:
+
+| Field | Type | What |
+|---|---|---|
+| `exceptionType` | string | The Java class, e.g. `org.apache.iceberg.exceptions.RuntimeIOException` |
+| `message` | string | The exception's message |
+| `frames` | array | The stack, each `{"class", "method", "line"}`: 65 frames on the line measured |
+| `causedBy` | object | `{"exception": {...}}`, the cause in the same shape, when there is one |
+| `refId` | integer | The exception's number within the record, from 1 |
+
+Such a line is long: about 15 KB with one cause.
 
 **Every HTTP request** Polaris serves on its API port writes one access line, whose `message`
 is the access log line (`client - principal [time] "METHOD path HTTP/1.1" status bytes`) and
@@ -198,4 +214,6 @@ worth a look.
 - **v1** (PR #49): Polaris's lines as written, every one of them, and the summary row. Shipped
   in no release.
 - **v2** (this file, #45): the audit policy decides which lines are kept, the report rows join
-  the summary. The first contract a release ships.
+  the summary. The first contract a release ships. Corrected before any release shipped it
+  (#54): rule 2a names Polaris 1.6.0's `LocalIcebergCatalog`, so commits reach the rows instead
+  of only the `app_dropped` counts; the `exception` field's shape is recorded.
