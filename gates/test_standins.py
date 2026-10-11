@@ -14,6 +14,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ENV = {"NS_STANDINS": "standins", "NS_CATALOG_POLARIS": "catalog-polaris",
        "POLARIS_S3_ACCESS_KEY_ID": "gatekey",
        "POLARIS_S3_SECRET_ACCESS_KEY": "gatesecret",
+       "SMOKE_S3_ACCESS_KEY_ID": "smokekey",
+       "SMOKE_S3_SECRET_ACCESS_KEY": "smokesecret",
        "POLARIS_WAREHOUSE_BUCKET": "polaris-warehouse"}
 PINS = gate.load_pins(os.path.join(HERE, "pins.json"))
 
@@ -61,22 +63,35 @@ class Manifests(unittest.TestCase):
         for arg in ("-s3.port=8333", "-bucket=polaris-warehouse", "-master.telemetry=false"):
             self.assertIn(arg, c["args"])
 
-    def test_seaweedfs_takes_its_credentials_from_the_secret(self):
+    def test_seaweedfs_reads_its_identities_from_the_secret(self):
         o = objects()
-        env = {e["name"]: e["valueFrom"]["secretKeyRef"] for e in container(
-            o[("Deployment", "seaweedfs")])["env"]}
-        self.assertEqual(env["AWS_ACCESS_KEY_ID"], {"name": "seaweedfs-s3", "key": "accessKeyId"})
-        self.assertEqual(env["AWS_SECRET_ACCESS_KEY"],
-                         {"name": "seaweedfs-s3", "key": "secretAccessKey"})
-        data = o[("Secret", "seaweedfs-s3")]["data"]
-        self.assertEqual(base64.b64decode(data["accessKeyId"]).decode(), "gatekey")
-        self.assertEqual(base64.b64decode(data["secretAccessKey"]).decode(), "gatesecret")
+        c = container(o[("Deployment", "seaweedfs")])
+        self.assertIn("-s3.config=/etc/seaweedfs/s3.json", c["args"])
+        self.assertNotIn("env", c)
+        self.assertIn({"name": "s3-config", "mountPath": "/etc/seaweedfs", "readOnly": True},
+                      c["volumeMounts"])
+        volumes = o[("Deployment", "seaweedfs")]["spec"]["template"]["spec"]["volumes"]
+        self.assertIn({"name": "s3-config", "secret": {"secretName": "seaweedfs-s3"}}, volumes)
+
+    def test_polaris_key_may_do_everything_and_the_smoke_key_only_the_bucket(self):
+        config = json.loads(base64.b64decode(
+            objects()[("Secret", "seaweedfs-s3")]["data"]["s3.json"]))
+        by_name = {i["name"]: i for i in config["identities"]}
+        self.assertEqual(sorted(by_name), ["polaris", "smoke"])
+        self.assertEqual(by_name["polaris"]["credentials"],
+                         [{"accessKey": "gatekey", "secretKey": "gatesecret"}])
+        self.assertIn("Admin", by_name["polaris"]["actions"])
+        self.assertEqual(by_name["smoke"]["credentials"],
+                         [{"accessKey": "smokekey", "secretKey": "smokesecret"}])
+        self.assertEqual(sorted(by_name["smoke"]["actions"]),
+                         ["List:polaris-warehouse", "Read:polaris-warehouse",
+                          "Write:polaris-warehouse"])
 
     def test_the_credentials_appear_only_in_the_secret(self):
         o = objects()
         del o[("Secret", "seaweedfs-s3")]
         text = json.dumps(list(o.values()))
-        for value in ("gatekey", "gatesecret"):
+        for value in ("gatekey", "gatesecret", "smokekey", "smokesecret"):
             self.assertNotIn(value, text)
             self.assertNotIn(base64.b64encode(value.encode()).decode(), text)
 

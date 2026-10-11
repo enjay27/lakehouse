@@ -11,7 +11,8 @@
                   only because the gate has no operator team (ADR-029); a release never
                   installs it.
   secrets         writes `.env` for the gate (its context, the stand-ins' endpoints and
-                  credentials for the S3 stand-in, which is the gate's own, ADR-031), then runs
+                  the S3 stand-in's two keys, Polaris's and the smoke tests', which are the
+                  gate's own, ADR-031), then runs
                   scripts/init_env.py --apply-secrets (ADR-006). Refuses an existing `.env`.
   standins        applies the stand-ins (gates/standins.py: SeaweedFS for S3, OPA with
                   gates/opa/policy.rego) in NS_STANDINS and waits for them (ADR-031). Never
@@ -72,12 +73,17 @@ CONTEXT = f"kind-{CLUSTER}"
 TOOLS = ("kind", "kubectl", "helm", "kubeconform")
 # The binary inside each tool's archive; the others are plain binaries.
 ARCHIVE_MEMBERS = {"helm": "linux-amd64/helm", "kubeconform": "kubeconform"}
-# On the gate the S3 stand-in is the gate's own, so the gate makes up its credentials; on a
-# test or target cluster they are another team's and typed in by hand (ADR-031).
-GATE_ENV_GENERATED = ("POLARIS_S3_ACCESS_KEY_ID", "POLARIS_S3_SECRET_ACCESS_KEY")
+# On the gate the S3 stand-in is the gate's own, so the gate makes up its credentials, Polaris's
+# and the smoke tests'; on a test or target cluster they are another team's and typed in by
+# hand (ADR-031).
+GATE_ENV_GENERATED = ("POLARIS_S3_ACCESS_KEY_ID", "POLARIS_S3_SECRET_ACCESS_KEY",
+                      "SMOKE_S3_ACCESS_KEY_ID", "SMOKE_S3_SECRET_ACCESS_KEY")
 # On the gate, the endpoints of other teams' services are the stand-ins' (ADR-031).
 STANDIN_REGION = "us-east-1"
 STANDIN_BUCKET = "polaris-warehouse"
+# Polaris's own S3 key, as the AWS SDK reads it: catalogs without STS are read and written with
+# it (charts/polaris/values-lakehouse.yaml).
+POLARIS_S3_ENV = {"AWS_ACCESS_KEY_ID": "accessKeyId", "AWS_SECRET_ACCESS_KEY": "secretAccessKey"}
 # Polaris's pods and ports, as charts/polaris renders them.
 POLARIS_POD_LABELS = "app.kubernetes.io/name=polaris,app.kubernetes.io/instance=polaris"
 POLARIS_API_PORT, POLARIS_MGMT_PORT = 8181, 8182
@@ -335,7 +341,14 @@ def polaris_problems(values, deployment, pods, configmap, env):
     ready = deployment.get("status", {}).get("readyReplicas", 0)
     if ready != wanted:
         problems.append(f"{ready} replicas ready of {wanted}")
-    image = deployment["spec"]["template"]["spec"]["containers"][0]["image"]
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    image = container["image"]
+    running_env = {e["name"]: e.get("valueFrom", {}).get("secretKeyRef")
+                   for e in container.get("env", [])}
+    for var, key in POLARIS_S3_ENV.items():
+        want = {"name": "polaris-s3", "key": key}
+        if running_env.get(var) != want:
+            problems.append(f"{var}: {running_env.get(var)} running, {want} wanted")
     want_image = f"{values['image']['repository']}:{values['image']['tag']}"
     if image != want_image:
         problems.append(f"image: {image} running, {want_image} in the values")
@@ -362,7 +375,8 @@ def polaris_problems(values, deployment, pods, configmap, env):
     return problems, [
         f"Deployment {release.POLARIS}: {ready} replicas ready on {len(nodes)} nodes "
         f"({', '.join(str(n) for n in nodes)}), image {image}.",
-        f"Polaris settings: persistence {props.get('polaris.persistence.type')}, database "
+        f"Polaris settings: S3 key from Secret polaris-s3, persistence "
+        f"{props.get('polaris.persistence.type')}, database "
         f"{props.get('quarkus.datasource.jdbc.url')}, tokens "
         f"{props.get('polaris.authentication.token-broker.type')}, authorization "
         f"{props.get('polaris.authorization.type')} at "

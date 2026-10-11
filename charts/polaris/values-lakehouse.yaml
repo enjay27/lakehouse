@@ -46,12 +46,27 @@ persistence:
       password: password
       jdbcUrl: ""
 
-# The S3 credentials, typed into `.env` by hand (ADR-031).
+# The S3 credentials, typed into `.env` by hand (ADR-031). `storage.secret` reaches only
+# Polaris's STS client; catalogs on S3 without STS (`stsUnavailable`) read and write with the
+# AWS SDK's default credentials, so the same Secret is also passed as AWS_ACCESS_KEY_ID and
+# AWS_SECRET_ACCESS_KEY. The catalog's properties never carry a key.
 storage:
   secret:
     name: polaris-s3
     awsAccessKeyId: accessKeyId
     awsSecretAccessKey: secretAccessKey
+
+extraEnv:
+  - name: AWS_ACCESS_KEY_ID
+    valueFrom:
+      secretKeyRef:
+        name: polaris-s3
+        key: accessKeyId
+  - name: AWS_SECRET_ACCESS_KEY
+    valueFrom:
+      secretKeyRef:
+        name: polaris-s3
+        key: secretAccessKey
 
 # Polaris issues its own tokens, signed with one key shared by every replica (ADR-026).
 authentication:

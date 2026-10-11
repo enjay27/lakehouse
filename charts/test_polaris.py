@@ -165,6 +165,16 @@ class Rendered(unittest.TestCase):
             self.assertEqual(env[var], {"name": "polaris-s3", "key": key})
             self.assertIn(key, secret_keys("polaris-s3"))
 
+    def test_polaris_writes_to_s3_with_its_own_key_where_the_chart_sets_none(self):
+        # With stsUnavailable, Polaris 1.6.0 reads and writes table metadata with the AWS SDK's
+        # default credentials; `polaris.storage.aws.*` is only used for STS.
+        self.assertEqual(self.defaults["extraEnv"], [])
+        env = {v["name"]: v["valueFrom"]["secretKeyRef"] for v in self.container["env"]}
+        for var, key in (("AWS_ACCESS_KEY_ID", "accessKeyId"),
+                         ("AWS_SECRET_ACCESS_KEY", "secretAccessKey")):
+            self.assertEqual(env[var], {"name": "polaris-s3", "key": key})
+            self.assertIn(key, secret_keys("polaris-s3"))
+
     def test_tokens_are_signed_with_the_shared_key_init_env_creates(self):
         self.assertEqual(self.defaults["authentication"]["tokenBroker"]["type"], "rsa-key-pair")
         self.assertEqual(self.props["polaris.authentication.type"], "internal")
