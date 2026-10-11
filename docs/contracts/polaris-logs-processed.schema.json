@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Polaris log contract v1: one processed line",
+  "description": "A line of processed-logs/YYYYMMDD-HH.jsonl: the JSON object Polaris 1.6.0 wrote, unchanged, plus event_id and log_hour (docs/contracts/polaris-logs.md, ADR-036).",
+  "type": "object",
+  "required": [
+    "timestamp",
+    "sequence",
+    "loggerClassName",
+    "loggerName",
+    "level",
+    "message",
+    "threadName",
+    "threadId",
+    "mdc",
+    "ndc",
+    "hostName",
+    "processName",
+    "processId",
+    "event_id",
+    "log_hour"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?Z$"
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "loggerClassName": {
+      "type": "string"
+    },
+    "loggerName": {
+      "type": "string"
+    },
+    "level": {
+      "type": "string",
+      "enum": [
+        "TRACE",
+        "DEBUG",
+        "INFO",
+        "WARN",
+        "ERROR",
+        "FATAL"
+      ]
+    },
+    "message": {
+      "type": "string"
+    },
+    "threadName": {
+      "type": "string"
+    },
+    "threadId": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "mdc": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "requestId": {
+          "type": "string"
+        },
+        "realmId": {
+          "type": "string"
+        }
+      }
+    },
+    "ndc": {
+      "type": "string"
+    },
+    "hostName": {
+      "type": "string"
+    },
+    "processName": {
+      "type": "string"
+    },
+    "processId": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "event_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "log_hour": {
+      "type": "string",
+      "pattern": "^[0-9]{8}-[0-9]{2}$"
+    }
+  }
+}
