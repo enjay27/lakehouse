@@ -26,6 +26,7 @@ import json
 S3_PORT = 8333
 OPA_PORT = 8181
 OPA_PACKAGE_PATH = "/v1/data/polaris/authz"
+RECORDER_READY_FILE = "/tmp/recorder-ready"
 FILER_PORT = 8888
 PG_PORT = 5432
 
@@ -105,11 +106,14 @@ def manifests(env, pins, policy_text, recorder_code, tls):
                     "--http", f"s3={S3_PORT}:seaweedfs.{svc}:{S3_PORT}",
                     "--pg", (f"pg={PG_PORT}:polaris-pg-rw.{env['NS_CATALOG_POLARIS']}"
                              f".svc.cluster.local:{PG_PORT}"),
-                    "--tls-cert", "/tls/tls.crt", "--tls-key", "/tls/tls.key"],
+                    "--tls-cert", "/tls/tls.crt", "--tls-key", "/tls/tls.key",
+                    "--ready-file", RECORDER_READY_FILE],
         "env": [{"name": "PYTHONUNBUFFERED", "value": "1"}],
         "ports": [{"name": name, "containerPort": port} for name, port in
                   (("opa", OPA_PORT), ("s3", S3_PORT), ("pg", PG_PORT))],
-        "readinessProbe": {"tcpSocket": {"port": OPA_PORT}, "periodSeconds": 2},
+        # Not a connection to a listener: the recorder would relay it (gates/recorder/proxy.py).
+        "readinessProbe": {"exec": {"command": ["test", "-f", RECORDER_READY_FILE]},
+                           "periodSeconds": 2},
         "volumeMounts": [{"name": "code", "mountPath": "/recorder", "readOnly": True},
                          {"name": "tls", "mountPath": "/tls", "readOnly": True}],
     }
