@@ -1,6 +1,6 @@
 # ADR-041: The Log Batch Gate creates fixtures only when no unexpired artifact holds their spec hash
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-11
 - **Related:** ADR-030, ADR-038, ADR-040
 
