@@ -50,13 +50,17 @@
   batch-image     builds the log batch's image from images/polaris-log-batch, tagged as
                   install/release.py names it, and loads it into the kind cluster (ADR-036).
   check-logs      follows traffic to the hand-off (ADR-024, ADR-036): gates/logs_traffic.sh in
-                  a short-lived curl pod sends each Polaris pod reads with root's token and
-                  requests without one, each with its own X-Request-ID; a Job from the batch's
-                  CronJob runs with its clock past that hour, then again; a stand-in Fluent Bit
-                  (pinned, the claim read-only) reads processed-logs/ and aggregated-logs/.
-                  Every line and row it read must hold contract v2 (gates/contract.py) and every
-                  summary's books balance; each refused request must be kept once from its pod,
-                  no read kept but all counted on the rows; both pods' files read; the second
+                  a short-lived curl pod makes the catalog gate_logs on the S3 endpoint, then
+                  sends each Polaris pod reads with root's token, requests without one, a 409,
+                  a 404 and a table made, each with its own X-Request-ID; a Job from the
+                  batch's CronJob runs with its clock past that hour, then again; a stand-in
+                  Fluent Bit (pinned, the claim read-only) reads processed-logs/ and
+                  aggregated-logs/. Every line and row it read must hold contract v2
+                  (gates/contract.py) and every summary's books balance; each refused request
+                  must be kept once from its pod, no read kept but all counted on the rows; the
+                  policy's rules on Polaris's own lines: the 404s dropped with their
+                  application lines (3'), the 409s and the catalog made kept with theirs (2b),
+                  each commit counted on its table's row (2a); both pods' files read; the second
                   run must change no file.
   check-console   runs gates/console/check.py (on stdin) in a short-lived pod on the pinned
                   Python image: the console answers and points the browser at Polaris, and
@@ -137,6 +141,11 @@ CONSOLE_PORT = 8080
 # The log batch on the gate (ADR-036): requests sent to each Polaris pod, how long a run of the
 # batch or of the stand-in Fluent Bit may take, and where the claim is mounted to be read.
 LOGS_REQUESTS = 5
+LOGS_CATALOG = "gate_logs"
+LOGS_NAMESPACE = "logs"
+LOGS_POLICY_KINDS = ("conflict", "missing", "commit")
+APP_LINE_LOGGERS = ("org.apache.polaris.service.admin.PolarisServiceImpl",
+                    "org.apache.polaris.service.exception.IcebergExceptionMapper")
 LOGS_TIMEOUT = 300
 LOGS_MOUNT = "/logs"
 OUTPUT_DIRS = ("processed-logs", "aggregated-logs")
@@ -609,16 +618,29 @@ def batch_image_commands(directory=release.BATCH_IMAGE_DIR):
 
 
 def logs_request_ids(prefix, count, pod_names):
-    """The X-Request-ID each request carries, as logs_traffic.sh makes it -> (its pod, its kind):
-    `read`, root listing the catalogs, which the audit policy counts; `denied`, the same request
-    without a token, which it keeps (contract v2)."""
-    return {f"{prefix}-{pod}-{kind}-{n}": (pod, kind) for pod in pod_names
+    """The X-Request-ID each request carries, as logs_traffic.sh makes it -> (its pod, its kind),
+    each kind for a rule of the audit policy (contract v2): `read`, root listing the catalogs,
+    which it counts (6); `denied`, the same without a token, which it keeps (3); once per pod,
+    `conflict`, a namespace made again, 409, kept with its application line (2b); `missing`, a
+    table that does not exist, 404, dropped with its application line (3'); `commit`, a table
+    made, whose commit counts on its row (2a). `catalog`, through the Service, so on no pod
+    known in advance: LOGS_CATALOG made, its application line kept (2b)."""
+    sent = {f"{prefix}-{pod}-{kind}-{n}": (pod, kind) for pod in pod_names
             for n in range(1, count + 1) for kind in ("read", "denied")}
+    sent.update({f"{prefix}-{pod}-{kind}-1": (pod, kind) for pod in pod_names
+                 for kind in LOGS_POLICY_KINDS})
+    sent[f"{prefix}-setup-catalog"] = (None, "catalog")
+    return sent
+
+
+def logs_table(request_id):
+    """The table a `commit` request makes, named for it as logs_traffic.sh names it."""
+    return request_id.replace("-", "_")
 
 
 def logs_traffic_command(env, image, name, prefix, count, pods):
     """The pod that runs logs_traffic.sh (on stdin) with root's credentials against each of
-    `pods`, (name, URL) pairs."""
+    `pods`, (name, URL) pairs, LOGS_CATALOG on the S3 endpoint in `env`."""
     creds = [{"name": var, "valueFrom": {"secretKeyRef": {"name": release.POLARIS_ROOT_SECRET,
                                                          "key": key}}}
              for var, key in (("ROOT_CLIENT_ID", "clientId"),
@@ -631,7 +653,8 @@ def logs_traffic_command(env, image, name, prefix, count, pods):
             "--overrides", json.dumps(overrides),
             "--command", "--", "sh", "-s", "--",
             f"http://{release.POLARIS}:{POLARIS_API_PORT}", release.POLARIS_REALM, str(count),
-            prefix, *[part for pod in pods for part in pod]]
+            prefix, LOGS_CATALOG, env["S3_ENDPOINT"], env["S3_REGION"],
+            env["POLARIS_WAREHOUSE_BUCKET"], *[part for pod in pods for part in pod]]
 
 
 def batch_now(t):
@@ -743,7 +766,8 @@ def logs_problems(sent, pods, events, before, after, records):
     """What the reader saw against what was sent (ADR-036, contract v2): every line and row
     holds the contract, every file was read whole, every summary's books balance, each kept
     request was read once from its pod, no counted one was kept but the rows count them all,
-    every pod's file was read, and a second run changed nothing. Returns (problems, notes)."""
+    the policy's rules 2a, 2b and 3' held on Polaris's own lines (logs_request_ids), every
+    pod's file was read, and a second run changed nothing. Returns (problems, notes)."""
     problems = []
     first, second = events
     published = [e["hour"] for e in first if e.get("event") == "published"]
@@ -764,7 +788,7 @@ def logs_problems(sent, pods, events, before, after, records):
         problems.append(f"{where}/{missing} is missing: an hour has both files")
 
     processed_schema = contract.load("processed")
-    read, rows, seen = {}, [], {}
+    read, rows, seen, by_rid = {}, [], {}, {}
     for record in records:
         record = dict(record)
         path = record.pop("source_file", "")
@@ -779,6 +803,7 @@ def logs_problems(sent, pods, events, before, after, records):
             rid = record.get("mdc", {}).get("requestId")
             if rid in sent:
                 seen.setdefault(rid, []).append(record.get("hostName"))
+                by_rid.setdefault(rid, []).append(record)
         else:
             problems.append(f"a record from {path or 'no file'}, outside the hand-off")
     for path in sorted(set(after) | set(read)):
@@ -816,7 +841,7 @@ def logs_problems(sent, pods, events, before, after, records):
     catalogs = "/api/management/v1/catalogs"
     for what, have, want in (
             (f"resource {catalogs} reads", total("resource", "resource", catalogs, "reads"),
-             len(sent)),
+             len(kept) + len(counted)),
             (f"resource {catalogs} auth_denied",
              total("resource", "resource", catalogs, "auth_denied"), len(kept)),
             ("principal root reads", total("principal", "user_principal_name", "root", "reads"),
@@ -825,6 +850,37 @@ def logs_problems(sent, pods, events, before, after, records):
              total("principal", "user_principal_name", "-", "auth_denied"), len(kept))):
         if have < want:
             problems.append(f"{what}: {have}, fewer than the {want} sent")
+
+    def of_kind(kind):
+        return sorted(rid for rid, (_, k) in sent.items() if k == kind)
+
+    missing, conflicts, commits = of_kind("missing"), of_kind("conflict"), of_kind("commit")
+    for rid in missing:
+        if by_rid.get(rid):
+            problems.append(f"request {rid}, a 404: {len(by_rid[rid])} of its lines kept "
+                            f"({', '.join(r.get('loggerName', '') for r in by_rid[rid])})")
+    for field in ("counted_404", "app_dropped_404"):
+        have = sum(s.get(field, 0) for _, s in summaries)
+        if have < len(missing):
+            problems.append(f"the summaries' {field}: {have}, fewer than the {len(missing)} "
+                            f"404s sent")
+    mapper = APP_LINE_LOGGERS[1]
+    for rid in conflicts + of_kind("catalog"):
+        pod, lines = sent[rid][0], by_rid.get(rid, [])
+        access = [r for r in lines if "http_status" in r]
+        app = [r for r in lines if r.get("loggerName") in
+               ((mapper,) if pod else APP_LINE_LOGGERS)]
+        hosts = sorted({r.get("hostName") for r in lines})
+        if len(access) != 1 or not app or (pod and hosts != [pod]):
+            problems.append(f"request {rid}{f', sent to {pod}' if pod else ''}: "
+                            f"{len(access)} access line(s) and {len(app)} application line(s) "
+                            f"kept, from {', '.join(map(str, hosts)) or 'no pod'}; want one "
+                            f"access line and its application line, kept from its pod")
+    for rid in commits:
+        table = (f"/api/catalog/v1/{LOGS_CATALOG}/namespaces/{LOGS_NAMESPACE}/tables/"
+                 f"{logs_table(rid)}")
+        if total("resource", "resource", table, "commit_count") < 1:
+            problems.append(f"resource {table}: no commit counted for request {rid}")
 
     logged = {p for _, s in summaries for p in s.get("pods", [])}
     files = {f["file"] for _, s in summaries for f in s.get("sources", [])}
@@ -840,7 +896,10 @@ def logs_problems(sent, pods, events, before, after, records):
         f"checked against contract v2, every summary's books balanced.",
         f"All {len(kept)} kept request IDs (no token, 401) read exactly once, each from the pod "
         f"it was sent to; none of the {len(counted)} counted (root's reads) kept, all counted "
-        f"on the rows; pods {', '.join(pods)}, both files read."]
+        f"on the rows; pods {', '.join(pods)}, both files read.",
+        f"Rules 2a, 2b and 3' on Polaris's own lines: {len(missing)} 404s dropped with their "
+        f"application lines, {len(conflicts)} 409s kept with theirs, {len(commits)} commits on "
+        f"their tables' rows; {LOGS_CATALOG} made, its application line kept."]
     return problems, ([] if problems else notes)
 
 
