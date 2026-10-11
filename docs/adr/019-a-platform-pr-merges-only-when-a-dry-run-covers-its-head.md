@@ -1,6 +1,6 @@
 # ADR-019: A platform PR merges only when a passing dry-run gate covers its head
 
-- **Status:** Amended by ADR-033
+- **Status:** Superseded by ADR-039
 - **Date:** 2026-10-10
 - **Related:** ADR-018
 

@@ -1,6 +1,6 @@
 # ADR-039: A platform PR merges only when passing dry-run and smoke gates cover its head
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-11
 - **Related:** ADR-019, ADR-022, ADR-028, ADR-030, ADR-033, ADR-038
 
