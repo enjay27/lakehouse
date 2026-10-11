@@ -1,4 +1,5 @@
-# The static gate (ADR-018): the tests of scripts/, gates/ and install/; helm lint, then the
+# The static gate (ADR-018): the tests of scripts/, gates/, install/ and the log batch
+# (images/polaris-log-batch, ADR-036); helm lint, then the
 # charts/ tests: the rendered charts, their values schemas and kubeconform against the CRDs in
 # use (ADR-016, ADR-010), with helm and kubeconform from gates/pins.json and PyYAML pinned by
 # hash; the ADR check (ADR-000), the repository check (ADR-002, ADR-006), the CLAUDE.md limits
@@ -35,6 +36,8 @@ jobs:
         run: |
           python3 -m unittest discover -s gates -v
           python3 -m unittest discover -s install -v
+      - name: Log batch tests (ADR-036)
+        run: python3 -m unittest discover -s images/polaris-log-batch -v
       - name: Chart tools and Python packages at pinned versions
         run: |
           python3 gates/gate.py tools "$RUNNER_TEMP/bin" helm kubeconform
