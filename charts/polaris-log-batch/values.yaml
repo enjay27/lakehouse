@@ -3,7 +3,7 @@
 # longer matches them: change it with the Dockerfile or the script.
 image:
   repository: lakehouse/polaris-log-batch
-  tag: "4715d065ecf4"
+  tag: "de86f42f373e"
   pullPolicy: IfNotPresent
 
 # Minute 3 of every hour, UTC; one run at a time (ADR-036).
