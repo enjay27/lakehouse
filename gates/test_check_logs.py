@@ -59,10 +59,8 @@ SPACE = f"/api/catalog/v1/{gate.LOGS_CATALOG}/namespaces/{gate.LOGS_NAMESPACE}"
 POLICY_LINES = {
     "catalog": [(ADMIN, "Created new catalog class PolarisCatalog {\n    class Catalog {"),
                 (ACCESS, access_message("root", "POST /api/management/v1/catalogs", "201 261"))],
-    "conflict": [(MAPPER, "Handling runtimeException Cannot create namespace logs. Namespace "
-                          "already exists"),
-                 (ACCESS, access_message("root", f"POST /api/catalog/v1/{gate.LOGS_CATALOG}"
-                                                 "/namespaces", "409 121"))],
+    "invalid": [(MAPPER, "Handling runtimeException Invalid schema: null"),
+                (ACCESS, access_message("root", f"POST {SPACE}/tables", "400 89"))],
     "missing": [(MAPPER, "Handling runtimeException Table does not exist: logs.absent"),
                 (ACCESS, access_message("root", f"GET {SPACE}/tables/absent", "404 98"))],
     "commit": [(COMMIT, "Successfully committed to table {catalog}.logs.{table} in 311 ms"),
@@ -166,7 +164,7 @@ class Traffic(unittest.TestCase):
         self.assertEqual(sent[f"{PREFIX}-setup-catalog"], (None, "catalog"))
         for pod in PODS:
             kinds = sorted(kind for p, kind in sent.values() if p == pod)
-            self.assertEqual(kinds, ["commit", "conflict"] + ["denied"] * 3 + ["missing"]
+            self.assertEqual(kinds, ["commit"] + ["denied"] * 3 + ["invalid", "missing"]
                              + ["read"] * 3)
         for rid, (pod, kind) in sent.items():
             if pod:
@@ -246,6 +244,8 @@ def fake_catalog(signing_key=TOKEN, fail=None, catalogs=None):
             if (method, self.path) == ("GET", f"{space}/{gate.LOGS_NAMESPACE}/tables/absent"):
                 return self.reply(404)
             if (method, self.path) == ("POST", f"{space}/{gate.LOGS_NAMESPACE}/tables"):
+                if "schema" not in json.loads(body):
+                    return self.reply(400)
                 return self.reply(200, {"metadata-location": "s3://x"})
             self.reply(404)
 
@@ -302,7 +302,7 @@ class TrafficScript(unittest.TestCase):
         self.assertNotIn(CREDS["ROOT_CLIENT_SECRET"], done.stdout + done.stderr)
         self.assertNotIn(TOKEN, done.stdout + done.stderr)
 
-    def test_the_catalog_is_made_on_s3_then_each_pod_gets_a_409_a_404_and_a_commit(self):
+    def test_the_catalog_is_made_on_s3_then_each_pod_gets_a_400_a_404_and_a_commit(self):
         (a, seen_a), (b, seen_b) = self.replica(), self.replica()
         done = self.run_script(a, [(PODS[0], a), (PODS[1], b)])
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
@@ -324,14 +324,15 @@ class TrafficScript(unittest.TestCase):
                      for method, path, h, body in policy]
             rid = f"{PREFIX}-{pod}-commit-1"
             self.assertEqual(asked, [
-                (f"{PREFIX}-{pod}-conflict-1", "POST", space, {"namespace": ["logs"]}),
+                (f"{PREFIX}-{pod}-invalid-1", "POST", f"{space}/logs/tables",
+                 {"name": gate.logs_table(f"{PREFIX}-{pod}-invalid-1")}),
                 (f"{PREFIX}-{pod}-missing-1", "GET", f"{space}/logs/tables/absent", ""),
                 (rid, "POST", f"{space}/logs/tables", {"name": gate.logs_table(rid), "schema": {
                     "type": "struct", "schema-id": 0, "fields": [
                         {"id": 1, "name": "id", "required": False, "type": "long"}]}})])
             self.assertTrue(all(h.get("Authorization") == f"Bearer {TOKEN}"
                                 for _, _, h, _ in policy))
-        for kind, code in (("conflict", 409), ("missing", 404), ("commit", 200)):
+        for kind, code in (("invalid", 400), ("missing", 404), ("commit", 200)):
             self.assertIn(f"ok   {PREFIX}-{PODS[1]}-{kind}-1: {PODS[1]} answered HTTP {code}",
                           done.stdout)
 
@@ -486,7 +487,7 @@ class Problems(unittest.TestCase):
         self.assertIn("4 kept request IDs", text)
         self.assertIn("4 counted", text)
         self.assertIn("2 404s dropped with their application lines", text)
-        self.assertIn("2 409s kept with theirs", text)
+        self.assertIn("2 400s kept with theirs", text)
         self.assertIn("2 commits on their tables' rows", text)
         for pod in PODS:
             self.assertIn(pod, text)
@@ -569,7 +570,7 @@ class Problems(unittest.TestCase):
     def test_a_404_or_its_application_line_kept_fails(self):
         rid = self.rid("missing")
         [doc] = [r for r in self.f.records if r.get("mdc", {}).get("requestId")
-                 == self.rid("conflict") and r.get("http_status") == 409]
+                 == self.rid("invalid") and r.get("http_status") == 400]
         for logger in (ACCESS, MAPPER):
             leaked = dict(doc, loggerName=logger, mdc={"requestId": rid, "realmId": "POLARIS"})
             problems, _ = self.f.problems(records=self.f.records + [leaked])
@@ -582,8 +583,8 @@ class Problems(unittest.TestCase):
             problems, _ = self.f.problems(records=records)
             self.assertIn(field, "\n".join(problems))
 
-    def test_a_409_without_its_kept_application_line_fails(self):
-        rid = self.rid("conflict")
+    def test_a_400_without_its_kept_application_line_fails(self):
+        rid = self.rid("invalid")
         records = [r for r in self.f.records if not (
             r.get("mdc", {}).get("requestId") == rid and r.get("loggerName") == MAPPER)]
         problems, _ = self.f.problems(records=records)

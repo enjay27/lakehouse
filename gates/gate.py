@@ -51,7 +51,7 @@
                   install/release.py names it, and loads it into the kind cluster (ADR-036).
   check-logs      follows traffic to the hand-off (ADR-024, ADR-036): gates/logs_traffic.sh in
                   a short-lived curl pod makes the catalog gate_logs on the S3 endpoint, then
-                  sends each Polaris pod reads with root's token, requests without one, a 409,
+                  sends each Polaris pod reads with root's token, requests without one, a 400,
                   a 404 and a table made, each with its own X-Request-ID; a Job from the
                   batch's CronJob runs with its clock past that hour, then again; a stand-in
                   Fluent Bit (pinned, the claim read-only) reads processed-logs/ and
@@ -59,7 +59,7 @@
                   (gates/contract.py) and every summary's books balance; each refused request
                   must be kept once from its pod, no read kept but all counted on the rows; the
                   policy's rules on Polaris's own lines: the 404s dropped with their
-                  application lines (3'), the 409s and the catalog made kept with theirs (2b),
+                  application lines (3'), the 400s and the catalog made kept with theirs (2b),
                   each commit counted on its table's row (2a); both pods' files read; the second
                   run must change no file.
   check-console   runs gates/console/check.py (on stdin) in a short-lived pod on the pinned
@@ -143,7 +143,7 @@ CONSOLE_PORT = 8080
 LOGS_REQUESTS = 5
 LOGS_CATALOG = "gate_logs"
 LOGS_NAMESPACE = "logs"
-LOGS_POLICY_KINDS = ("conflict", "missing", "commit")
+LOGS_POLICY_KINDS = ("invalid", "missing", "commit")
 APP_LINE_LOGGERS = ("org.apache.polaris.service.admin.PolarisServiceImpl",
                     "org.apache.polaris.service.exception.IcebergExceptionMapper")
 LOGS_TIMEOUT = 300
@@ -621,9 +621,9 @@ def logs_request_ids(prefix, count, pod_names):
     """The X-Request-ID each request carries, as logs_traffic.sh makes it -> (its pod, its kind),
     each kind for a rule of the audit policy (contract v2): `read`, root listing the catalogs,
     which it counts (6); `denied`, the same without a token, which it keeps (3); once per pod,
-    `conflict`, a namespace made again, 409, kept with its application line (2b); `missing`, a
-    table that does not exist, 404, dropped with its application line (3'); `commit`, a table
-    made, whose commit counts on its row (2a). `catalog`, through the Service, so on no pod
+    `invalid`, a table made without a schema, 400, refused before anything is written, kept
+    with its application line (2b); `missing`, a table that does not exist, 404, dropped with
+    its application line (3'); `commit`, a table made, whose commit counts on its row (2a). `catalog`, through the Service, so on no pod
     known in advance: LOGS_CATALOG made, its application line kept (2b)."""
     sent = {f"{prefix}-{pod}-{kind}-{n}": (pod, kind) for pod in pod_names
             for n in range(1, count + 1) for kind in ("read", "denied")}
@@ -854,7 +854,7 @@ def logs_problems(sent, pods, events, before, after, records):
     def of_kind(kind):
         return sorted(rid for rid, (_, k) in sent.items() if k == kind)
 
-    missing, conflicts, commits = of_kind("missing"), of_kind("conflict"), of_kind("commit")
+    missing, invalid, commits = of_kind("missing"), of_kind("invalid"), of_kind("commit")
     for rid in missing:
         if by_rid.get(rid):
             problems.append(f"request {rid}, a 404: {len(by_rid[rid])} of its lines kept "
@@ -865,7 +865,7 @@ def logs_problems(sent, pods, events, before, after, records):
             problems.append(f"the summaries' {field}: {have}, fewer than the {len(missing)} "
                             f"404s sent")
     mapper = APP_LINE_LOGGERS[1]
-    for rid in conflicts + of_kind("catalog"):
+    for rid in invalid + of_kind("catalog"):
         pod, lines = sent[rid][0], by_rid.get(rid, [])
         access = [r for r in lines if "http_status" in r]
         app = [r for r in lines if r.get("loggerName") in
@@ -898,7 +898,7 @@ def logs_problems(sent, pods, events, before, after, records):
         f"it was sent to; none of the {len(counted)} counted (root's reads) kept, all counted "
         f"on the rows; pods {', '.join(pods)}, both files read.",
         f"Rules 2a, 2b and 3' on Polaris's own lines: {len(missing)} 404s dropped with their "
-        f"application lines, {len(conflicts)} 409s kept with theirs, {len(commits)} commits on "
+        f"application lines, {len(invalid)} 400s kept with theirs, {len(commits)} commits on "
         f"their tables' rows; {LOGS_CATALOG} made, its application line kept."]
     return problems, ([] if problems else notes)
 

@@ -10,9 +10,10 @@
 # a run before made it), and its namespace `logs` (200 or 409). Then each pod, asked directly
 # at its POD_URL, lists the catalogs COUNT times with root's token (X-Request-ID
 # PREFIX-POD_NAME-read-N, which must answer 200) and COUNT times without one
-# (PREFIX-POD_NAME-denied-N, 401); then, once, makes `logs` again (-conflict-1, 409), loads a
-# table that does not exist (-missing-1, 404), and makes a table named for its request ID,
-# dashes as underscores (-commit-1, 200). Polaris writes each ID to the request's lines; the
+# (PREFIX-POD_NAME-denied-N, 401); then, once, makes a table without a schema (-invalid-1,
+# 400: refused before anything is written, where a name made twice would leave the gate's
+# recorder a failed INSERT), loads a table that does not exist (-missing-1, 404), and makes a
+# table (-commit-1, 200); tables are named for their request ID, dashes as underscores. Polaris writes each ID to the request's lines; the
 # audit policy counts, keeps or drops each as gates/gate.py logs_request_ids says
 # (docs/contracts/polaris-logs.md). Neither the credentials nor the token are printed. Prints
 # one line per request, `ok` or `FAIL`; exits 1 when any failed.
@@ -76,7 +77,9 @@ while [ $# -ge 2 ]; do
     else echo "FAIL $id: $name answered HTTP $code without a token, expected 401"; fail=1; fi
     n=$((n + 1))
   done
-  ask "$prefix-$name-conflict-1" "$name " 409 POST "$url/$space" '{"namespace":["logs"]}'
+  id="$prefix-$name-invalid-1"
+  ask "$id" "$name " 400 POST "$url/$space/logs/tables" \
+    "{\"name\":\"$(printf '%s' "$id" | tr -- - _)\"}"
   ask "$prefix-$name-missing-1" "$name " 404 GET "$url/$space/logs/tables/absent"
   id="$prefix-$name-commit-1"
   ask "$id" "$name " 200 POST "$url/$space/logs/tables" "{\"name\":\"$(printf '%s' "$id" | \
