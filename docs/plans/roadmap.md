@@ -176,7 +176,10 @@ source does not matter for operation. What follows is the list they cover.
   `extraEnv` (Kade's choice). What Polaris 1.6.0 does on S3 without STS, and why a key in a
   catalog's properties leaks into every table's metadata:
   `docs/contracts/polaris-s3-without-sts.md`. `iceberg.json` holds the recorder to the S3
-  writes of each client and to the policy's answers.
+  writes of each client and to the policy's answers. Passed on a1af23b: dry-run
+  [38131673029](https://github.com/enjay27/lakehouse/actions/runs/38131673029), smoke
+  [38131673239](https://github.com/enjay27/lakehouse/actions/runs/38131673239) (3 rows
+  written and read back; the 3 refusals each a 403; 334 records; all 32 expectations ok).
 - The console from `apache/polaris-tools`. If no image is published, it is built from a
   pinned commit in the job (ADR-017).
 - The log batch (ADR-014) and its output format for Fluent Bit (ADR-024). A
