@@ -371,6 +371,11 @@ class CheckStandins(unittest.TestCase):
         self.assertEqual(refs["AWS_SECRET_ACCESS_KEY"],
                          {"name": "polaris-s3", "key": "secretAccessKey"})
 
+    def test_the_override_merges_into_the_generated_container_instead_of_replacing_it(self):
+        # A merge patch (kubectl's default) replaces the containers list whole, so the pod
+        # would lose its `sh -s` command and run curl's entrypoint (smoke 38121510918).
+        self.assertIn("--override-type=strategic", self.command())
+
     def test_the_script_reads_stdin_with_the_endpoints_then_each_case(self):
         argv = self.command()
         tail = argv[argv.index("sh"):]

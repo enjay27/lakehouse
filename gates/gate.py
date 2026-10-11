@@ -167,7 +167,8 @@ def check_standins_command(env, cases, image, name):
                                           "stdin": True, "stdinOnce": True}]}}
     argv = ["kubectl", "--context", CONTEXT, "-n", env["NS_CATALOG_POLARIS"], "run", name,
             f"--image={image}", "--restart=Never", "--rm", "-i", "--quiet",
-            "--pod-running-timeout=3m", "--overrides", json.dumps(overrides),
+            "--pod-running-timeout=3m", "--override-type=strategic",
+            "--overrides", json.dumps(overrides),
             "--command", "--", "sh", "-s", "--", env["S3_ENDPOINT"],
             env["POLARIS_WAREHOUSE_BUCKET"], env["S3_REGION"], env["POLARIS_OPA_URL"]]
     for case in cases:
