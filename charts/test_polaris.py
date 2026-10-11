@@ -73,6 +73,12 @@ def one(docs, kind, name=release.POLARIS):
     return doc
 
 
+def secret_env(container):
+    """The container's variables that come from a Secret: name -> secretKeyRef."""
+    return {v["name"]: v["valueFrom"]["secretKeyRef"] for v in container["env"]
+            if "secretKeyRef" in v.get("valueFrom", {})}
+
+
 def properties(docs):
     text = one(docs, "ConfigMap")["data"]["application.properties"]
     pairs = (line.split("=", 1) for line in text.splitlines()
@@ -103,8 +109,11 @@ class Rendered(unittest.TestCase):
 
     def test_no_credential_is_rendered(self):
         self.assertNotIn("Secret", [d["kind"] for d in self.docs])
+        plain = {v["name"]: v["value"] for v in self.container.get("env", []) if "value" in v}
+        self.assertEqual(plain, {"TZ": "UTC"})
         for var in self.container.get("env", []):
-            self.assertIn("valueFrom", var, var["name"])
+            if var["name"] != "TZ":
+                self.assertIn("valueFrom", var, var["name"])
 
     def test_two_replicas_where_the_chart_defaults_to_one(self):
         self.assertEqual(self.deployment["spec"]["replicas"], 2)
@@ -141,7 +150,7 @@ class Rendered(unittest.TestCase):
         self.assertEqual(self.props["polaris.persistence.type"], "relational-jdbc")
 
     def test_the_database_login_comes_from_the_secret_init_env_creates(self):
-        env = {v["name"]: v["valueFrom"]["secretKeyRef"] for v in self.container["env"]}
+        env = secret_env(self.container)
         for var, key in (("quarkus.datasource.username", "username"),
                          ("quarkus.datasource.password", "password")):
             self.assertEqual(env[var], {"name": release.POLARIS_DB_SECRET, "key": key})
@@ -159,7 +168,7 @@ class Rendered(unittest.TestCase):
                          "jdbc:postgresql://polaris-pg-rw:5432/polaris?sslmode=require")
 
     def test_the_s3_credentials_come_from_their_secret(self):
-        env = {v["name"]: v["valueFrom"]["secretKeyRef"] for v in self.container["env"]}
+        env = secret_env(self.container)
         for var, key in (("polaris.storage.aws.access-key", "accessKeyId"),
                          ("polaris.storage.aws.secret-key", "secretAccessKey")):
             self.assertEqual(env[var], {"name": "polaris-s3", "key": key})
@@ -169,7 +178,7 @@ class Rendered(unittest.TestCase):
         # With stsUnavailable, Polaris 1.6.0 reads and writes table metadata with the AWS SDK's
         # default credentials; `polaris.storage.aws.*` is only used for STS.
         self.assertEqual(self.defaults["extraEnv"], [])
-        env = {v["name"]: v["valueFrom"]["secretKeyRef"] for v in self.container["env"]}
+        env = secret_env(self.container)
         for var, key in (("AWS_ACCESS_KEY_ID", "accessKeyId"),
                          ("AWS_SECRET_ACCESS_KEY", "secretAccessKey")):
             self.assertEqual(env[var], {"name": "polaris-s3", "key": key})
@@ -194,6 +203,33 @@ class Rendered(unittest.TestCase):
         self.assertEqual(self.props["polaris.authorization.type"], "opa")
         self.assertEqual(self.props["polaris.authorization.opa.policy-uri"],
                          GATE_ENV["POLARIS_OPA_URL"])
+
+    def test_polaris_writes_one_json_file_per_pod_where_the_chart_writes_none(self):
+        # ADR-014, ADR-036: the chart's own file appender stays off, because its claim is
+        # ReadWriteOnce and the release's; ours is set in advancedConfig.
+        self.assertIs(self.defaults["logging"]["file"]["enabled"], False)
+        self.assertEqual({k: v for k, v in self.props.items() if k.startswith("quarkus.log.file.")},
+                         {"quarkus.log.file.enabled": "true",
+                          "quarkus.log.file.path": "/deployments/logs/polaris-${HOSTNAME}.log",
+                          "quarkus.log.file.json.enabled": "true",
+                          "quarkus.log.file.rotation.file-suffix": ".yyyy-MM-dd-HH.gz",
+                          "quarkus.log.file.rotation.rotate-on-boot": "false",
+                          "quarkus.log.file.rotation.max-file-size": "2G",
+                          "quarkus.log.file.rotation.max-backup-index": "50"})
+
+    def test_the_chart_creates_no_log_claim_of_its_own(self):
+        self.assertNotIn("PersistentVolumeClaim", [d["kind"] for d in self.docs])
+
+    def test_the_shared_claim_is_mounted_where_polaris_writes_its_files(self):
+        (volume,) = [v for v in self.pod["volumes"] if "persistentVolumeClaim" in v]
+        self.assertEqual(volume["persistentVolumeClaim"], {"claimName": release.POLARIS_LOGS})
+        mounts = {m["name"]: m["mountPath"] for m in self.container["volumeMounts"]}
+        self.assertEqual(mounts[volume["name"]], "/deployments/logs")
+        self.assertTrue(self.props["quarkus.log.file.path"].startswith(
+            mounts[volume["name"]] + "/"))
+
+    def test_polaris_runs_in_utc_so_its_rolls_are_named_in_utc(self):
+        self.assertEqual({v["name"]: v.get("value") for v in self.container["env"]}["TZ"], "UTC")
 
     def test_one_realm_named_as_the_bootstrap_creates_it(self):
         self.assertEqual(self.props["polaris.realm-context.realms"], release.POLARIS_REALM)

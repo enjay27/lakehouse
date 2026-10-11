@@ -109,8 +109,13 @@ class Tools(unittest.TestCase):
 class Commands(unittest.TestCase):
     PINS = {"node_image": {"image": "kindest/node:v1.36.4@sha256:" + "a" * 64}}
 
-    def test_up_creates_the_three_node_cluster_then_installs_cnpg(self):
-        create, _, helm = gate.up_commands(self.PINS, "/tmp/chart.tgz", "cnpg-system")
+    def commands(self):
+        return gate.up_commands(self.PINS, "/tmp/chart.tgz", "cnpg-system")
+
+    def test_up_creates_the_three_node_cluster_first_and_installs_cnpg_last(self):
+        steps = self.commands()
+        (create, stdin), (helm, _) = steps[0], steps[-1]
+        self.assertIsNone(stdin)
         self.assertEqual(create[:4], ["kind", "create", "cluster", "--name"])
         self.assertEqual(create[create.index("--name") + 1], gate.CLUSTER)
         self.assertEqual(create[create.index("--image") + 1], self.PINS["node_image"]["image"])
@@ -121,15 +126,53 @@ class Commands(unittest.TestCase):
         self.assertIn("--wait", helm)
 
     def test_up_lets_the_control_plane_take_pods_before_cnpg(self):
-        _, taint, _ = gate.up_commands(self.PINS, "/tmp/chart.tgz", "cnpg-system")
+        taint, _ = self.commands()[1]
         self.assertEqual(taint, ["kubectl", "--context", gate.CONTEXT, "taint", "nodes",
                                  f"{gate.CLUSTER}-control-plane",
                                  "node-role.kubernetes.io/control-plane:NoSchedule-"])
+
+    def test_up_gives_kinds_provisioner_a_shared_class_and_keeps_standard(self):
+        # ADR-036: ReadWriteMany on kind, from local-path-provisioner's sharedFileSystemPath.
+        (patch, _), = [c for c in self.commands() if "patch" in c[0]]
+        self.assertEqual(patch[patch.index("-n") + 1], "local-path-storage")
+        self.assertEqual(patch[patch.index("patch"):patch.index("patch") + 3],
+                         ["patch", "configmap", "local-path-config"])
+        data = json.loads(patch[patch.index("-p") + 1])["data"]
+        self.assertEqual(list(data), ["config.json"])
+        config = json.loads(data["config.json"])
+        self.assertEqual(config["nodePathMap"], [])
+        self.assertEqual(config["storageClassConfigs"], {
+            "standard": {"nodePathMap": [{"node": "DEFAULT_PATH_FOR_NON_LISTED_NODES",
+                                          "paths": ["/var/local-path-provisioner"]}]},
+            gate.SHARED_CLASS: {"sharedFileSystemPath": gate.SHARED_NODE_DIR}})
+
+    def test_the_shared_class_is_applied_and_the_provisioner_restarted_before_cnpg(self):
+        steps = self.commands()
+        (apply, stdin), = [c for c in steps if "apply" in c[0]]
+        storage_class = json.loads(stdin)
+        self.assertEqual((storage_class["kind"], storage_class["metadata"]["name"]),
+                         ("StorageClass", gate.SHARED_CLASS))
+        self.assertEqual(storage_class["provisioner"], "rancher.io/local-path")
+        self.assertEqual(storage_class["reclaimPolicy"], "Delete")
+        names = [" ".join(argv) for argv, _ in steps]
+        restart = next(i for i, n in enumerate(names) if "rollout restart" in n)
+        status = next(i for i, n in enumerate(names) if "rollout status" in n)
+        self.assertIn("deployment/local-path-provisioner", names[restart])
+        self.assertLess(restart, status)
+        self.assertLess(status, len(steps) - 1)
+        for argv, _ in steps[1:-1]:
+            self.assertEqual(argv[1:3], ["--context", gate.CONTEXT])
 
     def test_the_kind_config_has_one_control_plane_and_two_workers(self):
         with open(os.path.join(HERE, "kind.yaml"), encoding="utf-8") as f:
             roles = [line.split(":", 1)[1].strip() for line in f if "role:" in line]
         self.assertEqual(roles, ["control-plane", "worker", "worker"])
+
+    def test_every_node_mounts_the_same_host_directory_for_the_shared_class(self):
+        with open(os.path.join(HERE, "kind.yaml"), encoding="utf-8") as f:
+            text = f.read()
+        self.assertEqual(text.count(f"hostPath: {gate.SHARED_HOST_DIR}"), 3)
+        self.assertEqual(text.count(f"containerPath: {gate.SHARED_NODE_DIR}"), 3)
 
 
 class Install(unittest.TestCase):
@@ -185,6 +228,8 @@ POLARIS_DB_HOST=
 POLARIS_CONSOLE_ENABLED=false
 POLARIS_CONSOLE_ORIGIN=
 POLARIS_CONSOLE_API_URL=
+POLARIS_LOGS_STORAGE_CLASS=
+POLARIS_LOGS_SIZE=
 POLARIS_S3_ACCESS_KEY_ID=
 POLARIS_S3_SECRET_ACCESS_KEY=
 SMOKE_S3_ACCESS_KEY_ID=
@@ -221,6 +266,11 @@ class GateEnv(unittest.TestCase):
         self.assertEqual(env["POLARIS_CONSOLE_API_URL"],
                          "http://polaris.catalog-polaris.svc.cluster.local:8181")
 
+    def test_the_log_claim_uses_the_shared_class(self):
+        env = gate.init_env.parse(gate.gate_env(TEMPLATE, gen=lambda name: "x"))
+        self.assertEqual(env["POLARIS_LOGS_STORAGE_CLASS"], gate.SHARED_CLASS)
+        self.assertEqual(env["POLARIS_LOGS_SIZE"], "1Gi")
+
     def test_everything_else_is_left_to_init_env(self):
         env = gate.init_env.parse(gate.gate_env(TEMPLATE, gen=lambda name: "x"))
         self.assertEqual(env["POLARIS_DB_PASSWORD"], "")
@@ -232,7 +282,8 @@ class GateEnv(unittest.TestCase):
         for name in gate.GATE_ENV_GENERATED + ("KUBE_CONTEXT", "S3_ENDPOINT", "S3_REGION",
                                                "POLARIS_WAREHOUSE_BUCKET", "POLARIS_OPA_URL",
                                                "POLARIS_DB_HOST", "POLARIS_CONSOLE_ORIGIN",
-                                               "POLARIS_CONSOLE_API_URL"):
+                                               "POLARIS_CONSOLE_API_URL",
+                                               "POLARIS_LOGS_STORAGE_CLASS", "POLARIS_LOGS_SIZE"):
             with self.subTest(name=name):
                 self.assertTrue(env[name])
 
