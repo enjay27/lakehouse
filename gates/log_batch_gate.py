@@ -268,6 +268,13 @@ def read_back():
                       "?ignore_unavailable=true")
 
 
+def remove_tree(path):
+    """Removes what it can of `path`. The batch writes as uid 10000, so its directories may be
+    neither removable nor chmod-able here; TemporaryDirectory's cleanup raises on that even
+    with ignore_cleanup_errors (Python 3.12), and the runner is thrown away anyway."""
+    shutil.rmtree(path, ignore_errors=True)
+
+
 def docker_batch(image):
     def run_batch(work, now):
         done = subprocess.run(batch_command(image, work, now), capture_output=True, text=True,
@@ -287,8 +294,8 @@ def run(directory):
     gate.run(build)
     pid = os.getpid()
     network, name = f"log-batch-gate-{pid}", f"log-batch-opensearch-{pid}"
-    # The batch writes as uid 10000: what it made may not be removable here, and need not be.
-    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+    tmp = tempfile.mkdtemp()
+    try:
         work = os.path.join(tmp, "logs")
         stage(directory, manifest, work)
         events, before, after = replay(work, manifest, docker_batch(image))
@@ -311,6 +318,8 @@ def run(directory):
             subprocess.run(["docker", "network", "rm", network], check=False,
                            capture_output=True)
         return checks(manifest, events, before, after, documents(docs), mappings, log)
+    finally:
+        remove_tree(tmp)
 
 
 def main(argv):

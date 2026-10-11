@@ -233,6 +233,24 @@ class Verify(unittest.TestCase):
             lbg.verify(self.dir)
 
 
+class Cleanup(unittest.TestCase):
+    def test_files_the_batch_wrote_as_another_user_do_not_fail_the_cleanup(self):
+        # On the runner the batch's directories belong to uid 10000: unlink and chmod both
+        # fail there (run 38165411360), which TemporaryDirectory's cleanup does not survive.
+        from unittest import mock
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, "logs", "aggregated-logs"))
+        open(os.path.join(d, "logs", "aggregated-logs", "20261011-19.jsonl"), "w").close()
+        denied = PermissionError(13, "Permission denied")
+        try:
+            with mock.patch("os.unlink", side_effect=denied), \
+                    mock.patch("os.rmdir", side_effect=denied), \
+                    mock.patch("os.chmod", side_effect=PermissionError(1, "not permitted")):
+                lbg.remove_tree(d)
+        finally:
+            shutil.rmtree(d)
+
+
 class Commands(unittest.TestCase):
     def test_opensearch_is_pinned_single_node_without_security_on_localhost(self):
         pins = gate.load_pins()
