@@ -58,9 +58,10 @@ POLARIS_SECRETS = (POLARIS_DB_SECRET, "polaris-s3", "polaris-token-signing")
 # Every `.env` variable that holds a credential: what goes into a Secret.
 CREDENTIAL_VARS = sorted({var for s in SECRETS for var in s.from_env.values()})
 # The admin tool image's entrypoint. The bootstrap pod runs it only once stdin ends, that is
-# once kubectl is attached, so none of its output is lost.
+# once kubectl is attached, so none of its output is lost; all of it goes to stderr, which is
+# what a failed command returns here (call).
 ADMIN_TOOL_ENTRYPOINT = "/opt/jboss/container/java/run/run-java.sh"
-BOOTSTRAP_WRAPPER = f'cat >/dev/null; exec {ADMIN_TOOL_ENTRYPOINT} "$@"'
+BOOTSTRAP_WRAPPER = f'cat >/dev/null; exec {ADMIN_TOOL_ENTRYPOINT} "$@" 1>&2'
 # What Polaris 1.6.0's admin tool says, exit 3, for a realm that has its root principal
 # (polaris-core AuthBootstrapUtil.java); the schema script it ran first changes nothing.
 ALREADY_BOOTSTRAPPED = "It appears this metastore manager has already been bootstrapped"

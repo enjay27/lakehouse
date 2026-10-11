@@ -483,7 +483,8 @@ class Bootstrap(unittest.TestCase):
 
 
 class BootstrapWrapper(unittest.TestCase):
-    """The wrapper, run here with sh: the tool starts after stdin ends, with its arguments."""
+    """The wrapper, run here with sh: the tool starts after stdin ends, with its arguments, and
+    all its output goes to stderr, which is what a failed `kubectl run` returns."""
 
     def test_the_entrypoint_gets_the_arguments_after_stdin_ends(self):
         with tempfile.TemporaryDirectory() as d:
@@ -495,7 +496,7 @@ class BootstrapWrapper(unittest.TestCase):
             result = subprocess.run(["sh", "-c", wrapper, "admin-tool", "bootstrap", "-r", "R"],
                                     input="\n", capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 3)
-        self.assertEqual(result.stdout, "args: bootstrap -r R\n")
+        self.assertEqual((result.stdout, result.stderr), ("", "args: bootstrap -r R\n"))
 
 
 class FakePolaris:
