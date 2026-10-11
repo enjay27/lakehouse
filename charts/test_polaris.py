@@ -198,6 +198,18 @@ class Rendered(unittest.TestCase):
     def test_one_realm_named_as_the_bootstrap_creates_it(self):
         self.assertEqual(self.props["polaris.realm-context.realms"], release.POLARIS_REALM)
 
+    def test_cors_is_off_while_the_console_is_not_enabled(self):
+        self.assertIs(self.defaults["cors"]["enabled"], False)
+        self.assertNotIn("quarkus.http.cors.enabled", self.props)
+        self.assertNotIn("quarkus.http.cors.origins", self.props)
+
+    def test_cors_allows_only_the_consoles_origin_while_it_is_enabled(self):
+        props = properties(render({**GATE_ENV, "POLARIS_CONSOLE_ENABLED": "true",
+                                   "POLARIS_CONSOLE_ORIGIN": "http://console.example:8080",
+                                   "POLARIS_CONSOLE_API_URL": "http://polaris.example:8181"}))
+        self.assertEqual(props["quarkus.http.cors.enabled"], "true")
+        self.assertEqual(props["quarkus.http.cors.origins"], "http://console.example:8080")
+
     def test_the_management_port_is_8182_named_explicitly(self):
         self.assertEqual(self.props["quarkus.management.port"], "8182")
         mgmt = one(self.docs, "Service", "polaris-mgmt")["spec"]["ports"]

@@ -182,6 +182,9 @@ S3_REGION=
 POLARIS_WAREHOUSE_BUCKET=
 POLARIS_OPA_URL=
 POLARIS_DB_HOST=
+POLARIS_CONSOLE_ENABLED=false
+POLARIS_CONSOLE_ORIGIN=
+POLARIS_CONSOLE_API_URL=
 POLARIS_S3_ACCESS_KEY_ID=
 POLARIS_S3_SECRET_ACCESS_KEY=
 SMOKE_S3_ACCESS_KEY_ID=
@@ -210,6 +213,14 @@ class GateEnv(unittest.TestCase):
                          "http://recorder.si.svc.cluster.local:8181/v1/data/polaris/authz")
         self.assertEqual(env["POLARIS_DB_HOST"], "recorder.si.svc.cluster.local")
 
+    def test_the_console_is_enabled_at_its_service_and_reaches_polaris_at_its_service(self):
+        env = gate.init_env.parse(gate.gate_env(TEMPLATE, gen=lambda name: "x"))
+        self.assertEqual(env["POLARIS_CONSOLE_ENABLED"], "true")
+        self.assertEqual(env["POLARIS_CONSOLE_ORIGIN"],
+                         "http://polaris-console.catalog-polaris.svc.cluster.local:8080")
+        self.assertEqual(env["POLARIS_CONSOLE_API_URL"],
+                         "http://polaris.catalog-polaris.svc.cluster.local:8181")
+
     def test_everything_else_is_left_to_init_env(self):
         env = gate.init_env.parse(gate.gate_env(TEMPLATE, gen=lambda name: "x"))
         self.assertEqual(env["POLARIS_DB_PASSWORD"], "")
@@ -220,7 +231,8 @@ class GateEnv(unittest.TestCase):
             env = gate.init_env.parse(gate.gate_env(f.read()))
         for name in gate.GATE_ENV_GENERATED + ("KUBE_CONTEXT", "S3_ENDPOINT", "S3_REGION",
                                                "POLARIS_WAREHOUSE_BUCKET", "POLARIS_OPA_URL",
-                                               "POLARIS_DB_HOST"):
+                                               "POLARIS_DB_HOST", "POLARIS_CONSOLE_ORIGIN",
+                                               "POLARIS_CONSOLE_API_URL"):
             with self.subTest(name=name):
                 self.assertTrue(env[name])
 

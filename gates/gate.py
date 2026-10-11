@@ -102,6 +102,7 @@ ICEBERG_CATALOG = "gate_catalog"
 # The Polaris console's image, built here from a pinned polaris-tools commit (ADR-028).
 CONSOLE_IMAGE_DIR = os.path.join(ROOT, "images", "polaris-console")
 CONSOLE_IMAGE_REPOSITORY = "lakehouse/polaris-console"
+CONSOLE_PORT = 8080
 
 
 def load_pins(path=os.path.join(HERE, "pins.json")):
@@ -165,11 +166,23 @@ def standin_endpoints(ns):
     }
 
 
+def console_settings(ns):
+    """The `.env` values for the gate's console, in Polaris's namespace `ns`: enabled, opened
+    at its Service, and reaching Polaris at its Service (ADR-028)."""
+    return {
+        "POLARIS_CONSOLE_ENABLED": "true",
+        "POLARIS_CONSOLE_ORIGIN": f"http://{release.CONSOLE}.{ns}.svc.cluster.local:{CONSOLE_PORT}",
+        "POLARIS_CONSOLE_API_URL": f"http://{release.POLARIS}.{ns}.svc.cluster.local:"
+                                   f"{POLARIS_API_PORT}",
+    }
+
+
 def gate_env(template_text, gen=init_env.generate):
-    """`.env` for the gate: its context, the stand-ins' endpoints and the S3 stand-in's
-    credentials; init_env fills the rest."""
-    fixed = {"KUBE_CONTEXT": CONTEXT,
-             **standin_endpoints(init_env.parse(template_text)["NS_STANDINS"])}
+    """`.env` for the gate: its context, the stand-ins' endpoints, the S3 stand-in's
+    credentials and the console's settings; init_env fills the rest."""
+    template = init_env.parse(template_text)
+    fixed = {"KUBE_CONTEXT": CONTEXT, **standin_endpoints(template["NS_STANDINS"]),
+             **console_settings(template["NS_CATALOG_POLARIS"])}
     lines = []
     for line in template_text.splitlines():
         name = line.split("=", 1)[0]

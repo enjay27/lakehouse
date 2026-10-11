@@ -1,0 +1,13 @@
+# This repository's settings for the upstream console chart (ADR-028); values.yaml stays
+# upstream's. install/release.py adds the values that come from `.env`: the URL at which the
+# browser reaches Polaris, its token URL and the realm. charts/test_polaris_console.py compares
+# each setting with the chart default (ADR-016). Installed only when POLARIS_CONSOLE_ENABLED is
+# true; Polaris allows its origin (CORS) only then.
+
+# No image is published (ADR-028): `gates/gate.py console-image` builds it from the
+# polaris-tools commit in images/polaris-console/source.json, tags it with that commit, and
+# loads it into kind. How it reaches a target cluster is not decided (ADR-028).
+image:
+  repository: lakehouse/polaris-console
+  tag: "3edb60fcb591"
+  pullPolicy: IfNotPresent
