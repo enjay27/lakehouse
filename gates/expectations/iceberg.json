@@ -140,13 +140,16 @@
       }
     },
     {
-      "name": "No request asked for vended credentials",
+      "name": "Polaris never asked for vended credentials",
       "must": "not_exist",
       "match": {
         "proto": "http",
         "listener": "opa",
         "request_body.json.input.action": {
           "regex": "_DELEGATION$"
+        },
+        "request_headers.user-agent": {
+          "regex": "^Apache-HttpClient/"
         }
       }
     },
