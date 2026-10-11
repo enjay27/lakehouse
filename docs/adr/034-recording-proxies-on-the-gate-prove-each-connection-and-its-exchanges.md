@@ -1,6 +1,6 @@
 # ADR-034: Recording proxies on the gate prove each of Polaris's connections and its exchanges
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-11
 - **Related:** ADR-002, ADR-008, ADR-017, ADR-018, ADR-026, ADR-027, ADR-029, ADR-031
 

@@ -175,6 +175,11 @@ class Install(unittest.TestCase):
 
 TEMPLATE = """KUBE_CONTEXT=
 NS_CATALOG_POLARIS=catalog-polaris
+NS_STANDINS=standins
+S3_ENDPOINT=
+S3_REGION=
+POLARIS_WAREHOUSE_BUCKET=
+POLARIS_OPA_URL=
 POLARIS_S3_ACCESS_KEY_ID=
 POLARIS_S3_SECRET_ACCESS_KEY=
 POLARIS_DB_PASSWORD=
@@ -189,6 +194,15 @@ class GateEnv(unittest.TestCase):
         self.assertEqual(env["POLARIS_S3_SECRET_ACCESS_KEY"],
                          "gen-POLARIS_S3_SECRET_ACCESS_KEY")
 
+    def test_the_endpoints_name_the_stand_ins_in_their_namespace(self):
+        env = gate.init_env.parse(gate.gate_env(TEMPLATE.replace("NS_STANDINS=standins",
+                                                                 "NS_STANDINS=si")))
+        self.assertEqual(env["S3_ENDPOINT"], "http://seaweedfs.si.svc.cluster.local:8333")
+        self.assertEqual(env["S3_REGION"], "us-east-1")
+        self.assertEqual(env["POLARIS_WAREHOUSE_BUCKET"], "polaris-warehouse")
+        self.assertEqual(env["POLARIS_OPA_URL"],
+                         "http://opa.si.svc.cluster.local:8181/v1/data/polaris/authz")
+
     def test_everything_else_is_left_to_init_env(self):
         env = gate.init_env.parse(gate.gate_env(TEMPLATE, gen=lambda name: "x"))
         self.assertEqual(env["POLARIS_DB_PASSWORD"], "")
@@ -197,7 +211,8 @@ class GateEnv(unittest.TestCase):
     def test_the_committed_template_has_every_variable_the_gate_sets(self):
         with open(os.path.join(HERE, "..", ".env.template"), encoding="utf-8") as f:
             env = gate.init_env.parse(gate.gate_env(f.read()))
-        for name in gate.GATE_ENV_GENERATED + ("KUBE_CONTEXT",):
+        for name in gate.GATE_ENV_GENERATED + ("KUBE_CONTEXT", "S3_ENDPOINT", "S3_REGION",
+                                               "POLARIS_WAREHOUSE_BUCKET", "POLARIS_OPA_URL"):
             with self.subTest(name=name):
                 self.assertTrue(env[name])
 
@@ -312,6 +327,68 @@ class ReleasedTags(unittest.TestCase):
     def test_no_tags_gives_none(self):
         git(self.repo, "tag", "-d", "platform-2026.10.10")
         self.assertEqual(gate.released_tags(self.repo), [])
+
+
+STANDIN_ENV = {"NS_STANDINS": "standins", "NS_CATALOG_POLARIS": "catalog-polaris",
+               "S3_ENDPOINT": "http://seaweedfs.standins.svc.cluster.local:8333",
+               "S3_REGION": "us-east-1", "POLARIS_WAREHOUSE_BUCKET": "polaris-warehouse",
+               "POLARIS_OPA_URL": "http://opa.standins.svc.cluster.local:8181/v1/data/polaris/authz"}
+CURL = "curlimages/curl:8.22.0@sha256:" + "c" * 64
+
+
+class Standins(unittest.TestCase):
+    def test_applies_the_list_server_side_then_waits_for_both_deployments(self):
+        apply, wait = gate.standins_commands(STANDIN_ENV)
+        self.assertEqual(apply[:3], ["kubectl", "--context", gate.CONTEXT])
+        self.assertIn("--server-side", apply)
+        self.assertEqual(apply[-2:], ["-f", "-"])
+        self.assertEqual(wait[:5], ["kubectl", "--context", gate.CONTEXT, "-n", "standins"])
+        self.assertIn("deployment/seaweedfs", wait)
+        self.assertIn("deployment/opa", wait)
+
+
+class CheckStandins(unittest.TestCase):
+    CASES = [{"name": "root", "allow": True, "input": {"actor": {"principal": "root"}}},
+             {"name": "stranger", "allow": False, "input": {"actor": {"principal": "x"}}}]
+
+    def command(self):
+        return gate.check_standins_command(STANDIN_ENV, self.CASES, CURL, name="check-test")
+
+    def test_a_short_lived_curl_pod_runs_in_polaris_namespace(self):
+        argv = self.command()
+        self.assertEqual(argv[:7], ["kubectl", "--context", gate.CONTEXT, "-n",
+                                    "catalog-polaris", "run", "check-test"])
+        for flag in ("--rm", "-i", "--restart=Never", f"--image={CURL}"):
+            self.assertIn(flag, argv)
+
+    def test_the_s3_credentials_come_from_polaris_secret_never_the_command_line(self):
+        argv = self.command()
+        overrides = json.loads(argv[argv.index("--overrides") + 1])
+        (container,) = overrides["spec"]["containers"]
+        self.assertEqual(container["name"], "check-test")
+        refs = {e["name"]: e["valueFrom"]["secretKeyRef"] for e in container["env"]}
+        self.assertEqual(refs["AWS_ACCESS_KEY_ID"], {"name": "polaris-s3", "key": "accessKeyId"})
+        self.assertEqual(refs["AWS_SECRET_ACCESS_KEY"],
+                         {"name": "polaris-s3", "key": "secretAccessKey"})
+
+    def test_the_override_merges_into_the_generated_container_instead_of_replacing_it(self):
+        # A merge patch (kubectl's default) replaces the containers list whole, so the pod
+        # would lose its `sh -s` command and run curl's entrypoint (smoke 38121510918).
+        self.assertIn("--override-type=strategic", self.command())
+
+    def test_the_script_reads_stdin_with_the_endpoints_then_each_case(self):
+        argv = self.command()
+        tail = argv[argv.index("sh"):]
+        self.assertEqual(tail[:7], ["sh", "-s", "--", STANDIN_ENV["S3_ENDPOINT"],
+                                    "polaris-warehouse", "us-east-1",
+                                    STANDIN_ENV["POLARIS_OPA_URL"]])
+        self.assertEqual(tail[7:9], ["root", "true"])
+        self.assertEqual(json.loads(tail[9]), self.CASES[0]["input"])
+        self.assertEqual(tail[10:12], ["stranger", "false"])
+
+    def test_the_committed_cases_load(self):
+        cases = gate.standins.load_cases(os.path.join(HERE, "opa", "cases.json"))
+        self.assertGreater(len(cases), 1)
 
 
 if __name__ == "__main__":

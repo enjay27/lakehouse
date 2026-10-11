@@ -189,18 +189,139 @@ class Steps(unittest.TestCase):
         def run(argv):
             calls.append(argv)
             return 1, "NotFound"
-        problems, _ = release.install(POLARIS_ENV, run, ["1.30"], dry_run=False)
+        problems, _ = release.install(ENDPOINT_ENV, run, ["1.30"], dry_run=False)
         self.assertIn(release.CNPG_CRD, "\n".join(problems))
         self.assertTrue(all(c[0] == "kubectl" and "crd" in c for c in calls))
 
-    def test_both_steps_pass_in_order(self):
+    def test_every_step_passes_in_order(self):
+        step0, step1, endpoints = FakeKubectl(), FakeCalls(), FakeRun()
+
+        def run(argv, stdin=None):
+            if "crd" in argv or "deployments" in argv:
+                return step0(argv)
+            return endpoints(argv, stdin) if "run" in argv else step1(argv)
+        problems, notes = release.install(ENDPOINT_ENV, run, ["1.30"], dry_run=False)
+        self.assertEqual(problems, [])
+        self.assertEqual([n.split(":")[0] for n in notes], ["Step 0", "Step 1", "Step 1"])
+        self.assertIn("answer", notes[2])
+
+    def test_endpoints_that_do_not_answer_stop_the_install(self):
         step0, step1 = FakeKubectl(), FakeCalls()
 
-        def run(argv):
-            return step0(argv) if "crd" in argv or "deployments" in argv else step1(argv)
-        problems, notes = release.install(POLARIS_ENV, run, ["1.30"], dry_run=False)
+        def run(argv, stdin=None):
+            if "crd" in argv or "deployments" in argv:
+                return step0(argv)
+            return (1, "http://s3.example:8333 did not answer") if "run" in argv \
+                else step1(argv)
+        problems, _ = release.install(ENDPOINT_ENV, run, ["1.30"], dry_run=False)
+        self.assertIn("did not answer", "\n".join(problems))
+
+    def test_a_dry_run_checks_the_endpoints_too(self):
+        step0, step1, endpoints = FakeKubectl(), FakeCalls(), FakeRun()
+
+        def run(argv, stdin=None):
+            if "crd" in argv or "deployments" in argv:
+                return step0(argv)
+            return endpoints(argv, stdin) if "run" in argv else step1(argv)
+        problems, _ = release.install(ENDPOINT_ENV, run, ["1.30"], dry_run=True)
         self.assertEqual(problems, [])
-        self.assertEqual([n.split(":")[0] for n in notes], ["Step 0", "Step 1"])
+        self.assertEqual(len(endpoints.calls), 1)
+
+
+ENDPOINT_ENV = {**POLARIS_ENV, "S3_ENDPOINT": "http://s3.example:8333",
+                "POLARIS_OPA_URL": "http://opa.example:8181/v1/data/polaris/allow"}
+CURL = "curlimages/curl:8.0.0@sha256:" + "b" * 64
+
+
+class FakeRun:
+    """Answers the endpoint check's `kubectl run`; records every call."""
+
+    def __init__(self, answer=(0, "answered")):
+        self.answer, self.calls = answer, []
+
+    def __call__(self, argv, stdin=None):
+        self.calls.append(argv)
+        self.stdin = stdin
+        return self.answer
+
+
+class Endpoints(unittest.TestCase):
+    """ADR-029: before Polaris, the S3 and policy endpoints answer, seen from its namespace."""
+
+    def check(self, calls, env=ENDPOINT_ENV):
+        return release.endpoints_answer(env, calls, image=CURL, name="endpoint-check-test")
+
+    def test_one_short_lived_pod_in_polaris_namespace_asks_both_endpoints(self):
+        calls = FakeRun()
+        problems, notes = self.check(calls)
+        self.assertEqual(problems, [])
+        (argv,) = calls.calls
+        self.assertEqual(argv[:5], ["kubectl", "--context", "kind-lakehouse-gate",
+                                    "-n", "catalog-polaris"])
+        self.assertEqual(argv[5:7], ["run", "endpoint-check-test"])
+        for flag in ("--rm", "-i", "--restart=Never", f"--image={CURL}"):
+            self.assertIn(flag, argv)
+        self.assertEqual(argv[-2:], ["http://s3.example:8333",
+                                     "http://opa.example:8181/v1/data/polaris/allow"])
+        self.assertIn("answer", "\n".join(notes))
+
+    def test_the_script_goes_on_stdin_and_the_endpoints_are_its_arguments(self):
+        calls = FakeRun()
+        self.check(calls)
+        argv = calls.calls[0]
+        self.assertEqual(argv[-5:-2], ["sh", "-s", "--"])
+        self.assertEqual(calls.stdin, release.ENDPOINT_CHECK)
+        self.assertNotIn("example", calls.stdin)
+
+    def test_an_empty_endpoint_stops_before_any_call(self):
+        for name in ("S3_ENDPOINT", "POLARIS_OPA_URL"):
+            with self.subTest(name=name):
+                calls = FakeRun()
+                problems, _ = self.check(calls, env={**ENDPOINT_ENV, name: ""})
+                self.assertIn(name, "\n".join(problems))
+                self.assertEqual(calls.calls, [])
+
+    def test_no_answer_stops_with_what_the_pod_said(self):
+        problems, _ = self.check(FakeRun(answer=(1, "http://s3.example:8333 did not answer")))
+        self.assertIn("did not answer", "\n".join(problems))
+
+    def test_the_curl_image_is_pinned_by_digest(self):
+        self.assertRegex(release.images()["curl"],
+                         r"^curlimages/curl:\d+\.\d+\.\d+@sha256:[0-9a-f]{64}$")
+
+
+class EndpointScript(unittest.TestCase):
+    """The pod's script, run here with this machine's curl against a local server."""
+
+    def run_script(self, *urls):
+        return subprocess.run(["sh", "-s", "--", *urls], input=release.ENDPOINT_CHECK,
+                              capture_output=True, text=True, check=False)
+
+    def test_any_http_status_is_an_answer_and_no_connection_is_not(self):
+        import http.server
+        import threading
+
+        class Forbidden(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(403)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+        server = http.server.HTTPServer(("127.0.0.1", 0), Forbidden)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            up = f"http://127.0.0.1:{server.server_port}/"
+            result = self.run_script(up)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("HTTP 403", result.stdout)
+            closed = "http://127.0.0.1:9/"
+            result = self.run_script(up, closed)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn(f"{closed} did not answer", result.stdout)
+        finally:
+            server.shutdown()
+            server.server_close()
 
 
 class LoadEnv(unittest.TestCase):

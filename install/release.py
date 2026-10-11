@@ -8,6 +8,9 @@
    `NS_CATALOG_POLARIS` (ADR-008, ADR-010), installed with helm and waited on until Ready. The
    `polaris-db` Secret must exist first (scripts/init_env.py --apply-secrets, ADR-006). Polaris
    itself follows in P2; Datahub adds its steps in P3. The gates run this same script (ADR-018).
+   Then, before Polaris, the S3 endpoint and the policy endpoint from `.env` must answer, asked
+   from Polaris's namespace by one short-lived curl pod (install/images.json): any HTTP status
+   is an answer, no connection is not (ADR-029, ADR-031). It runs with --dry-run too.
 
 With --dry-run, step 1 is a server-side dry-run of the helm upgrade and nothing waits: the
 dry-run gate (ADR-018).
@@ -23,6 +26,7 @@ Usage: python3 install/release.py [--dry-run]
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 
@@ -38,6 +42,20 @@ POLARIS_PG_RELEASE = "polaris-postgres"
 POLARIS_PG_CHART = os.path.join(ROOT, "charts", "polaris-postgres")
 POLARIS_DB_SECRET = "polaris-db"
 READY_TIMEOUT = "900s"
+# The endpoint check's pod reads this script on stdin (`sh -s`), so it starts only once kubectl
+# is attached and no output is lost. Each URL in its arguments gets one request; any HTTP
+# status is an answer. Exits 1 when any URL gave none.
+ENDPOINT_CHECK = """fail=0
+for url in "$@"; do
+  if code=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 15 "$url"); then
+    echo "$url answered HTTP $code"
+  else
+    echo "$url did not answer (curl exit $?)"
+    fail=1
+  fi
+done
+exit $fail
+"""
 # The operator image's last path segment, then a version tag; an optional digest after it.
 OPERATOR_IMAGE_RE = re.compile(r"(?:^|/)cloudnative-pg:(\d+\.\d+\.\d+)(?:@sha256:[0-9a-f]+)?$")
 
@@ -57,6 +75,11 @@ def supported_versions(path=os.path.join(HERE, "supported.json")):
         return json.load(f)["cnpg_operator"]
 
 
+def images(path=os.path.join(HERE, "images.json")):
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
 def operator_versions(deployments_json):
     """Versions of the CNPG operator images in a `kubectl get deployments -o json` answer."""
     versions = []
@@ -68,9 +91,9 @@ def operator_versions(deployments_json):
     return versions
 
 
-def call(argv):
-    """Runs a command; (exit code, stdout or, on failure, stderr)."""
-    result = subprocess.run(argv, capture_output=True, text=True, check=False)
+def call(argv, stdin=None):
+    """Runs a command, with stdin if given; (exit code, stdout or, on failure, stderr)."""
+    result = subprocess.run(argv, input=stdin, capture_output=True, text=True, check=False)
     return result.returncode, result.stdout if result.returncode == 0 else result.stderr
 
 
@@ -125,13 +148,39 @@ def polaris_postgres(env, run, dry_run=False):
     return [], [f"Step 1: Cluster {POLARIS_PG} in {namespace} is Ready."]
 
 
+def endpoints_answer(env, run, image=None, name=None):
+    """Before Polaris: the S3 and policy endpoints answer from Polaris's namespace (ADR-029).
+
+    Returns (problems, notes); no call is made while an endpoint is empty.
+    """
+    endpoints = {"S3_ENDPOINT": "the S3 endpoint", "POLARIS_OPA_URL": "the policy endpoint"}
+    empty = [f"{var} is empty: set {what} in .env (ADR-031)"
+             for var, what in endpoints.items() if not env.get(var)]
+    if empty:
+        return empty, []
+    namespace = env["NS_CATALOG_POLARIS"]
+    image = image or images()["curl"]
+    name = name or f"endpoint-check-{secrets.token_hex(4)}"
+    code, out = run(["kubectl", "--context", env["KUBE_CONTEXT"], "-n", namespace, "run", name,
+                     f"--image={image}", "--restart=Never", "--rm", "-i", "--quiet",
+                     "--pod-running-timeout=3m", "--command", "--", "sh", "-s", "--",
+                     env["S3_ENDPOINT"], env["POLARIS_OPA_URL"]], ENDPOINT_CHECK)
+    if code != 0:
+        return [f"before Polaris, from {namespace}: {out.strip()} (ADR-029)"], []
+    return [], [f"Step 1: the S3 endpoint and the policy endpoint answer from {namespace}."]
+
+
 def install(env, run, supported, dry_run):
     """Every step in order; the first step with problems stops the rest."""
-    problems, notes = check_preconditions(env, run, supported)
-    if problems:
-        return problems, notes
-    problems, more = polaris_postgres(env, run, dry_run)
-    return problems, notes + more
+    notes = []
+    for step in (lambda: check_preconditions(env, run, supported),
+                 lambda: polaris_postgres(env, run, dry_run),
+                 lambda: endpoints_answer(env, run)):
+        problems, more = step()
+        notes += more
+        if problems:
+            return problems, notes
+    return [], notes
 
 
 def main(argv):

@@ -33,5 +33,15 @@
     "url": "https://github.com/cloudnative-pg/charts/releases/download/cloudnative-pg-v0.29.1/cloudnative-pg-0.29.1.tgz",
     "sha256": "b53d3991fe84bcf38767e7702cae78666265427a127a26fff168ab4207d2b1df",
     "source": "digest in https://cloudnative-pg.github.io/charts/index.yaml, matched by the archive, read 2026-10-10"
+  },
+  "standin_images": {
+    "seaweedfs": {
+      "image": "chrislusf/seaweedfs:4.47@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882",
+      "source": "Docker Hub index digest (docker-content-digest, recomputed), read 2026-10-11; 4.48 under two weeks old"
+    },
+    "opa": {
+      "image": "openpolicyagent/opa:1.21.0@sha256:9e0010512cf405e66bfd7b89394f514e56fe0464822df0527e780344ab151450",
+      "source": "Docker Hub index digest (docker-content-digest, recomputed), read 2026-10-11; 1.21.1 under two weeks old"
+    }
   }
 }

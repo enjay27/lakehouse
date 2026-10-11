@@ -127,6 +127,18 @@ source does not matter for operation. What follows is the list they cover.
   [38073559912](https://github.com/enjay27/lakehouse/actions/runs/38073559912), smoke
   [38073559994](https://github.com/enjay27/lakehouse/actions/runs/38073559994) (the `Cluster`
   Ready in 1 min 32 s, three instances on three nodes).
+- The stand-ins (2026-10-11, ADR-031): SeaweedFS 4.47 (`weed mini`, the bucket created at
+  start) and OPA 1.21.0 with the gate's test policy `gates/opa/policy.rego`, in `NS_STANDINS`,
+  installed by `gates/gate.py standins` before every gate install. The policy follows what
+  Polaris 1.6.0 actually sends and reads, from its source: `docs/contracts/polaris-opa-input.md`
+  (the URL names the package, the answer is `result.allow`). `release.py` now stops before
+  Polaris unless the S3 and policy endpoints answer from Polaris's namespace (ADR-029); the
+  smoke gate's `check-standins` makes an S3 round trip with Polaris's credentials and checks
+  the policy's allowed and refused cases. The recorders of ADR-034 come next, in their own PR.
+  Gates on commit `4f173d8` (2026-10-11), both upgrading from `platform-2026.10.10`: dry-run
+  [38121760939](https://github.com/enjay27/lakehouse/actions/runs/38121760939), smoke
+  [38121760980](https://github.com/enjay27/lakehouse/actions/runs/38121760980) (the stand-ins
+  ready in seconds; the S3 round trip and all 7 policy cases, 3 allowed and 4 refused, ok).
 - Bootstrap: the realm and root principal from Secrets (ADR-006), then a catalog on the S3
   endpoint (SeaweedFS stand-in on the gate, ADR-031).
 - Smoke tests through the Iceberg REST API, as an ordinary principal: create a namespace and
