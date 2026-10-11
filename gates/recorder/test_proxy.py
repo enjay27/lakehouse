@@ -1,5 +1,5 @@
 """Tests for the recorder (ADR-034), run against local fakes: an HTTP/1.1 server, and a
-PostgreSQL server that speaks just enough of the wire protocol, TLS included.
+PostgreSQL server that speaks just enough of the wire protocol and never TLS (ADR-035).
 Run: python3 -m unittest discover -s gates"""
 
 import http.client
@@ -47,11 +47,10 @@ class Out:
             return "".join(self.lines)
 
 
-def start_recorder(kind, target, out, server_tls=None, client_tls=None):
+def start_recorder(kind, target, out, server_tls=None):
     ready = []
     threading.Thread(target=proxy.serve, daemon=True,
-                     args=(kind, "test", 0, target, server_tls, client_tls, out, "127.0.0.1",
-                           ready)).start()
+                     args=(kind, "test", 0, target, server_tls, out, "127.0.0.1", ready)).start()
     deadline = time.monotonic() + 5
     while not ready and time.monotonic() < deadline:
         time.sleep(0.01)
@@ -272,8 +271,8 @@ class PgUpstream:
     """Answers a login (asking for a cleartext password), then simple and extended queries:
     a query containing `fail` errors; any other returns one row holding `stored-hash-value`."""
 
-    def __init__(self, tls_ctx=None, fail_login=False):
-        self.tls_ctx, self.fail_login, self.plaintext = tls_ctx, fail_login, []
+    def __init__(self, fail_login=False):
+        self.fail_login, self.plaintext, self.ssl_requests = fail_login, [], 0
         self.sock = socket.create_server(("127.0.0.1", 0))
         threading.Thread(target=self.serve, daemon=True).start()
 
@@ -290,11 +289,8 @@ class PgUpstream:
     def session(self, conn):
         first = read_exact(conn, 8)
         if struct.unpack("!I", first[4:8])[0] == proxy.SSL_REQUEST:
-            if self.tls_ctx:
-                conn.sendall(b"S")
-                conn = self.tls_ctx.wrap_socket(conn, server_side=True)
-            else:
-                conn.sendall(b"N")
+            self.ssl_requests += 1
+            conn.sendall(b"N")
             first = read_exact(conn, 8)
         read_exact(conn, struct.unpack("!I", first[:4])[0] - 8)
         conn.sendall(msg("R", struct.pack("!I", 3)))
@@ -350,10 +346,8 @@ def login(sock, password="pw-not-recorded"):
 
 class Pg(unittest.TestCase):
     def connect(self, upstream, out, tls_files=None, ask_tls=False):
-        server_tls = client_tls = None
-        if tls_files:
-            server_tls, client_tls = proxy.tls_contexts(*tls_files)
-        port = start_recorder("pg", upstream.address(), out, server_tls, client_tls)
+        server_tls = proxy.tls_context(*tls_files) if tls_files else None
+        port = start_recorder("pg", upstream.address(), out, server_tls)
         sock = socket.create_connection(("127.0.0.1", port), timeout=5)
         if ask_tls:
             sock.sendall(struct.pack("!II", 8, proxy.SSL_REQUEST))
@@ -424,15 +418,12 @@ class Pg(unittest.TestCase):
                          ("connect", "error", "28P01"))
         self.assertNotIn("wrong-password", out.text())
 
-    def test_tls_is_accepted_from_the_client_and_opened_again_to_the_upstream(self):
+    def test_tls_ends_at_the_recorder_and_the_upstream_gets_plain_tcp(self):
+        # ADR-035: TLS on both sides fails SCRAM channel binding, so the recorder answers the
+        # SSLRequest itself and never forwards it.
         with tempfile.TemporaryDirectory() as d:
-            for sub in ("u", "r"):
-                os.makedirs(os.path.join(d, sub))
-            upstream_files = make_cert(os.path.join(d, "u"))
-            recorder_files = make_cert(os.path.join(d, "r"))
-            upstream_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            upstream_ctx.load_cert_chain(*upstream_files)
-            upstream, out = PgUpstream(tls_ctx=upstream_ctx), Out()
+            recorder_files = make_cert(d)
+            upstream, out = PgUpstream(), Out()
             sock, answer = self.connect(upstream, out, tls_files=recorder_files, ask_tls=True)
             self.assertEqual(answer, b"S")
             self.assertIsInstance(sock, ssl.SSLSocket)
@@ -440,6 +431,7 @@ class Pg(unittest.TestCase):
             sock.sendall(msg("Q", cstr("SELECT 1")))
             until_ready(sock)
             connect, statement = out.records(2)
+        self.assertEqual(upstream.ssl_requests, 0)
         self.assertTrue(connect["tls"])
         self.assertEqual(statement["sql"], "SELECT 1")
         self.assertIn(("Q", cstr("SELECT 1")), upstream.plaintext)

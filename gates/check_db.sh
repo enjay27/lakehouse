@@ -5,7 +5,7 @@
 #   sh check_db.sh HOST DATABASE
 #
 # Logs in as Polaris (PGUSER and PGPASSWORD from the polaris-db Secret, never printed), once
-# with sslmode=require (the recorder accepts TLS and opens TLS to PostgreSQL) and once with
+# with sslmode=require (TLS ends at the recorder, plain TCP to PostgreSQL, ADR-035) and once with
 # sslmode=disable, and in each session writes and reads one row of a temporary table, so the
 # recorder sees a login, statements and a result. Prints `ok` or `FAIL` per mode; exits 1
 # when any failed.

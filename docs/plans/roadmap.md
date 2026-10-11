@@ -135,9 +135,10 @@ source does not matter for operation. What follows is the list they cover.
   Polaris unless the S3 and policy endpoints answer from Polaris's namespace (ADR-029); the
   smoke gate's `check-standins` makes an S3 round trip with Polaris's credentials and checks
   the policy's allowed and refused cases.
-- The recorder (2026-10-11, ADR-034): `gates/recorder/proxy.py`, Python standard library only,
-  forwards every byte unchanged between Polaris's three connections and their services (OPA,
-  SeaweedFS, polaris-pg; PostgreSQL TLS terminated and reopened) and writes one JSON line per
+- The recorder (2026-10-11, ADR-034, ADR-035): `gates/recorder/proxy.py`, Python standard
+  library only, forwards every byte unchanged between Polaris's three connections and their
+  services (OPA, SeaweedFS, polaris-pg; PostgreSQL TLS ends at the recorder, plain TCP to
+  polaris-pg, since TLS on both sides fails SCRAM channel binding) and writes one JSON line per
   exchange, credentials and stored values left out. On the gate `.env` names it for
   `S3_ENDPOINT`, `POLARIS_OPA_URL` and the new `POLARIS_DB_HOST`. `check-standins` adds logins
   as Polaris with and without TLS through it; `check-traffic` matches the records against

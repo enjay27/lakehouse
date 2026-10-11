@@ -8,9 +8,11 @@ Forwarding is transparent: the bytes a client sends are the bytes the upstream r
 header (`Host`, `Authorization`, `x-amz-security-token`) and every PostgreSQL message included,
 so S3 signatures and SCRAM logins work as without the recorder. The streams are parsed on the
 side: a stream the recorder cannot parse loses its records (one `parse_error` record says so),
-never its bytes. The one exception is PostgreSQL TLS, which a recorder cannot read through:
-when a client asks for TLS, the recorder answers with the upstream's answer, and on yes it
-accepts TLS with --tls-cert/--tls-key (generated in the gate job) and opens TLS to PostgreSQL.
+never its bytes. The one exception is PostgreSQL TLS, which a recorder cannot read through
+(ADR-035): the recorder answers a client's SSLRequest itself and never forwards it. With
+--tls-cert/--tls-key (generated in the gate job) it says yes and ends the client's TLS, and
+talks plain TCP to PostgreSQL; without them it says no. TLS on both sides would fail SCRAM
+channel binding.
 
 Records never hold a credential or a stored value (Actions logs are public, ADR-002):
 
@@ -467,9 +469,10 @@ def _read_exact(sock, count):
     return data
 
 
-def pg_negotiate(client, upstream, server_tls, client_tls):
-    """Handles SSLRequest and GSSENCRequest before the startup message. Returns (client,
-    upstream, the first 8 bytes of the next message, whether TLS is on)."""
+def pg_negotiate(client, server_tls):
+    """Answers SSLRequest and GSSENCRequest before the startup message; neither reaches the
+    upstream (ADR-035). Returns (client, the first 8 bytes of the next message, whether the
+    client's side is TLS)."""
     tls = False
     while True:
         first = _read_exact(client, 8)
@@ -478,20 +481,16 @@ def pg_negotiate(client, upstream, server_tls, client_tls):
             client.sendall(b"N")
             continue
         if code != SSL_REQUEST or tls:
-            return client, upstream, first, tls
+            return client, first, tls
         if server_tls is None:  # no certificate: the client goes on without TLS, or leaves
             client.sendall(b"N")
             continue
-        upstream.sendall(first)
-        answer = _read_exact(upstream, 1)
-        client.sendall(answer)
-        if answer == b"S":
-            upstream = client_tls.wrap_socket(upstream)
-            client = server_tls.wrap_socket(client, server_side=True)
-            tls = True
+        client.sendall(b"S")
+        client = server_tls.wrap_socket(client, server_side=True)
+        tls = True
 
 
-def handle(kind, listener, conn, target, server_tls, client_tls, out):
+def handle(kind, listener, conn, target, server_tls, out):
     try:
         upstream = socket.create_connection(target, timeout=10)
         upstream.settimeout(None)
@@ -507,7 +506,7 @@ def handle(kind, listener, conn, target, server_tls, client_tls, out):
         relay(conn, upstream, recorder)
         return
     try:
-        conn, upstream, first, tls = pg_negotiate(conn, upstream, server_tls, client_tls)
+        conn, first, tls = pg_negotiate(conn, server_tls)
     except (OSError, ConnectionError, ssl.SSLError) as e:
         emit({"proto": "pg", "event": "negotiation_failed", "listener": listener, "time": now(),
               "error": str(e)}, out)
@@ -521,7 +520,7 @@ def handle(kind, listener, conn, target, server_tls, client_tls, out):
     relay(conn, upstream, recorder)
 
 
-def serve(kind, listener, port, target, server_tls=None, client_tls=None, out=None,
+def serve(kind, listener, port, target, server_tls=None, out=None,
           host="0.0.0.0", ready=None):
     """Accepts connections on `port` and relays each to `target` in its own thread."""
     sock = socket.create_server((host, port), reuse_port=False)
@@ -530,8 +529,7 @@ def serve(kind, listener, port, target, server_tls=None, client_tls=None, out=No
     while True:
         conn, _ = sock.accept()
         threading.Thread(target=handle, daemon=True,
-                         args=(kind, listener, conn, target, server_tls, client_tls,
-                               out)).start()
+                         args=(kind, listener, conn, target, server_tls, out)).start()
 
 
 def parse_listener(text):
@@ -540,13 +538,10 @@ def parse_listener(text):
     return name, int(port), (host, int(upstream_port))
 
 
-def tls_contexts(cert, key):
+def tls_context(cert, key):
     server = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     server.load_cert_chain(cert, key)
-    client = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    client.check_hostname = False
-    client.verify_mode = ssl.CERT_NONE  # the gate's own PostgreSQL; the client side is ours
-    return server, client
+    return server
 
 
 def main(argv):
@@ -556,15 +551,14 @@ def main(argv):
     parser.add_argument("--tls-cert")
     parser.add_argument("--tls-key")
     args = parser.parse_args(argv)
-    server_tls, client_tls = (tls_contexts(args.tls_cert, args.tls_key)
-                              if args.tls_cert else (None, None))
+    server_tls = tls_context(args.tls_cert, args.tls_key) if args.tls_cert else None
     threads = []
     for kind, specs in (("http", args.http), ("pg", args.pg)):
         for spec in specs:
             name, port, target = parse_listener(spec)
             threads.append(threading.Thread(
                 target=serve, daemon=True,
-                args=(kind, name, port, target, server_tls, client_tls)))
+                args=(kind, name, port, target, server_tls)))
             emit({"event": "listening", "proto": kind, "listener": name, "port": port,
                   "upstream": f"{target[0]}:{target[1]}", "time": now()})
     for t in threads:

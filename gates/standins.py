@@ -9,9 +9,10 @@ never part of a release. Built here as one v1 List that `gate.py standins` appli
   Polaris posts to, docs/contracts/polaris-opa-input.md) from the ConfigMap `opa-policy`.
 - **The recorder** (ADR-034): gates/recorder/proxy.py from the ConfigMap `recorder-code`, on the
   pinned Python image, one listener per connection Polaris makes: 8181 to OPA, 8333 to
-  SeaweedFS, 5432 to polaris-pg's read-write service in NS_CATALOG_POLARIS, with the TLS
-  certificate the gate generates (Secret `recorder-tls`). On the gate, `.env` names the
-  recorder, so every exchange with these three goes through it.
+  SeaweedFS, 5432 to polaris-pg's read-write service in NS_CATALOG_POLARIS. It ends Polaris's
+  TLS with the certificate the gate generates (Secret `recorder-tls`) and talks plain TCP to
+  polaris-pg (ADR-035). On the gate, `.env` names the recorder, so every exchange with these
+  three goes through it.
 
 Images are pinned by digest in gates/pins.json (`standin_images`). Everything lives in
 `NS_STANDINS`; credentials reach the cluster only inside the Secret, on stdin.
