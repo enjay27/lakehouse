@@ -8,8 +8,9 @@ against the new version's source (ADR-009).
 **Source:** `apache/polaris` tag `apache-polaris-1.6.0` (commit `dd306009d81a`), read on
 2026-10-11. Paths below are relative to that tag; `OPA/` is
 `extensions/auth/opa/impl/src/main/java/org/apache/polaris/extension/auth/opa/`. Everything
-here was read in source and tests, not yet seen on the wire; the gate's recorder (ADR-034)
-will check it against a running Polaris.
+here was read in source and tests. The rows marked *seen* were also recorded on the wire
+(ADR-034), from Polaris 1.6.0 serving PyIceberg 0.12.0 (`gates/iceberg/smoke.py`); the smoke
+gate's `gates/expectations/iceberg.json` holds the recorder to them.
 
 **Status upstream:** Beta (`OPA/OpaAuthorizationConfig.java:35-37`); Polaris logs a
 production-readiness warning for it. Tests say the input will change when Polaris moves to
@@ -70,8 +71,15 @@ code in three ways: it shows `TABLE` (the code sends `TABLE_LIKE`), no `ROOT` pa
 | List catalogs | `LIST_CATALOGS` | `ROOT` |
 | Create a namespace | `CREATE_NAMESPACE` | the parent (the catalog, or the parent namespace); the new name is not sent |
 | List namespaces | `LIST_NAMESPACES` | the catalog, or the parent namespace |
-| Create a table | `CREATE_TABLE_DIRECT` (`..._WITH_WRITE_DELEGATION` with credential vending; `CREATE_TABLE_STAGED...` for a staged create) | the namespace; the table's name is not sent |
-| Load a table | `LOAD_TABLE`; with credential vending `LOAD_TABLE_WITH_WRITE_DELEGATION`, and on a deny a second request, `LOAD_TABLE_WITH_READ_DELEGATION` | the `TABLE_LIKE` entity |
+| Create a table | `CREATE_TABLE_DIRECT` (`..._WITH_WRITE_DELEGATION` with credential vending; `CREATE_TABLE_STAGED...` for a staged create); *seen*, both | the namespace; the table's name is not sent |
+| Load a table | `LOAD_TABLE`; with credential vending `LOAD_TABLE_WITH_WRITE_DELEGATION`, and on a deny a second request, `LOAD_TABLE_WITH_READ_DELEGATION`; *seen*, all three | the `TABLE_LIKE` entity |
+| Append to a table (PyIceberg's commit) | `ADD_TABLE_SNAPSHOT`, then `SET_TABLE_SNAPSHOT_REF`; *seen*. Never `UPDATE_TABLE` | the `TABLE_LIKE` entity |
+| Drop a table | `DROP_TABLE_WITHOUT_PURGE`; *seen* | the `TABLE_LIKE` entity |
+| Rotate a principal's credentials, by root | `ROTATE_CREDENTIALS`; *seen* | `ROOT` |
+
+A client that sends `X-Iceberg-Access-Delegation: vended-credentials` (PyIceberg's default) to
+a catalog without STS is allowed by the policy endpoint and then refused by Polaris itself:
+see [polaris-s3-without-sts.md](polaris-s3-without-sts.md).
 
 ## The answer
 

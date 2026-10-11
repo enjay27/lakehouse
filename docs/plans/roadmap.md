@@ -166,9 +166,17 @@ source does not matter for operation. What follows is the list they cover.
   [38125705407](https://github.com/enjay27/lakehouse/actions/runs/38125705407), smoke
   [38125706002](https://github.com/enjay27/lakehouse/actions/runs/38125706002) (2 replicas on
   2 nodes; the token accepted by both pods; 142 records; all 21 expectations ok).
-- A catalog on the S3 endpoint (SeaweedFS stand-in on the gate, ADR-031).
-- Smoke tests through the Iceberg REST API, as an ordinary principal: create a namespace and
-  a table, write, read, and check that a principal without a grant is refused.
+- A catalog on the S3 endpoint and the Iceberg REST smoke tests (2026-10-11, ADR-026,
+  ADR-031): `gates/iceberg/smoke.py` runs PyIceberg 0.12.0 (Kade's choice: the target
+  environments' Python clients use it; pinned by hash) as the principal gate_smoke. Root
+  creates gate_catalog on S3 with `stsUnavailable` and no key in its properties; PyIceberg,
+  with its own S3 key (Secret smoke-s3) and no vended credentials, creates a table, appends
+  rows and reads them back; the policy refuses gate_smoke a drop and gate_other everything.
+  Polaris writes table metadata with its own key, which reaches the AWS SDK through
+  `extraEnv` (Kade's choice). What Polaris 1.6.0 does on S3 without STS, and why a key in a
+  catalog's properties leaks into every table's metadata:
+  `docs/contracts/polaris-s3-without-sts.md`. `iceberg.json` holds the recorder to the S3
+  writes of each client and to the policy's answers.
 - The console from `apache/polaris-tools`. If no image is published, it is built from a
   pinned commit in the job (ADR-017).
 - The log batch (ADR-014) and its output format for Fluent Bit (ADR-024). A
@@ -191,6 +199,7 @@ source does not matter for operation. What follows is the list they cover.
   caller's protocol and a principal like the one it uses in production. Classes:
   - the catalog gateway: the management API;
   - StarRocks' Iceberg client: the catalog API, one principal per user;
+  - PyIceberg, the Python clients' library (the smoke tests already use 0.12.0);
   - Trino, through its Iceberg REST catalog connector;
   - Spark and Flink ETL jobs writing Iceberg tables;
   - a Kafka Connect Iceberg sink on the ETL Kafka;
