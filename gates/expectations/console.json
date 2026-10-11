@@ -1,0 +1,50 @@
+{
+  "_comment": "What the recorder must have seen after gate.py check-console (gates/console/check.py): gate_maintainer signing in through the console's origin, Polaris 1.6.0 asking the policy endpoint, which lets it read and refuses it a write (ADR-026, ADR-028, ADR-034). The browser's own requests reach Polaris directly, so the recorder sees only Polaris's questions to the policy endpoint, asked by its `Apache-HttpClient/` client. Read with standins.json, whose must-nots hold for every record. Matched by gates/traffic.py; checked in a step of its own, since the console never blocks (ADR-028).",
+  "expectations": [
+    {
+      "name": "OPA allowed gate_maintainer to list the catalogs, asked by Polaris",
+      "must": "exist",
+      "match": {
+        "proto": "http",
+        "listener": "opa",
+        "method": "POST",
+        "status": 200,
+        "request_headers.user-agent": {
+          "regex": "^Apache-HttpClient/"
+        },
+        "request_body.json.input.actor.principal": "gate_maintainer",
+        "request_body.json.input.action": "LIST_CATALOGS",
+        "response_body.json.result.allow": true
+      }
+    },
+    {
+      "name": "OPA refused gate_maintainer creating a catalog, asked by Polaris",
+      "must": "exist",
+      "match": {
+        "proto": "http",
+        "listener": "opa",
+        "method": "POST",
+        "status": 200,
+        "request_headers.user-agent": {
+          "regex": "^Apache-HttpClient/"
+        },
+        "request_body.json.input.actor.principal": "gate_maintainer",
+        "request_body.json.input.action": "CREATE_CATALOG",
+        "response_body.json.result.allow": false
+      }
+    },
+    {
+      "name": "OPA never allowed gate_maintainer anything but a read",
+      "must": "not_exist",
+      "match": {
+        "proto": "http",
+        "listener": "opa",
+        "request_body.json.input.actor.principal": "gate_maintainer",
+        "request_body.json.input.action": {
+          "regex": "^(?!(LIST_CATALOGS|GET_CATALOG|LIST_NAMESPACES|LOAD_NAMESPACE_METADATA|LIST_TABLES|LOAD_TABLE|LIST_VIEWS|LOAD_VIEW)$)"
+        },
+        "response_body.json.result.allow": true
+      }
+    }
+  ]
+}

@@ -8,7 +8,9 @@
 # say and gives root a token every replica accepts (ADR-016, ADR-026), PyIceberg as an ordinary
 # principal writes a table into a catalog on the S3 endpoint and reads it back while the policy
 # refuses what it is not granted (ADR-026, ADR-031), and the recorder saw those exchanges and
-# none it must not (ADR-034). The release gate
+# none it must not (ADR-034). The console, built from its pinned commit, is checked last: a
+# maintainer signs in as the browser does and may only read; those steps report, never block
+# (ADR-028). The release gate
 # calls it twice on every PR into rc, upgrade and fresh (ADR-033). Not a PR check into main,
 # so auto-merge.yml does not list it.
 name: Smoke
@@ -103,6 +105,19 @@ jobs:
         run: |
           set -euo pipefail
           python3 gates/gate.py check-traffic gates/expectations/standins.json gates/expectations/polaris.json gates/expectations/iceberg.json | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # The console is a maintainer tool: its checks are reported, never blocking (ADR-028).
+      - name: A maintainer signs in to the console as the browser does; the policy lets it read only (ADR-026, ADR-028)
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python3 gates/gate.py check-console | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: The recorder saw the policy endpoint answer the console's maintainer (ADR-028, ADR-034)
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python3 gates/gate.py check-traffic gates/expectations/console.json | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: State of the cluster on failure
         if: failure()

@@ -145,5 +145,33 @@ class VendedCredentials(unittest.TestCase):
         self.assertTrue(self.failed(self.delegation("Apache-HttpClient/5.5 (Java/21.0.8)")))
 
 
+
+class Maintainer(unittest.TestCase):
+    """console.json's must-nots: gate_maintainer is never allowed anything but a read."""
+
+    def decision(self, action, allow):
+        return {"proto": "http", "listener": "opa", "method": "POST", "status": 200,
+                "request_headers": {"user-agent": "Apache-HttpClient/5.5 (Java/21.0.8)"},
+                "request_body": {"json": {"input": {"actor": {"principal": "gate_maintainer"},
+                                                    "action": action}}},
+                "response_body": {"json": {"result": {"allow": allow}}}}
+
+    def failed(self, *recorded):
+        expectations = traffic.load(os.path.join(HERE, "expectations", "console.json"))
+        must_nots = [e for e in expectations if e["must"] == "not_exist"]
+        problems, _ = traffic.check(list(recorded), must_nots)
+        return problems
+
+    def test_reads_allowed_and_a_write_refused_pass(self):
+        self.assertEqual(self.failed(self.decision("LIST_CATALOGS", True),
+                                     self.decision("LOAD_TABLE", True),
+                                     self.decision("CREATE_CATALOG", False)), [])
+
+    def test_a_write_allowed_fails(self):
+        for action in ("CREATE_CATALOG", "DROP_TABLE_WITHOUT_PURGE",
+                       "LOAD_TABLE_WITH_READ_DELEGATION", "LIST_CATALOGS_AND_MORE"):
+            with self.subTest(action=action):
+                self.assertTrue(self.failed(self.decision(action, True)))
+
 if __name__ == "__main__":
     unittest.main()

@@ -570,6 +570,44 @@ class CheckIceberg(unittest.TestCase):
                          gate.load_pins()["standin_images"]["recorder"]["image"])
 
 
+CONSOLE_ENV = {**STANDIN_ENV, "POLARIS_CONSOLE_ENABLED": "true",
+               "POLARIS_CONSOLE_ORIGIN": "http://polaris-console.catalog-polaris.svc.cluster.local:8080",
+               "POLARIS_CONSOLE_API_URL": "http://polaris.catalog-polaris.svc.cluster.local:8181"}
+
+
+class CheckConsole(unittest.TestCase):
+    def command(self):
+        return gate.check_console_command(CONSOLE_ENV, PYTHON, name="console-test")
+
+    def test_a_short_lived_pod_on_the_pinned_python_reads_the_check_on_stdin(self):
+        argv = self.command()
+        self.assertEqual(argv[:7], ["kubectl", "--context", gate.CONTEXT, "-n",
+                                    "catalog-polaris", "run", "console-test"])
+        for flag in ("--rm", "-i", "--restart=Never", f"--image={PYTHON}",
+                     "--override-type=strategic"):
+            self.assertIn(flag, argv)
+        self.assertEqual(argv[argv.index("--command") + 1:], [
+            "--", "python3", "-", CONSOLE_ENV["POLARIS_CONSOLE_ORIGIN"],
+            CONSOLE_ENV["POLARIS_CONSOLE_API_URL"], "POLARIS"])
+
+    def test_roots_credentials_come_from_their_secret_never_the_command_line(self):
+        argv = self.command()
+        overrides = json.loads(argv[argv.index("--overrides") + 1])
+        (container,) = overrides["spec"]["containers"]
+        self.assertEqual(container["name"], "console-test")
+        self.assertIs(container["stdin"], True)
+        refs = {e["name"]: e["valueFrom"]["secretKeyRef"] for e in container["env"]
+                if "valueFrom" in e}
+        self.assertEqual(refs, {
+            "ROOT_CLIENT_ID": {"name": "polaris-root", "key": "clientId"},
+            "ROOT_CLIENT_SECRET": {"name": "polaris-root", "key": "clientSecret"}})
+
+    def test_a_console_that_is_not_enabled_is_not_checked(self):
+        with self.assertRaises(SystemExit):
+            gate.check_console_command({**CONSOLE_ENV, "POLARIS_CONSOLE_ENABLED": "false"},
+                                       PYTHON, name="console-test")
+
+
 class Standins(unittest.TestCase):
     def test_applies_the_list_server_side_then_waits_for_both_deployments(self):
         apply, wait = gate.standins_commands(STANDIN_ENV)

@@ -11,6 +11,9 @@
 #   Polaris 1.6.0 (gates/iceberg/smoke.py). An append is ADD_TABLE_SNAPSHOT and
 #   SET_TABLE_SNAPSHOT_REF; no *_WITH_*_DELEGATION, since the smoke tests ask for no vended
 #   credentials on a catalog without STS. Dropping a table stays refused.
+# - gate_maintainer, the console's maintainer on the gate (ADR-028), may only read, in any
+#   catalog: list and load catalogs, namespaces, tables and views (Polaris 1.6.0's
+#   PolarisAuthorizableOperation). No write, no grant, no *_WITH_*_DELEGATION.
 # - Anything else is refused.
 package polaris.authz
 
@@ -27,6 +30,14 @@ allow if {
 	count(input.resource.targets) > 0
 	every target in input.resource.targets {
 		in_catalog(target, "gate_catalog")
+	}
+}
+
+allow if {
+	input.actor.principal == "gate_maintainer"
+	input.action in {
+		"LIST_CATALOGS", "GET_CATALOG", "LIST_NAMESPACES", "LOAD_NAMESPACE_METADATA",
+		"LIST_TABLES", "LOAD_TABLE", "LIST_VIEWS", "LOAD_VIEW",
 	}
 }
 
