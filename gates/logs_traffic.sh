@@ -17,6 +17,11 @@
 # audit policy counts, keeps or drops each as gates/gate.py logs_request_ids says
 # (docs/contracts/polaris-logs.md). Neither the credentials nor the token are printed. Prints
 # one line per request, `ok` or `FAIL`; exits 1 when any failed.
+#
+# With LOGS_DOWN_ENDPOINT set (Create Fixtures, ADR-040; never on smoke, whose recorder must
+# see no 5xx), it also makes CATALOG_down on that S3 endpoint, which does not answer
+# (PREFIX-setup-down-catalog), and its namespace `logs`; then each pod makes a table there
+# (-failed-1), which must answer 500 and write an ERROR line carrying `exception`.
 set -u
 api=$1 realm=$2 count=$3 prefix=$4 catalog=$5 s3=$6 region=$7 bucket=$8
 shift 8
@@ -48,14 +53,33 @@ body=$(curl -s --max-time 20 -H "Polaris-Realm: $realm" \
 token=$(printf '%s' "$body" | sed -n 's/.*"access_token" *: *"\([^"]*\)".*/\1/p')
 if [ -z "$token" ]; then echo "FAIL root got no token in realm $realm"; exit 1; fi
 
-location="s3://$bucket/$catalog"
+# catalog_body NAME ENDPOINT: a catalog on the bucket, its S3 endpoint ENDPOINT.
+catalog_body() {
+  cb_location="s3://$bucket/$1"
+  printf '%s' "{\"catalog\":{\"type\":\"INTERNAL\",\"name\":\"$1\",\
+\"properties\":{\"default-base-location\":\"$cb_location\"},\
+\"storageConfigInfo\":{\"storageType\":\"S3\",\"allowedLocations\":[\"$cb_location\"],\
+\"endpoint\":\"$2\",\"region\":\"$region\",\"pathStyleAccess\":true,\"stsUnavailable\":true}}}"
+}
+
+# table_body ID: a table with a schema, named for its request ID.
+table_body() {
+  printf '%s' "{\"name\":\"$(printf '%s' "$1" | tr -- - _)\",\"schema\":{\"type\":\"struct\",\
+\"schema-id\":0,\"fields\":[{\"id\":1,\"name\":\"id\",\"required\":false,\"type\":\"long\"}]}}"
+}
+
 ask "$prefix-setup-catalog" "" "201|409" POST "$api/api/management/v1/catalogs" \
-  "{\"catalog\":{\"type\":\"INTERNAL\",\"name\":\"$catalog\",\
-\"properties\":{\"default-base-location\":\"$location\"},\
-\"storageConfigInfo\":{\"storageType\":\"S3\",\"allowedLocations\":[\"$location\"],\
-\"endpoint\":\"$s3\",\"region\":\"$region\",\"pathStyleAccess\":true,\"stsUnavailable\":true}}}"
+  "$(catalog_body "$catalog" "$s3")"
 space="api/catalog/v1/$catalog/namespaces"
 ask "$prefix-setup-namespace" "" "200|409" POST "$api/$space" '{"namespace":["logs"]}'
+down=${LOGS_DOWN_ENDPOINT:-}
+if [ -n "$down" ]; then
+  ask "$prefix-setup-down-catalog" "" "201|409" POST "$api/api/management/v1/catalogs" \
+    "$(catalog_body "${catalog}_down" "$down")"
+  down_space="api/catalog/v1/${catalog}_down/namespaces"
+  ask "$prefix-setup-down-namespace" "" "200|409" POST "$api/$down_space" \
+    '{"namespace":["logs"]}'
+fi
 [ $fail = 0 ] || exit 1
 
 [ $# -ge 2 ] || { echo "FAIL no pod to ask"; exit 1; }
@@ -82,8 +106,10 @@ while [ $# -ge 2 ]; do
     "{\"name\":\"$(printf '%s' "$id" | tr -- - _)\"}"
   ask "$prefix-$name-missing-1" "$name " 404 GET "$url/$space/logs/tables/absent"
   id="$prefix-$name-commit-1"
-  ask "$id" "$name " 200 POST "$url/$space/logs/tables" "{\"name\":\"$(printf '%s' "$id" | \
-tr -- - _)\",\"schema\":{\"type\":\"struct\",\"schema-id\":0,\"fields\":[{\"id\":1,\
-\"name\":\"id\",\"required\":false,\"type\":\"long\"}]}}"
+  ask "$id" "$name " 200 POST "$url/$space/logs/tables" "$(table_body "$id")"
+  if [ -n "$down" ]; then
+    id="$prefix-$name-failed-1"
+    ask "$id" "$name " 500 POST "$url/$down_space/logs/tables" "$(table_body "$id")"
+  fi
 done
 exit $fail
