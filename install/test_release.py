@@ -206,20 +206,51 @@ class Steps(unittest.TestCase):
                 return claim(argv, stdin)
             if "polaris-root" in argv or "run" in argv:
                 return boot(argv, stdin)
+            if release.BATCH_CHART in argv or "cronjob/polaris-log-batch" in argv:
+                return batch(argv, stdin)
             if "polaris-s3" in argv or "rollout" in argv or release.POLARIS_CHART in argv:
                 return pol(argv, stdin)
             return pg(argv)
+        batch = FakeBatch()
         problems, notes = release.install({**BOOTSTRAP_ENV, **LOGS_ENV}, run, ["1.30"],
                                           dry_run=False)
         self.assertEqual(problems, [])
         self.assertEqual([n.split(":")[0] for n in notes],
-                         ["Step 0"] + ["Step 1"] * 5 + ["Step 2"])
+                         ["Step 0"] + ["Step 1"] * 5 + ["Step 2"] * 2)
         self.assertIn("polaris-pg", notes[1])
         self.assertIn("answer", notes[2])
         self.assertIn("bootstrapped", notes[3])
         self.assertIn("polaris-logs", notes[4])
         self.assertIn("deployment/polaris", notes[5])
-        self.assertIn("console is not enabled", notes[6])
+        self.assertIn("cronjob/polaris-log-batch", notes[6])
+        self.assertIn("console is not enabled", notes[7])
+
+    def test_a_failed_batch_stops_the_install_before_the_console(self):
+        step0, pg, endpoints = FakeKubectl(), FakeCalls(), FakeRun()
+        boot, pol, claim = FakeBootstrap(), FakePolaris(), FakeClaim()
+        batch, console = FakeBatch(helm=(1, "image tag invalid")), FakeConsole()
+
+        def run(argv, stdin=None):
+            if "crd" in argv or "deployments" in argv:
+                return step0(argv)
+            if "endpoint-check" in " ".join(argv):
+                return endpoints(argv, stdin)
+            if "storageclass" in argv or "apply" in argv:
+                return claim(argv, stdin)
+            if "polaris-root" in argv or "run" in argv:
+                return boot(argv, stdin)
+            if release.BATCH_CHART in argv or "cronjob/polaris-log-batch" in argv:
+                return batch(argv, stdin)
+            if release.CONSOLE_CHART in argv or "deployment/polaris-console" in argv:
+                return console(argv, stdin)
+            if "polaris-s3" in argv or "rollout" in argv or release.POLARIS_CHART in argv:
+                return pol(argv, stdin)
+            return pg(argv)
+        problems, notes = release.install({**BOOTSTRAP_ENV, **LOGS_ENV, **CONSOLE_ENV}, run,
+                                          ["1.30"], dry_run=False)
+        self.assertIn("image tag invalid", "\n".join(problems))
+        self.assertEqual(console.calls, [])
+        self.assertIn("deployment/polaris", notes[-1])
 
     def test_a_missing_storage_class_stops_before_polaris(self):
         step0, pg, endpoints = FakeKubectl(), FakeCalls(), FakeRun()
@@ -257,6 +288,8 @@ class Steps(unittest.TestCase):
                 return claim(argv, stdin)
             if "polaris-root" in argv or "run" in argv:
                 return boot(argv, stdin)
+            if release.BATCH_CHART in argv or "cronjob/polaris-log-batch" in argv:
+                return FakeBatch()(argv, stdin)
             if release.CONSOLE_CHART in argv or "deployment/polaris-console" in argv:
                 return console(argv, stdin)
             if "polaris-s3" in argv or "rollout" in argv or release.POLARIS_CHART in argv:
@@ -812,6 +845,74 @@ class Console(unittest.TestCase):
         self.assertIn("schema invalid", "\n".join(problems))
         problems, _ = self.step(FakeConsole(rollout=(1, "timed out waiting")))
         self.assertIn("timed out waiting", "\n".join(problems))
+
+
+class FakeBatch:
+    """Answers the batch step's helm and its read of the CronJob's image; records every call."""
+
+    def __init__(self, helm=(0, ""), image=None):
+        self.helm, self.calls, self.values = helm, [], []
+        self.image = release.batch_image() if image is None else image
+
+    def __call__(self, argv, stdin=None):
+        self.calls.append(argv)
+        if argv[0] == "helm":
+            files = [argv[i + 1] for i, a in enumerate(argv) if a == "-f"]
+            with open(files[-1], encoding="utf-8") as f:
+                self.values.append(json.load(f))
+            return self.helm
+        if "cronjob/polaris-log-batch" in argv:
+            return (0, self.image) if self.image else (1, "NotFound")
+        raise AssertionError(f"unexpected call {argv}")
+
+
+class LogBatch(unittest.TestCase):
+    """ADR-036, ADR-037: step 2 installs the batch's CronJob; a failure stops the install."""
+
+    def step(self, calls, dry_run=False):
+        return release.log_batch(BOOTSTRAP_ENV, calls, dry_run=dry_run)
+
+    def test_installs_the_chart_with_the_image_built_from_this_checkout(self):
+        calls = FakeBatch()
+        problems, notes = self.step(calls)
+        self.assertEqual(problems, [])
+        self.assertEqual([c[0] for c in calls.calls], ["helm", "kubectl"])
+        helm = calls.calls[0]
+        self.assertEqual(helm[:3], ["helm", "--kube-context", "kind-lakehouse-gate"])
+        self.assertEqual(helm[helm.index("-n") + 1], "catalog-polaris")
+        self.assertEqual(helm[helm.index("upgrade"):helm.index("upgrade") + 4],
+                         ["upgrade", "--install", "polaris-log-batch", release.BATCH_CHART])
+        self.assertEqual(calls.values, [release.batch_values()])
+        files = [helm[i + 1] for i, a in enumerate(helm) if a == "-f"]
+        self.assertFalse(os.path.exists(files[0]), "the generated values file is left behind")
+        self.assertIn(f"Step 2: cronjob/polaris-log-batch in catalog-polaris runs "
+                      f"{release.batch_image()}", "\n".join(notes))
+
+    def test_the_cronjob_is_read_back_in_its_namespace(self):
+        calls = FakeBatch()
+        self.step(calls)
+        read = calls.calls[1]
+        self.assertEqual(read[1:3], ["--context", "kind-lakehouse-gate"])
+        self.assertEqual(read[read.index("-n") + 1], "catalog-polaris")
+        self.assertIn("cronjob/polaris-log-batch", read)
+
+    def test_a_cronjob_with_another_image_stops(self):
+        problems, _ = self.step(FakeBatch(image="lakehouse/polaris-log-batch:000000000000"))
+        self.assertIn("000000000000", "\n".join(problems))
+
+    def test_a_failed_helm_or_a_missing_cronjob_stops_with_its_error(self):
+        problems, _ = self.step(FakeBatch(helm=(1, "schema invalid")))
+        self.assertIn("schema invalid", "\n".join(problems))
+        problems, _ = self.step(FakeBatch(image=""))
+        self.assertIn("NotFound", "\n".join(problems))
+
+    def test_dry_run_is_server_side_and_reads_nothing_back(self):
+        calls = FakeBatch()
+        problems, notes = self.step(calls, dry_run=True)
+        self.assertEqual(problems, [])
+        self.assertIn("--dry-run=server", calls.calls[0])
+        self.assertEqual(len(calls.calls), 1)
+        self.assertIn("dry-run", "\n".join(notes))
 
 
 class Cors(unittest.TestCase):

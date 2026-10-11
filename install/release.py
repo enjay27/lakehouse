@@ -21,10 +21,14 @@
       from `.env` (the database host, the policy endpoint, and the console's origin, allowed
       by CORS only while the console is enabled), waited on until rolled out. Its pods write
       their log files to the claim.
-2. The console, when `POLARIS_CONSOLE_ENABLED=true` (ADR-028): charts/polaris-console with its
-   values-lakehouse.yaml and the URL at which the browser reaches Polaris, waited on until
-   rolled out. A maintainer tool, never part of how Polaris operates: its problems are printed
-   and the install still passes. The log batch joins this step later (ADR-029).
+2. After every service of step 1 (ADR-029, ADR-037):
+   a. The log batch (ADR-036): charts/polaris-log-batch with the image built from this
+      checkout (batch_image), then the CronJob read back to check it runs that image. Its
+      failure stops the install.
+   b. The console, when `POLARIS_CONSOLE_ENABLED=true` (ADR-028): charts/polaris-console with
+      its values-lakehouse.yaml and the URL at which the browser reaches Polaris, waited on
+      until rolled out. A maintainer tool, never part of how Polaris operates: its problems
+      are printed and the install still passes.
 
 With --dry-run, the helm upgrades are server-side dry-runs, the bootstrap does not run and
 nothing waits: the dry-run gate (ADR-018).
@@ -391,6 +395,35 @@ def polaris(env, run, dry_run=False):
     return [], [f"Step 1: deployment/{POLARIS} in {namespace} rolled out."]
 
 
+def log_batch(env, run, dry_run=False):
+    """Step 2, first: the log batch's CronJob from charts/polaris-log-batch with the image built
+    from this checkout, then read back to check it runs that image (ADR-036). A failure stops
+    the install (ADR-037). Returns (problems, notes)."""
+    namespace, context = env["NS_CATALOG_POLARIS"], env["KUBE_CONTEXT"]
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+        json.dump(batch_values(), f)
+    try:
+        helm = ["helm", "--kube-context", context, "-n", namespace, "upgrade", "--install",
+                BATCH, BATCH_CHART, "-f", f.name]
+        code, out = run(helm + (["--dry-run=server"] if dry_run else []))
+    finally:
+        os.unlink(f.name)
+    if code != 0:
+        return [f"helm upgrade {BATCH} in {namespace} failed: {out.strip()}"], []
+    if dry_run:
+        return [], [f"Step 2: the log batch in {namespace}, server-side dry-run passed."]
+    code, out = run(["kubectl", "--context", context, "-n", namespace, "get",
+                     f"cronjob/{BATCH}", "-o",
+                     "jsonpath={.spec.jobTemplate.spec.template.spec.containers[0].image}"])
+    if code != 0:
+        return [f"cronjob/{BATCH} in {namespace} cannot be read: {out.strip()}"], []
+    image = out.strip()
+    if image != batch_image():
+        return [f"cronjob/{BATCH} in {namespace} runs {image or 'no image'}, "
+                f"expected {batch_image()}"], []
+    return [], [f"Step 2: cronjob/{BATCH} in {namespace} runs {image}."]
+
+
 def console(env, run, dry_run=False):
     """Step 2: the console, when enabled (ADR-028). Returns (problems, notes); no call is made
     while it is off or its settings are incomplete."""
@@ -426,14 +459,15 @@ def console(env, run, dry_run=False):
 
 def install(env, run, supported, dry_run):
     """Every step in order; the first step with problems stops the rest. The console's
-    problems are notes: it never fails a release (ADR-028)."""
+    problems are notes: it never fails a release (ADR-028); the batch's stop it (ADR-037)."""
     notes = []
     for step in (lambda: check_preconditions(env, run, supported),
                  lambda: polaris_postgres(env, run, dry_run),
                  lambda: endpoints_answer(env, run),
                  lambda: bootstrap(env, run, dry_run=dry_run),
                  lambda: logs_claim(env, run, dry_run),
-                 lambda: polaris(env, run, dry_run)):
+                 lambda: polaris(env, run, dry_run),
+                 lambda: log_batch(env, run, dry_run)):
         problems, more = step()
         notes += more
         if problems:
