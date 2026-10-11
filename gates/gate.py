@@ -41,11 +41,16 @@
                   replicas run on different nodes (ADR-016), then runs gates/check_polaris.sh
                   in a short-lived curl pod: ready, a token for root, and each pod accepting
                   it (ADR-026).
+  check-iceberg   runs gates/iceberg/smoke.py in a short-lived pod on the pinned Python image,
+                  mounted with its hashed requirements from the ConfigMap iceberg-smoke: PyIceberg
+                  as gate_smoke, with the smoke tests' own S3 key (Secret smoke-s3), writes a
+                  table into gate_catalog on the S3 endpoint and reads it back, and the policy
+                  endpoint refuses what the gate's policy does not grant (ADR-026, ADR-031).
 
 Every kubectl and helm call names the gate's context, and a namespace where the object has
 one. Nothing here reaches any cluster but the kind cluster it creates (ADR-017).
 
-Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | check-polaris-pg | check-polaris
+Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | check-polaris-pg | check-polaris | check-iceberg
 """
 
 import hashlib
@@ -87,6 +92,8 @@ POLARIS_S3_ENV = {"AWS_ACCESS_KEY_ID": "accessKeyId", "AWS_SECRET_ACCESS_KEY": "
 # Polaris's pods and ports, as charts/polaris renders them.
 POLARIS_POD_LABELS = "app.kubernetes.io/name=polaris,app.kubernetes.io/instance=polaris"
 POLARIS_API_PORT, POLARIS_MGMT_PORT = 8181, 8182
+# The catalog the smoke tests create and the gate's policy names (gates/opa/policy.rego).
+ICEBERG_CATALOG = "gate_catalog"
 
 
 def load_pins(path=os.path.join(HERE, "pins.json")):
@@ -406,6 +413,51 @@ def check_polaris_command(env, image, name, pod_urls):
             *pod_urls]
 
 
+def smoke_python_image(pins):
+    """The smoke tests' Python: the pinned image the recorder already runs on."""
+    return pins["standin_images"]["recorder"]["image"]
+
+
+def iceberg_configmap(env, script, requirements):
+    """gates/iceberg/smoke.py and its hashed requirements, for the smoke pod to mount."""
+    return {"apiVersion": "v1", "kind": "ConfigMap",
+            "metadata": {"name": "iceberg-smoke", "namespace": env["NS_CATALOG_POLARIS"]},
+            "data": {"smoke.py": script, "requirements.txt": requirements}}
+
+
+def check_iceberg_commands(env, image, name):
+    """Apply the ConfigMap (on stdin), then the pod that installs PyIceberg by hash and runs
+    smoke.py as the smoke tests' principal, with root's credentials and the smoke S3 key."""
+    ns = env["NS_CATALOG_POLARIS"]
+    creds = [{"name": var, "valueFrom": {"secretKeyRef": {"name": secret, "key": key}}}
+             for var, secret, key in (
+                 ("ROOT_CLIENT_ID", release.POLARIS_ROOT_SECRET, "clientId"),
+                 ("ROOT_CLIENT_SECRET", release.POLARIS_ROOT_SECRET, "clientSecret"),
+                 ("S3_ACCESS_KEY_ID", "smoke-s3", "accessKeyId"),
+                 ("S3_SECRET_ACCESS_KEY", "smoke-s3", "secretAccessKey"))]
+    settings = [{"name": var, "value": value} for var, value in (
+        ("PYTHONUNBUFFERED", "1"), ("PIP_DISABLE_PIP_VERSION_CHECK", "1"),
+        ("PIP_NO_CACHE_DIR", "1"), ("PIP_ROOT_USER_ACTION", "ignore"))]
+    overrides = {"spec": {
+        "containers": [{"name": name, "image": image, "env": creds + settings,
+                        "volumeMounts": [{"name": "code", "mountPath": "/smoke",
+                                          "readOnly": True}]}],
+        "volumes": [{"name": "code", "configMap": {"name": "iceberg-smoke"}}]}}
+    install = ("pip install --quiet --require-hashes --only-binary :all: "
+               "-r /smoke/requirements.txt && exec python3 /smoke/smoke.py \"$@\"")
+    return [
+        ["kubectl", "--context", CONTEXT, "-n", ns, "apply", "--server-side",
+         "--field-manager=gate", "-f", "-"],
+        ["kubectl", "--context", CONTEXT, "-n", ns, "run", name, f"--image={image}",
+         "--restart=Never", "--rm", "--attach", "--quiet", "--pod-running-timeout=3m",
+         "--override-type=strategic", "--overrides", json.dumps(overrides),
+         "--command", "--", "sh", "-c", install, "smoke",
+         f"http://{release.POLARIS}:{POLARIS_API_PORT}", release.POLARIS_REALM,
+         ICEBERG_CATALOG, env["S3_ENDPOINT"], env["S3_REGION"],
+         env["POLARIS_WAREHOUSE_BUCKET"]],
+    ]
+
+
 def _git(repo, *args):
     return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, check=False)
 
@@ -516,6 +568,16 @@ def main(argv):
                                         polaris_pod_urls(answers[2]))
         failed = subprocess.run(command, input=script, text=True, check=False).returncode
         return 1 if problems or failed else 0
+    if argv[1:] == ["check-iceberg"]:
+        env = release.load_env(ROOT, os.environ)
+        with open(os.path.join(HERE, "iceberg", "smoke.py"), encoding="utf-8") as f, \
+                open(os.path.join(HERE, "iceberg", "requirements.txt"), encoding="utf-8") as r:
+            manifest = json.dumps(iceberg_configmap(env, f.read(), r.read()))
+        apply, pod = check_iceberg_commands(env, smoke_python_image(pins),
+                                            f"check-iceberg-{os.getpid()}")
+        print("+ " + " ".join(apply) + "  (the ConfigMap iceberg-smoke on stdin)", flush=True)
+        subprocess.run(apply, input=manifest, text=True, check=True)
+        return subprocess.run(pod, check=False).returncode
     print(__doc__.strip().splitlines()[-1], file=sys.stderr)
     return 2
 

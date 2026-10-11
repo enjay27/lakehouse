@@ -4,6 +4,7 @@ import contextlib
 import hashlib
 import io
 import json
+import re
 import os
 import subprocess
 import sys
@@ -485,6 +486,76 @@ STANDIN_ENV = {"NS_STANDINS": "standins", "NS_CATALOG_POLARIS": "catalog-polaris
                "POLARIS_OPA_URL": "http://opa.standins.svc.cluster.local:8181/v1/data/polaris/authz",
                "POLARIS_DB_HOST": "recorder.standins.svc.cluster.local"}
 CURL = "curlimages/curl:8.22.0@sha256:" + "c" * 64
+
+
+PYTHON = "python:3.12.14-slim@sha256:" + "f" * 64
+
+
+class CheckIceberg(unittest.TestCase):
+    def commands(self):
+        return gate.check_iceberg_commands(STANDIN_ENV, PYTHON, name="iceberg-test")
+
+    def test_the_configmap_holds_the_script_and_its_requirements_in_polaris_namespace(self):
+        manifest = gate.iceberg_configmap(STANDIN_ENV, "# smoke.py\n", "pyiceberg==0.12.0\n")
+        self.assertEqual(manifest["kind"], "ConfigMap")
+        self.assertEqual(manifest["metadata"]["name"], "iceberg-smoke")
+        self.assertEqual(manifest["metadata"]["namespace"], "catalog-polaris")
+        self.assertEqual(manifest["data"], {"smoke.py": "# smoke.py\n",
+                                            "requirements.txt": "pyiceberg==0.12.0\n"})
+        apply, _ = self.commands()
+        self.assertEqual(apply, ["kubectl", "--context", gate.CONTEXT, "-n", "catalog-polaris",
+                                 "apply", "--server-side", "--field-manager=gate", "-f", "-"])
+
+    def test_a_short_lived_pod_on_the_pinned_python_runs_in_polaris_namespace(self):
+        _, argv = self.commands()
+        self.assertEqual(argv[:7], ["kubectl", "--context", gate.CONTEXT, "-n",
+                                    "catalog-polaris", "run", "iceberg-test"])
+        for flag in ("--rm", "--attach", "--restart=Never", f"--image={PYTHON}",
+                     "--override-type=strategic"):
+            self.assertIn(flag, argv)
+
+    def test_credentials_come_from_their_secrets_never_the_command_line(self):
+        _, argv = self.commands()
+        overrides = json.loads(argv[argv.index("--overrides") + 1])
+        (container,) = overrides["spec"]["containers"]
+        self.assertEqual(container["name"], "iceberg-test")
+        refs = {e["name"]: e["valueFrom"]["secretKeyRef"] for e in container["env"]
+                if "valueFrom" in e}
+        self.assertEqual(refs, {
+            "ROOT_CLIENT_ID": {"name": "polaris-root", "key": "clientId"},
+            "ROOT_CLIENT_SECRET": {"name": "polaris-root", "key": "clientSecret"},
+            "S3_ACCESS_KEY_ID": {"name": "smoke-s3", "key": "accessKeyId"},
+            "S3_SECRET_ACCESS_KEY": {"name": "smoke-s3", "key": "secretAccessKey"}})
+        self.assertIn({"name": "code", "mountPath": "/smoke", "readOnly": True},
+                      container["volumeMounts"])
+        self.assertEqual(overrides["spec"]["volumes"],
+                         [{"name": "code", "configMap": {"name": "iceberg-smoke"}}])
+
+    def test_pip_installs_only_hashed_wheels_then_the_script_runs_against_the_gate(self):
+        _, argv = self.commands()
+        tail = argv[argv.index("--command") + 2:]
+        self.assertEqual(tail[:2], ["sh", "-c"])
+        for part in ("pip install", "--require-hashes", "--only-binary :all:",
+                     "-r /smoke/requirements.txt", "exec python3 /smoke/smoke.py"):
+            self.assertIn(part, tail[2])
+        self.assertEqual(tail[3:], ["smoke", "http://polaris:8181", "POLARIS", "gate_catalog",
+                                    STANDIN_ENV["S3_ENDPOINT"], "us-east-1",
+                                    "polaris-warehouse"])
+
+    def test_the_committed_requirements_pin_every_package_by_hash(self):
+        with open(os.path.join(HERE, "iceberg", "requirements.txt"), encoding="utf-8") as f:
+            text = f.read()
+        packages = re.findall(r"^([a-z0-9-]+)==([^ ]+) \\$", text, re.MULTILINE)
+        self.assertIn(("pyiceberg", "0.12.0"), packages)
+        self.assertIn(("pyarrow", "25.0.1"), packages)
+        blocks = re.split(r"^(?=[a-z0-9-]+==)", text, flags=re.MULTILINE)[1:]
+        self.assertEqual(len(blocks), len(packages))
+        for block in blocks:
+            self.assertRegex(block, r"--hash=sha256:[0-9a-f]{64}")
+
+    def test_the_python_image_is_the_pinned_one_the_recorder_runs_on(self):
+        self.assertEqual(gate.smoke_python_image(gate.load_pins()),
+                         gate.load_pins()["standin_images"]["recorder"]["image"])
 
 
 class Standins(unittest.TestCase):
