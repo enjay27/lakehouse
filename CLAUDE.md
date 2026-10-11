@@ -50,9 +50,9 @@ storage, observability, SSO and the catalog gateway are other teams' services, r
 
 CI runs all of these as the **static** gate on every push to `claude/**` and every PR (ADR-018).
 **gate-check** runs on every PR into `main` (ADR-019): a PR changing `charts/`, `images/`,
-`install/`, `gates/` or the gate workflows needs a passing dry-run covering its head: push the
-PR's commit to `gate/dry-run/<task>` and `gate/smoke/<task>` (ADR-018); kind needs Docker, so
-sessions read those runs.
+`install/`, `gates/` or the gate workflows needs a passing dry-run covering its head. gate-check
+does not wait: push each new head to `gate/dry-run/<task>` and `gate/smoke/<task>` (ADR-018)
+first, then open the PR or push the head once that dry-run passed; sessions read those runs.
 
 ## Environments and clusters (ADR-004, ADR-005)
 
