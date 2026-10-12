@@ -74,11 +74,18 @@
                   as gate_smoke, with the smoke tests' own S3 key (Secret smoke-s3), writes a
                   table into gate_catalog on the S3 endpoint and reads it back, and the policy
                   endpoint refuses what the gate's policy does not grant (ADR-026, ADR-031).
+  check-restore   proves a restore (ADR-043 §4): an on-demand `Backup` of polaris-pg through
+                  the Barman Cloud Plugin, waited for until completed; then the `Cluster`
+                  polaris-pg-restore, one instance bootstrapped from the ObjectStore
+                  polaris-backup, its base backup and archived WAL to the latest, waited for
+                  until Ready; then gates/check_restore.sh in a pod on Polaris's PostgreSQL
+                  image reads from it, as Polaris, the realm's root principal and gate_catalog.
+                  polaris-pg-restore is deleted whatever happened.
 
 Every kubectl and helm call names the gate's context, and a namespace where the object has
 one. Nothing here reaches any cluster but the kind cluster it creates (ADR-017).
 
-Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | check-polaris-pg | check-polaris | console-image | batch-image | check-logs | check-console | check-iceberg
+Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | check-polaris-pg | check-polaris | console-image | batch-image | check-logs | check-console | check-iceberg | check-restore
 """
 
 import copy
@@ -596,6 +603,97 @@ def check_iceberg_commands(env, image, name):
          ICEBERG_CATALOG, env["S3_ENDPOINT"], env["S3_REGION"],
          env["POLARIS_WAREHOUSE_BUCKET"]],
     ]
+
+
+# The restore the smoke gate proves (ADR-043 §4): its Cluster, sized for the gate only.
+RESTORE = "polaris-pg-restore"
+RESTORE_SIZE = "1Gi"
+BACKUP_TIMEOUT = 600
+RESTORE_TIMEOUT = "900s"
+
+
+def backup_manifest(env, name):
+    """An on-demand Backup of polaris-pg through the Barman Cloud Plugin."""
+    return {"apiVersion": "postgresql.cnpg.io/v1", "kind": "Backup",
+            "metadata": {"name": name, "namespace": env["NS_CATALOG_POLARIS"]},
+            "spec": {"cluster": {"name": release.POLARIS_PG}, "method": "plugin",
+                     "pluginConfiguration": {"name": release.PLUGIN_NAME}}}
+
+
+def backup_outcome(backup):
+    """None while the Backup runs; (phase, error) once it completed or failed."""
+    status = backup.get("status", {})
+    if status.get("phase") in ("completed", "failed"):
+        return status["phase"], status.get("error", "")
+    return None
+
+
+def restore_cluster(env, image):
+    """polaris-pg-restore: one instance bootstrapped from polaris-pg's ObjectStore, with no
+    recovery target, so every archived WAL is replayed. It names no plugin of its own, so it
+    never archives into polaris-pg's backups. The Polaris user keeps its password from
+    polaris-db."""
+    source = release.POLARIS_PG
+    return {"apiVersion": "postgresql.cnpg.io/v1", "kind": "Cluster",
+            "metadata": {"name": RESTORE, "namespace": env["NS_CATALOG_POLARIS"]},
+            "spec": {"instances": 1, "imageName": image, "storage": {"size": RESTORE_SIZE},
+                     "bootstrap": {"recovery": {
+                         "source": source, "database": release.POLARIS_DATABASE,
+                         "owner": "polaris", "secret": {"name": release.POLARIS_DB_SECRET}}},
+                     "externalClusters": [{
+                         "name": source,
+                         "plugin": {"name": release.PLUGIN_NAME, "parameters": {
+                             "barmanObjectName": release.POLARIS_BACKUP_STORE,
+                             "serverName": source}}}]}}
+
+
+def check_restore_command(env, image, database, name):
+    """The pod that runs check_restore.sh (on stdin) as Polaris against the restore."""
+    creds = [{"name": var, "valueFrom": {"secretKeyRef": {"name": release.POLARIS_DB_SECRET,
+                                                          "key": key}}}
+             for var, key in (("PGUSER", "username"), ("PGPASSWORD", "password"))]
+    overrides = {"spec": {"containers": [{"name": name, "image": image, "env": creds,
+                                          "stdin": True, "stdinOnce": True}]}}
+    return ["kubectl", "--context", CONTEXT, "-n", env["NS_CATALOG_POLARIS"], "run", name,
+            f"--image={image}", "--restart=Never", "--rm", "-i", "--quiet",
+            "--pod-running-timeout=3m", "--override-type=strategic",
+            "--overrides", json.dumps(overrides),
+            "--command", "--", "sh", "-s", "--", f"{RESTORE}-rw", database,
+            release.POLARIS_REALM, ICEBERG_CATALOG]
+
+
+def check_restore(env):
+    """Backs up polaris-pg, restores it into polaris-pg-restore, reads it, deletes it.
+    Returns (problems, notes)."""
+    ns = env["NS_CATALOG_POLARIS"]
+    kubectl = ["kubectl", "--context", CONTEXT, "-n", ns]
+    apply = kubectl + ["apply", "--server-side", "--field-manager=gate", "-f", "-"]
+    pg = polaris_pg_values()
+    name = f"{release.POLARIS_PG}-gate-{os.getpid()}"
+    run(apply, json.dumps(backup_manifest(env, name)))
+    phase, error = wait_for(kubectl + ["get", f"backup/{name}", "-o", "json"], backup_outcome,
+                            f"Backup {name}", timeout=BACKUP_TIMEOUT)
+    if phase != "completed":
+        return [f"Backup {name} of {release.POLARIS_PG} failed: {error}"], []
+    notes = [f"Backup {name} of {release.POLARIS_PG} completed through the plugin."]
+    try:
+        run(apply, json.dumps(restore_cluster(env, pg["image"])))
+        ready = subprocess.run(kubectl + ["wait", "--for=condition=Ready", f"cluster/{RESTORE}",
+                                          f"--timeout={RESTORE_TIMEOUT}"], check=False)
+        if ready.returncode != 0:
+            return [f"Cluster {RESTORE} did not get Ready from "
+                    f"{release.POLARIS_BACKUP_STORE}"], notes
+        notes.append(f"Cluster {RESTORE} restored from {release.POLARIS_BACKUP_STORE} is Ready.")
+        with open(os.path.join(HERE, "check_restore.sh"), encoding="utf-8") as f:
+            script = f.read()
+        command = check_restore_command(env, pg["image"], pg["database"],
+                                        f"check-restore-{os.getpid()}")
+        if subprocess.run(command, input=script, text=True, check=False).returncode != 0:
+            return [f"Cluster {RESTORE} lacks what polaris-pg held"], notes
+        return [], notes
+    finally:
+        subprocess.run(kubectl + ["delete", "cluster", RESTORE, "--ignore-not-found",
+                                  "--wait", "--timeout=5m"], check=False)
 
 
 def console_source(path=os.path.join(CONSOLE_IMAGE_DIR, "source.json")):
@@ -1195,6 +1293,11 @@ def main(argv):
         print("+ " + " ".join(apply) + "  (the ConfigMap iceberg-smoke on stdin)", flush=True)
         subprocess.run(apply, input=manifest, text=True, check=True)
         return subprocess.run(pod, check=False).returncode
+    if argv[1:] == ["check-restore"]:
+        problems, notes = check_restore(release.load_env(ROOT, os.environ))
+        for line in notes + problems:
+            print(line, flush=True)
+        return 1 if problems else 0
     print(__doc__.strip().splitlines()[-1], file=sys.stderr)
     return 2
 

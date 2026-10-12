@@ -747,6 +747,75 @@ class CheckConsole(unittest.TestCase):
                                        PYTHON, name="console-test")
 
 
+RESTORE_ENV = {"NS_CATALOG_POLARIS": "catalog-polaris"}
+PG_IMAGE = "ghcr.io/cloudnative-pg/postgresql:16.15-1-minimal-trixie@sha256:" + "a" * 64
+
+
+class CheckRestore(unittest.TestCase):
+    """ADR-043 §4: a backup of polaris-pg, restored into polaris-pg-restore, read, deleted."""
+
+    def test_an_on_demand_backup_of_polaris_pg_through_the_plugin(self):
+        backup = gate.backup_manifest(RESTORE_ENV, "polaris-pg-gate-1")
+        self.assertEqual((backup["apiVersion"], backup["kind"]),
+                         ("postgresql.cnpg.io/v1", "Backup"))
+        self.assertEqual(backup["metadata"], {"name": "polaris-pg-gate-1",
+                                              "namespace": "catalog-polaris"})
+        self.assertEqual(backup["spec"], {
+            "cluster": {"name": "polaris-pg"}, "method": "plugin",
+            "pluginConfiguration": {"name": "barman-cloud.cloudnative-pg.io"}})
+
+    def test_the_restore_bootstraps_from_the_object_store_to_the_latest_wal(self):
+        restore = gate.restore_cluster(RESTORE_ENV, PG_IMAGE)
+        self.assertEqual((restore["kind"], restore["metadata"]["name"]),
+                         ("Cluster", gate.RESTORE))
+        self.assertEqual(gate.RESTORE, "polaris-pg-restore")
+        self.assertEqual(restore["metadata"]["namespace"], "catalog-polaris")
+        spec = restore["spec"]
+        self.assertEqual(spec["instances"], 1)
+        self.assertEqual(spec["imageName"], PG_IMAGE)
+        # No recovery target: everything archived is replayed.
+        self.assertEqual(spec["bootstrap"], {"recovery": {
+            "source": "polaris-pg", "database": "polaris", "owner": "polaris",
+            "secret": {"name": "polaris-db"}}})
+        self.assertEqual(spec["externalClusters"], [{
+            "name": "polaris-pg",
+            "plugin": {"name": "barman-cloud.cloudnative-pg.io",
+                       "parameters": {"barmanObjectName": "polaris-backup",
+                                      "serverName": "polaris-pg"}}}])
+
+    def test_the_restore_never_archives_into_polaris_pgs_backups(self):
+        self.assertNotIn("plugins", gate.restore_cluster(RESTORE_ENV, PG_IMAGE)["spec"])
+
+    def test_a_backup_is_done_once_completed_or_failed(self):
+        self.assertIsNone(gate.backup_outcome({}))
+        self.assertIsNone(gate.backup_outcome({"status": {"phase": "running"}}))
+        self.assertEqual(gate.backup_outcome({"status": {"phase": "completed"}}),
+                         ("completed", ""))
+        self.assertEqual(gate.backup_outcome({"status": {"phase": "failed",
+                                                         "error": "no bucket"}}),
+                         ("failed", "no bucket"))
+
+    def test_the_check_pod_reads_the_restore_as_polaris_with_its_secret(self):
+        command = gate.check_restore_command(RESTORE_ENV, PG_IMAGE, "polaris", "check-restore-1")
+        self.assertEqual(command[:5], ["kubectl", "--context", gate.CONTEXT, "-n",
+                                       "catalog-polaris"])
+        self.assertIn("--rm", command)
+        self.assertEqual(command[command.index("--") + 1:],
+                         ["sh", "-s", "--", "polaris-pg-restore-rw", "polaris", "POLARIS",
+                          gate.ICEBERG_CATALOG])
+        overrides = json.loads(command[command.index("--overrides") + 1])
+        (c,) = overrides["spec"]["containers"]
+        self.assertEqual(c["image"], PG_IMAGE)
+        self.assertEqual(c["env"], [
+            {"name": "PGUSER", "valueFrom": {"secretKeyRef": {"name": "polaris-db",
+                                                              "key": "username"}}},
+            {"name": "PGPASSWORD", "valueFrom": {"secretKeyRef": {"name": "polaris-db",
+                                                                  "key": "password"}}}])
+
+    def test_check_restore_is_a_command(self):
+        self.assertIn("check-restore", gate.__doc__.strip().splitlines()[-1])
+
+
 class Standins(unittest.TestCase):
     def test_applies_the_list_server_side_then_waits_for_both_deployments(self):
         (apply, stdin), (wait, _) = gate.standins_commands(
