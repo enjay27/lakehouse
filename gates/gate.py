@@ -15,11 +15,12 @@
                   `shared` on a runner directory every node mounts: ReadWriteMany for the
                   log claim (ADR-036).
   secrets         writes `.env` for the gate (its context, the stand-ins' endpoints and
-                  the S3 stand-in's two keys, Polaris's and the smoke tests', which are the
-                  gate's own, ADR-031), then runs
+                  the S3 stand-in's three keys, Polaris's, the smoke tests' and the backups',
+                  which are the gate's own, ADR-031, ADR-043), then runs
                   scripts/init_env.py --apply-secrets (ADR-006). Refuses an existing `.env`.
   standins        applies the stand-ins (gates/standins.py: SeaweedFS for S3, OPA with
-                  gates/opa/policy.rego) in NS_STANDINS and waits for them (ADR-031). Never
+                  gates/opa/policy.rego) in NS_STANDINS and waits for them (ADR-031), then
+                  creates the backup bucket in SeaweedFS and checks it (ADR-043). Never
                   part of a release; the install's endpoint check needs them on the gate.
                   With them the recorder (ADR-034), with a TLS certificate made here.
   check-standins  runs gates/check_standins.sh in a short-lived curl pod in Polaris's namespace:
@@ -115,13 +116,15 @@ CERT_MANAGER_NAMESPACE = "cert-manager"
 CERT_MANAGER_DEPLOYMENTS = ("cert-manager", "cert-manager-cainjector", "cert-manager-webhook")
 PLUGIN_DEPLOYMENT = "barman-cloud"
 # On the gate the S3 stand-in is the gate's own, so the gate makes up its credentials, Polaris's
-# and the smoke tests'; on a test or target cluster they are another team's and typed in by
-# hand (ADR-031).
+# the smoke tests' and the backups'; on a test or target cluster they are another team's and
+# typed in by hand (ADR-031, ADR-043).
 GATE_ENV_GENERATED = ("POLARIS_S3_ACCESS_KEY_ID", "POLARIS_S3_SECRET_ACCESS_KEY",
-                      "SMOKE_S3_ACCESS_KEY_ID", "SMOKE_S3_SECRET_ACCESS_KEY")
+                      "SMOKE_S3_ACCESS_KEY_ID", "SMOKE_S3_SECRET_ACCESS_KEY",
+                      "POLARIS_BACKUP_S3_ACCESS_KEY_ID", "POLARIS_BACKUP_S3_SECRET_ACCESS_KEY")
 # On the gate, the endpoints of other teams' services are the stand-ins' (ADR-031).
 STANDIN_REGION = "us-east-1"
 STANDIN_BUCKET = "polaris-warehouse"
+STANDIN_BACKUP_BUCKET = "polaris-backup"
 # Polaris's own S3 key, as the AWS SDK reads it: catalogs without STS are read and written with
 # it (charts/polaris/values-lakehouse.yaml).
 POLARIS_S3_ENV = {"AWS_ACCESS_KEY_ID": "accessKeyId", "AWS_SECRET_ACCESS_KEY": "secretAccessKey"}
@@ -266,6 +269,7 @@ def standin_endpoints(ns):
         "S3_ENDPOINT": f"http://{recorder}:{standins.S3_PORT}",
         "S3_REGION": STANDIN_REGION,
         "POLARIS_WAREHOUSE_BUCKET": STANDIN_BUCKET,
+        "POLARIS_BACKUP_BUCKET": STANDIN_BACKUP_BUCKET,
         "POLARIS_OPA_URL": f"http://{recorder}:{standins.OPA_PORT}{standins.OPA_PACKAGE_PATH}",
         "POLARIS_DB_HOST": recorder,
     }
@@ -307,13 +311,21 @@ def write_gate_env(path, template_text):
     init_env.write_env(path, gate_env(template_text))
 
 
-def standins_commands(env):
-    """Apply the stand-ins' List (on stdin), then wait until both are ready."""
+def standins_commands(env, manifest):
+    """(argv, stdin) in order: apply the stand-ins' List `manifest`, wait until all three are
+    ready, then create the backup bucket with SeaweedFS's shell (`weed mini -bucket` makes only
+    the warehouse's) and check that its filer lists it (ADR-043)."""
+    ns = ["kubectl", "--context", CONTEXT, "-n", env["NS_STANDINS"]]
+    bucket = env["POLARIS_BACKUP_BUCKET"]
     return [
-        ["kubectl", "--context", CONTEXT, "apply", "--server-side", "--field-manager=gate",
-         "-f", "-"],
-        ["kubectl", "--context", CONTEXT, "-n", env["NS_STANDINS"], "rollout", "status",
-         "deployment/seaweedfs", "deployment/opa", "deployment/recorder", "--timeout=5m"],
+        (["kubectl", "--context", CONTEXT, "apply", "--server-side", "--field-manager=gate",
+          "-f", "-"], manifest),
+        (ns + ["rollout", "status", "deployment/seaweedfs", "deployment/opa",
+               "deployment/recorder", "--timeout=5m"], None),
+        (ns + ["exec", "-i", "deployment/seaweedfs", "--", "weed", "shell"],
+         f"s3.bucket.create -name {bucket}\n"),
+        (ns + ["exec", "deployment/seaweedfs", "--", "curl", "-sf", "-o", "/dev/null",
+               f"http://127.0.0.1:{standins.FILER_PORT}/buckets/{bucket}/"], None),
     ]
 
 
@@ -1082,10 +1094,11 @@ def main(argv):
                 tempfile.TemporaryDirectory() as d:
             manifest = json.dumps(standins.manifests(env, pins, f.read(), code.read(),
                                                      recorder_certificate(env, d)))
-        apply, wait = standins_commands(env)
+        (apply, _), *rest = standins_commands(env, manifest)
         print("+ " + " ".join(apply) + "  (the stand-ins' List on stdin)", flush=True)
         subprocess.run(apply, input=manifest, text=True, check=True)
-        run(wait)
+        for command, stdin in rest:
+            run(command, stdin)
         return 0
     if argv[1:] == ["check-standins"]:
         env = release.load_env(ROOT, os.environ)

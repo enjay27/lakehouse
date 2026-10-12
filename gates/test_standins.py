@@ -16,7 +16,10 @@ ENV = {"NS_STANDINS": "standins", "NS_CATALOG_POLARIS": "catalog-polaris",
        "POLARIS_S3_SECRET_ACCESS_KEY": "gatesecret",
        "SMOKE_S3_ACCESS_KEY_ID": "smokekey",
        "SMOKE_S3_SECRET_ACCESS_KEY": "smokesecret",
-       "POLARIS_WAREHOUSE_BUCKET": "polaris-warehouse"}
+       "POLARIS_BACKUP_S3_ACCESS_KEY_ID": "backupkey",
+       "POLARIS_BACKUP_S3_SECRET_ACCESS_KEY": "backupsecret",
+       "POLARIS_WAREHOUSE_BUCKET": "polaris-warehouse",
+       "POLARIS_BACKUP_BUCKET": "polaris-backup"}
 PINS = gate.load_pins(os.path.join(HERE, "pins.json"))
 
 
@@ -77,7 +80,7 @@ class Manifests(unittest.TestCase):
         config = json.loads(base64.b64decode(
             objects()[("Secret", "seaweedfs-s3")]["data"]["s3.json"]))
         by_name = {i["name"]: i for i in config["identities"]}
-        self.assertEqual(sorted(by_name), ["polaris", "smoke"])
+        self.assertEqual(sorted(by_name), ["backup", "polaris", "smoke"])
         self.assertEqual(by_name["polaris"]["credentials"],
                          [{"accessKey": "gatekey", "secretKey": "gatesecret"}])
         self.assertIn("Admin", by_name["polaris"]["actions"])
@@ -87,11 +90,22 @@ class Manifests(unittest.TestCase):
                          ["List:polaris-warehouse", "Read:polaris-warehouse",
                           "Write:polaris-warehouse"])
 
+    def test_the_backup_key_may_read_write_and_list_its_own_bucket_only(self):
+        # ADR-043 §2: the backups' own key, never Polaris's warehouse key.
+        config = json.loads(base64.b64decode(
+            objects()[("Secret", "seaweedfs-s3")]["data"]["s3.json"]))
+        backup = next(i for i in config["identities"] if i["name"] == "backup")
+        self.assertEqual(backup["credentials"],
+                         [{"accessKey": "backupkey", "secretKey": "backupsecret"}])
+        self.assertEqual(sorted(backup["actions"]),
+                         ["List:polaris-backup", "Read:polaris-backup", "Write:polaris-backup"])
+
     def test_the_credentials_appear_only_in_the_secret(self):
         o = objects()
         del o[("Secret", "seaweedfs-s3")]
         text = json.dumps(list(o.values()))
-        for value in ("gatekey", "gatesecret", "smokekey", "smokesecret"):
+        for value in ("gatekey", "gatesecret", "smokekey", "smokesecret", "backupkey",
+                      "backupsecret"):
             self.assertNotIn(value, text)
             self.assertNotIn(base64.b64encode(value.encode()).decode(), text)
 

@@ -285,10 +285,13 @@ POLARIS_CONSOLE_ORIGIN=
 POLARIS_CONSOLE_API_URL=
 POLARIS_LOGS_STORAGE_CLASS=
 POLARIS_LOGS_SIZE=
+POLARIS_BACKUP_BUCKET=
 POLARIS_S3_ACCESS_KEY_ID=
 POLARIS_S3_SECRET_ACCESS_KEY=
 SMOKE_S3_ACCESS_KEY_ID=
 SMOKE_S3_SECRET_ACCESS_KEY=
+POLARIS_BACKUP_S3_ACCESS_KEY_ID=
+POLARIS_BACKUP_S3_SECRET_ACCESS_KEY=
 POLARIS_DB_PASSWORD=
 """
 
@@ -326,6 +329,10 @@ class GateEnv(unittest.TestCase):
                          "gen-POLARIS_S3_SECRET_ACCESS_KEY")
         self.assertEqual(env["SMOKE_S3_ACCESS_KEY_ID"], "gen-SMOKE_S3_ACCESS_KEY_ID")
         self.assertEqual(env["SMOKE_S3_SECRET_ACCESS_KEY"], "gen-SMOKE_S3_SECRET_ACCESS_KEY")
+        self.assertEqual(env["POLARIS_BACKUP_S3_ACCESS_KEY_ID"],
+                         "gen-POLARIS_BACKUP_S3_ACCESS_KEY_ID")
+        self.assertEqual(env["POLARIS_BACKUP_S3_SECRET_ACCESS_KEY"],
+                         "gen-POLARIS_BACKUP_S3_SECRET_ACCESS_KEY")
 
     def test_the_endpoints_name_the_recorder_in_the_stand_ins_namespace(self):
         env = gate.init_env.parse(gate.gate_env(TEMPLATE.replace("NS_STANDINS=standins",
@@ -333,6 +340,7 @@ class GateEnv(unittest.TestCase):
         self.assertEqual(env["S3_ENDPOINT"], "http://recorder.si.svc.cluster.local:8333")
         self.assertEqual(env["S3_REGION"], "us-east-1")
         self.assertEqual(env["POLARIS_WAREHOUSE_BUCKET"], "polaris-warehouse")
+        self.assertEqual(env["POLARIS_BACKUP_BUCKET"], "polaris-backup")
         self.assertEqual(env["POLARIS_OPA_URL"],
                          "http://recorder.si.svc.cluster.local:8181/v1/data/polaris/authz")
         self.assertEqual(env["POLARIS_DB_HOST"], "recorder.si.svc.cluster.local")
@@ -360,7 +368,7 @@ class GateEnv(unittest.TestCase):
             env = gate.init_env.parse(gate.gate_env(f.read()))
         for name in gate.GATE_ENV_GENERATED + ("KUBE_CONTEXT", "S3_ENDPOINT", "S3_REGION",
                                                "POLARIS_WAREHOUSE_BUCKET", "POLARIS_OPA_URL",
-                                               "POLARIS_DB_HOST", "POLARIS_CONSOLE_ORIGIN",
+                                               "POLARIS_BACKUP_BUCKET", "POLARIS_DB_HOST", "POLARIS_CONSOLE_ORIGIN",
                                                "POLARIS_CONSOLE_API_URL",
                                                "POLARIS_LOGS_STORAGE_CLASS", "POLARIS_LOGS_SIZE"):
             with self.subTest(name=name):
@@ -625,6 +633,7 @@ class ReleasedTags(unittest.TestCase):
 STANDIN_ENV = {"NS_STANDINS": "standins", "NS_CATALOG_POLARIS": "catalog-polaris",
                "S3_ENDPOINT": "http://seaweedfs.standins.svc.cluster.local:8333",
                "S3_REGION": "us-east-1", "POLARIS_WAREHOUSE_BUCKET": "polaris-warehouse",
+               "POLARIS_BACKUP_BUCKET": "polaris-backup",
                "POLARIS_OPA_URL": "http://opa.standins.svc.cluster.local:8181/v1/data/polaris/authz",
                "POLARIS_DB_HOST": "recorder.standins.svc.cluster.local"}
 CURL = "curlimages/curl:8.22.0@sha256:" + "c" * 64
@@ -740,13 +749,27 @@ class CheckConsole(unittest.TestCase):
 
 class Standins(unittest.TestCase):
     def test_applies_the_list_server_side_then_waits_for_both_deployments(self):
-        apply, wait = gate.standins_commands(STANDIN_ENV)
+        (apply, stdin), (wait, _) = gate.standins_commands(
+            STANDIN_ENV, "the stand-ins list")[:2]
+        self.assertEqual(stdin, "the stand-ins list")
         self.assertEqual(apply[:3], ["kubectl", "--context", gate.CONTEXT])
         self.assertIn("--server-side", apply)
         self.assertEqual(apply[-2:], ["-f", "-"])
         self.assertEqual(wait[:5], ["kubectl", "--context", gate.CONTEXT, "-n", "standins"])
         for name in ("seaweedfs", "opa", "recorder"):
             self.assertIn(f"deployment/{name}", wait)
+
+    def test_then_the_backup_bucket_is_created_in_seaweedfs_and_checked(self):
+        # ADR-043 §2: `weed mini -bucket` makes one bucket; the backups get their own.
+        (create, stdin), (check, none) = gate.standins_commands(
+            STANDIN_ENV, "the stand-ins list")[2:]
+        exec_ = ["kubectl", "--context", gate.CONTEXT, "-n", "standins", "exec"]
+        self.assertEqual(create, exec_ + ["-i", "deployment/seaweedfs", "--", "weed", "shell"])
+        self.assertEqual(stdin, "s3.bucket.create -name polaris-backup\n")
+        self.assertEqual(check, exec_ + ["deployment/seaweedfs", "--", "curl", "-sf",
+                                         "-o", "/dev/null",
+                                         "http://127.0.0.1:8888/buckets/polaris-backup/"])
+        self.assertIsNone(none)
 
     def test_the_recorder_certificate_is_made_here_for_its_service_name(self):
         with tempfile.TemporaryDirectory() as d:

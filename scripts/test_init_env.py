@@ -26,6 +26,8 @@ POLARIS_S3_ACCESS_KEY_ID=
 POLARIS_S3_SECRET_ACCESS_KEY=
 SMOKE_S3_ACCESS_KEY_ID=
 SMOKE_S3_SECRET_ACCESS_KEY=
+POLARIS_BACKUP_S3_ACCESS_KEY_ID=
+POLARIS_BACKUP_S3_SECRET_ACCESS_KEY=
 
 # Credentials generated per clone.
 POLARIS_DB_PASSWORD=
@@ -39,7 +41,8 @@ CREDENTIALS = ["POLARIS_DB_PASSWORD", "POLARIS_ROOT_CLIENT_ID", "POLARIS_ROOT_CL
                "POLARIS_TOKEN_SIGNING_KEY", "DATAHUB_DB_PASSWORD"]
 # Credentials of other teams' services: typed into .env by hand, never generated (ADR-031).
 BY_HAND = ["POLARIS_S3_ACCESS_KEY_ID", "POLARIS_S3_SECRET_ACCESS_KEY", "SMOKE_S3_ACCESS_KEY_ID",
-           "SMOKE_S3_SECRET_ACCESS_KEY"]
+           "SMOKE_S3_SECRET_ACCESS_KEY", "POLARIS_BACKUP_S3_ACCESS_KEY_ID",
+           "POLARIS_BACKUP_S3_SECRET_ACCESS_KEY"]
 
 
 def counter():
@@ -117,6 +120,8 @@ class Merge(unittest.TestCase):
         self.assertEqual(added, ["NS_CATALOG_POLARIS", "NS_CATALOG_DATAHUB", "S3_ENDPOINT",
                                  "POLARIS_S3_ACCESS_KEY_ID", "POLARIS_S3_SECRET_ACCESS_KEY",
                                  "SMOKE_S3_ACCESS_KEY_ID", "SMOKE_S3_SECRET_ACCESS_KEY",
+                                 "POLARIS_BACKUP_S3_ACCESS_KEY_ID",
+                                 "POLARIS_BACKUP_S3_SECRET_ACCESS_KEY",
                                  "POLARIS_DB_PASSWORD", "POLARIS_ROOT_CLIENT_ID",
                                  "POLARIS_TOKEN_SIGNING_KEY", "DATAHUB_DB_PASSWORD"])
         self.assertEqual(env["NS_CATALOG_DATAHUB"], "catalog-datahub")
@@ -170,6 +175,7 @@ class Manifests(unittest.TestCase):
             (polaris, "Namespace", polaris, "polaris-token-signing", polaris),
             (polaris, "Namespace", polaris, "polaris-s3", polaris),
             (polaris, "Namespace", polaris, "smoke-s3", polaris),
+            (polaris, "Namespace", polaris, "polaris-backup-s3", polaris),
             ("catalog-datahub", "Namespace", "catalog-datahub", "datahub-db", "catalog-datahub"),
         ])
 
@@ -190,6 +196,11 @@ class Manifests(unittest.TestCase):
         self.assertEqual(decode(by_name["smoke-s3"]), {
             "accessKeyId": env["SMOKE_S3_ACCESS_KEY_ID"],
             "secretAccessKey": env["SMOKE_S3_SECRET_ACCESS_KEY"]})
+        # ADR-043 §2: the backups' own key, never Polaris's warehouse key.
+        self.assertEqual(decode(by_name["polaris-backup-s3"]), {
+            "accessKeyId": env["POLARIS_BACKUP_S3_ACCESS_KEY_ID"],
+            "secretAccessKey": env["POLARIS_BACKUP_S3_SECRET_ACCESS_KEY"]})
+        self.assertEqual(by_name["polaris-backup-s3"]["items"][1]["type"], "Opaque")
         self.assertEqual(decode(by_name["datahub-db"]), {
             "username": "datahub", "password": env["DATAHUB_DB_PASSWORD"]})
         self.assertEqual(by_name["datahub-db"]["items"][1]["type"], "kubernetes.io/basic-auth")
@@ -228,7 +239,7 @@ class ApplySecrets(unittest.TestCase):
         self.assertEqual([c[0] for c in calls], [
             ["kubectl", "--context", "kind-gate", "apply", "--server-side",
              "--field-manager=init-env", "-n", ns, "-f", "-"]
-            for ns in ["catalog-polaris"] * 5 + ["catalog-datahub"]])
+            for ns in ["catalog-polaris"] * 6 + ["catalog-datahub"]])
         self.assertTrue(all(check for _, _, check in calls))
         argv = " ".join(" ".join(cmd) for cmd, _, _ in calls)
         for name in CREDENTIALS + BY_HAND:
