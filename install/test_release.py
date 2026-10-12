@@ -20,19 +20,41 @@ def deployments(*images):
         for i in images]})
 
 
+def plugin_services(*selectors):
+    return json.dumps({"items": [{"metadata": {"name": "barman-cloud"},
+                                  "spec": {"selector": sel}} for sel in selectors]})
+
+
+def pods(*ready):
+    return json.dumps({"items": [
+        {"metadata": {"name": f"barman-cloud-{i}"},
+         "status": {"conditions": [{"type": "Ready", "status": "True" if r else "False"}]}}
+        for i, r in enumerate(ready)]})
+
+
 class FakeKubectl:
     """Answers kubectl calls by their arguments; records every call."""
 
-    def __init__(self, crd=True, deploys=deployments("ghcr.io/cloudnative-pg/cloudnative-pg:1.30.1")):
+    def __init__(self, crd=True, deploys=deployments("ghcr.io/cloudnative-pg/cloudnative-pg:1.30.1"),
+                 plugin_crd=True, services=plugin_services({"app": "barman-cloud"}),
+                 plugin_pods=pods(True)):
         self.crd, self.deploys, self.calls = crd, deploys, []
+        self.plugin_crd, self.services, self.plugin_pods = plugin_crd, services, plugin_pods
 
     def __call__(self, argv):
         self.calls.append(argv)
-        if "crd" in argv:
+        if "crd" in argv and release.CNPG_CRD in argv:
             return (0, "customresourcedefinition.apiextensions.k8s.io/" + release.CNPG_CRD) \
                 if self.crd else (1, "NotFound")
+        if "crd" in argv and release.PLUGIN_CRD in argv:
+            return (0, "customresourcedefinition.apiextensions.k8s.io/" + release.PLUGIN_CRD) \
+                if self.plugin_crd else (1, "NotFound")
         if "deployments" in argv:
             return 0, self.deploys
+        if "services" in argv:
+            return 0, self.services
+        if "pods" in argv:
+            return 0, self.plugin_pods
         raise AssertionError(f"unexpected call {argv}")
 
 
@@ -100,6 +122,54 @@ class Preconditions(unittest.TestCase):
         problems, _ = self.check(FakeKubectl(
             deploys=deployments("ghcr.io/cloudnative-pg/cloudnative-pg:1.300.0")))
         self.assertTrue(problems)
+
+    # ADR-043 §3: the plugin runs in NS_CNPG_SYSTEM and the ObjectStore CRD is present.
+    def test_the_plugin_running_is_named_in_the_notes(self):
+        problems, notes = self.check(FakeKubectl())
+        self.assertEqual(problems, [])
+        self.assertIn("Barman Cloud Plugin", "\n".join(notes))
+
+    def test_no_object_store_crd_stops(self):
+        problems, _ = self.check(FakeKubectl(plugin_crd=False))
+        self.assertEqual(len(problems), 1)
+        self.assertIn(release.PLUGIN_CRD, problems[0])
+        self.assertIn("ADR-043", problems[0])
+
+    def test_the_plugin_is_found_as_cnpg_finds_it_in_the_operator_namespace(self):
+        kubectl = FakeKubectl()
+        self.check(kubectl)
+        call = next(a for a in kubectl.calls if "services" in a)
+        self.assertEqual(call[call.index("-n") + 1], "cnpg-system")
+        self.assertEqual(call[call.index("-l") + 1],
+                         "cnpg.io/pluginName=barman-cloud.cloudnative-pg.io")
+
+    def test_its_pods_are_read_by_the_services_selector(self):
+        kubectl = FakeKubectl(services=plugin_services({"app": "barman-cloud", "tier": "x"}))
+        self.check(kubectl)
+        call = next(a for a in kubectl.calls if "pods" in a)
+        self.assertEqual(call[call.index("-n") + 1], "cnpg-system")
+        self.assertEqual(call[call.index("-l") + 1], "app=barman-cloud,tier=x")
+
+    def test_no_plugin_service_stops(self):
+        kubectl = FakeKubectl(services=plugin_services())
+        problems, _ = self.check(kubectl)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("no Barman Cloud Plugin", problems[0])
+        self.assertIn("cnpg-system", problems[0])
+        self.assertFalse([a for a in kubectl.calls if "pods" in a])
+
+    def test_no_ready_plugin_pod_stops(self):
+        for answer in (pods(), pods(False, False)):
+            with self.subTest(pods=answer):
+                problems, _ = self.check(FakeKubectl(plugin_pods=answer))
+                self.assertEqual(len(problems), 1)
+                self.assertIn("not running", problems[0])
+
+    def test_an_unsupported_operator_and_a_missing_plugin_are_both_named(self):
+        problems, _ = self.check(FakeKubectl(
+            deploys=deployments("ghcr.io/cloudnative-pg/cloudnative-pg:1.31.0"),
+            plugin_crd=False))
+        self.assertEqual(len(problems), 2)
 
 
 POLARIS_ENV = {**ENV, "NS_CATALOG_POLARIS": "catalog-polaris"}
@@ -199,7 +269,7 @@ class Steps(unittest.TestCase):
         boot, pol, claim = FakeBootstrap(), FakePolaris(), FakeClaim()
 
         def run(argv, stdin=None):
-            if "crd" in argv or "deployments" in argv:
+            if "crd" in argv or "cnpg-system" in argv:
                 return step0(argv)
             if "endpoint-check" in " ".join(argv):
                 return endpoints(argv, stdin)
@@ -217,14 +287,15 @@ class Steps(unittest.TestCase):
                                           dry_run=False)
         self.assertEqual(problems, [])
         self.assertEqual([n.split(":")[0] for n in notes],
-                         ["Step 0"] + ["Step 1"] * 5 + ["Step 2"] * 2)
-        self.assertIn("polaris-pg", notes[1])
-        self.assertIn("answer", notes[2])
-        self.assertIn("bootstrapped", notes[3])
-        self.assertIn("polaris-logs", notes[4])
-        self.assertIn("deployment/polaris", notes[5])
-        self.assertIn("cronjob/polaris-log-batch", notes[6])
-        self.assertIn("console is not enabled", notes[7])
+                         ["Step 0"] * 2 + ["Step 1"] * 5 + ["Step 2"] * 2)
+        self.assertIn("Barman Cloud Plugin", notes[1])
+        self.assertIn("polaris-pg", notes[2])
+        self.assertIn("answer", notes[3])
+        self.assertIn("bootstrapped", notes[4])
+        self.assertIn("polaris-logs", notes[5])
+        self.assertIn("deployment/polaris", notes[6])
+        self.assertIn("cronjob/polaris-log-batch", notes[7])
+        self.assertIn("console is not enabled", notes[8])
 
     def test_a_failed_batch_stops_the_install_before_the_console(self):
         step0, pg, endpoints = FakeKubectl(), FakeCalls(), FakeRun()
@@ -232,7 +303,7 @@ class Steps(unittest.TestCase):
         batch, console = FakeBatch(helm=(1, "image tag invalid")), FakeConsole()
 
         def run(argv, stdin=None):
-            if "crd" in argv or "deployments" in argv:
+            if "crd" in argv or "cnpg-system" in argv:
                 return step0(argv)
             if "endpoint-check" in " ".join(argv):
                 return endpoints(argv, stdin)
@@ -259,7 +330,7 @@ class Steps(unittest.TestCase):
         claim = FakeClaim(storage_class=(1, "NotFound"))
 
         def run(argv, stdin=None):
-            if "crd" in argv or "deployments" in argv:
+            if "crd" in argv or "cnpg-system" in argv:
                 return step0(argv)
             if "endpoint-check" in " ".join(argv):
                 return endpoints(argv, stdin)
@@ -281,7 +352,7 @@ class Steps(unittest.TestCase):
         console = FakeConsole(rollout=(1, "ErrImageNeverPull"))
 
         def run(argv, stdin=None):
-            if "crd" in argv or "deployments" in argv:
+            if "crd" in argv or "cnpg-system" in argv:
                 return step0(argv)
             if "endpoint-check" in " ".join(argv):
                 return endpoints(argv, stdin)
@@ -308,7 +379,7 @@ class Steps(unittest.TestCase):
         claim = FakeClaim()
 
         def run(argv, stdin=None):
-            if "crd" in argv or "deployments" in argv:
+            if "crd" in argv or "cnpg-system" in argv:
                 return step0(argv)
             if "endpoint-check" in " ".join(argv):
                 return endpoints(argv, stdin)
@@ -327,7 +398,7 @@ class Steps(unittest.TestCase):
         step0, step1 = FakeKubectl(), FakeCalls()
 
         def run(argv, stdin=None):
-            if "crd" in argv or "deployments" in argv:
+            if "crd" in argv or "cnpg-system" in argv:
                 return step0(argv)
             return (1, "http://s3.example:8333 did not answer") if "run" in argv \
                 else step1(argv)
@@ -338,7 +409,7 @@ class Steps(unittest.TestCase):
         step0, step1, endpoints, claim = FakeKubectl(), FakeCalls(), FakeRun(), FakeClaim()
 
         def run(argv, stdin=None):
-            if "crd" in argv or "deployments" in argv:
+            if "crd" in argv or "cnpg-system" in argv:
                 return step0(argv)
             if "storageclass" in argv or "apply" in argv:
                 return claim(argv, stdin)

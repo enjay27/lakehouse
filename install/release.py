@@ -1,9 +1,11 @@
 """Installs a release of this repository in the order of ADR-029.
 
 0. Preconditions, checked, never installed: the CloudNativePG `Cluster` CRD is present and the
-   operator in `NS_CNPG_SYSTEM` runs a version this release supports (install/supported.json).
-   On the target clusters the operator is the operator team's; on the gate, gates/gate.py
-   installs it first.
+   operator in `NS_CNPG_SYSTEM` runs a version this release supports (install/supported.json);
+   the Barman Cloud Plugin's `ObjectStore` CRD is present and the plugin runs in
+   `NS_CNPG_SYSTEM`: its Service, labelled as CNPG finds plugins, has a ready pod (ADR-043).
+   On the target clusters the operator and the plugin are the operator team's; on the gate,
+   gates/gate.py installs them first.
 1. Polaris, in `NS_CATALOG_POLARIS`. Its Secrets come first (scripts/init_env.py
    --apply-secrets, ADR-006). Datahub adds its steps in P3. The gates run this same script
    (ADR-038).
@@ -61,6 +63,11 @@ from init_env import SECRETS, parse  # noqa: E402
 
 CNPG_CRD = "clusters.postgresql.cnpg.io"
 OPERATOR_LABEL = "app.kubernetes.io/name=cloudnative-pg"
+# The Barman Cloud Plugin (ADR-043): its CRD, and the label on the Service by which CNPG finds
+# it in the operator's namespace.
+PLUGIN_CRD = "objectstores.barmancloud.cnpg.io"
+PLUGIN_NAME = "barman-cloud.cloudnative-pg.io"
+PLUGIN_LABEL = f"cnpg.io/pluginName={PLUGIN_NAME}"
 POLARIS_PG = "polaris-pg"
 POLARIS_PG_RELEASE = "polaris-postgres"
 POLARIS_PG_CHART = os.path.join(ROOT, "charts", "polaris-postgres")
@@ -183,7 +190,40 @@ def check_preconditions(env, run, supported):
     problems = [f"CNPG operator {v} in {namespace} is not supported; this release supports "
                 + ", ".join(supported) for v in versions
                 if ".".join(v.split(".")[:2]) not in supported]
-    return problems, [f"Step 0: CNPG operator {', '.join(versions)} in {namespace}, supported."]
+    notes = [f"Step 0: CNPG operator {', '.join(versions)} in {namespace}, supported."]
+    plugin_problems, plugin_notes = check_plugin(base, namespace, run)
+    return problems + plugin_problems, notes + plugin_notes
+
+
+def _ready(pod):
+    return any(c.get("type") == "Ready" and c.get("status") == "True"
+               for c in pod.get("status", {}).get("conditions", []))
+
+
+def check_plugin(base, namespace, run):
+    """Step 0's part for the Barman Cloud Plugin (ADR-043 §3): its CRD, then its Service in the
+    operator's namespace, then a ready pod behind that Service."""
+    code, _ = run(base + ["get", "crd", PLUGIN_CRD, "-o", "name"])
+    if code != 0:
+        return [f"CRD {PLUGIN_CRD} not found: the Barman Cloud Plugin is missing (ADR-043)"], []
+    code, out = run(base + ["-n", namespace, "get", "services", "-l", PLUGIN_LABEL,
+                            "-o", "json"])
+    if code != 0:
+        return [f"cannot list the plugin's services in {namespace}: {out.strip()}"], []
+    services = json.loads(out).get("items", [])
+    if not services:
+        return [f"no Barman Cloud Plugin in {namespace}: no Service labelled {PLUGIN_LABEL} "
+                "(ADR-043)"], []
+    service = services[0]
+    selector = ",".join(f"{k}={v}" for k, v in sorted(service["spec"]["selector"].items()))
+    code, out = run(base + ["-n", namespace, "get", "pods", "-l", selector, "-o", "json"])
+    if code != 0:
+        return [f"cannot list the plugin's pods in {namespace}: {out.strip()}"], []
+    if not any(_ready(pod) for pod in json.loads(out).get("items", [])):
+        return [f"the Barman Cloud Plugin in {namespace} is not running: no ready pod behind "
+                f"Service {service['metadata']['name']} (ADR-043)"], []
+    return [], [f"Step 0: Barman Cloud Plugin running in {namespace} "
+                f"(Service {service['metadata']['name']})."]
 
 
 def polaris_postgres(env, run, dry_run=False):
