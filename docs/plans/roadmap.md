@@ -210,8 +210,14 @@ source does not matter for operation. What follows is the list they cover.
   The release workflow pushes the batch's image to GHCR under its content-hash tag, and a
   cluster pulls it from `IMAGE_REGISTRY` or GHCR (ADR-042, #55); `platform-2026.10.12`,
   the first release with Polaris, pushed it (#78).
-- Before Datahub (Kade, 2026-10-12): backups of Polaris's PostgreSQL with a restore proven
-  on the gate, then ADR-027's network policies; metrics (P5) and failover (#31) follow.
+- Backups (2026-10-12, ADR-043, #83). polaris-pg archives its WAL and takes a daily base
+  backup through the Barman Cloud Plugin into `POLARIS_BACKUP_BUCKET`, with its own key in
+  `polaris-backup-s3`; step 0 requires the plugin and its `ObjectStore` CRD. The gate
+  installs cert-manager and the plugin from pinned manifests, and the smoke gate's
+  `check-restore` backs polaris-pg up, restores it into `polaris-pg-restore` and reads the
+  root principal and the smoke tests' catalog from it.
+- Before Datahub (Kade, 2026-10-12): ADR-027's network policies next; metrics (P5) and
+  failover (#31) follow.
 - **Gate:** dry-run and smoke. **Linux:** the release installed on a test cluster.
 
 ### P3: Datahub
@@ -271,6 +277,8 @@ when Kade learns the target clusters' version.
 |---|---|---|
 | Kubernetes (gate, kind) | 1.36 (`kindest/node:v1.36.4`) | Kade: latest stable; 1.37 exists, but CloudNativePG 1.30 supports 1.34–1.36 |
 | CloudNativePG operator (gate only, ADR-029) | 1.30.1 | latest; target unknown |
+| cert-manager (gate only, ADR-043) | v1.21.2 | newest at least two weeks old; target unknown |
+| Barman Cloud Plugin (gate only, ADR-043) | v0.15.0 | newest at least two weeks old (v0.15.1 under two weeks); target unknown |
 | Polaris | 1.6.0 | Kade (ADR-009) |
 | PostgreSQL for Polaris | 16 (CNPG image 16.15, by digest in `charts/polaris-postgres`), 3 instances, required anti-affinity | Kade |
 | Pooler for Polaris | none | open: Kade does not know (ADR-010) |
