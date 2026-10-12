@@ -239,11 +239,21 @@ class Install(unittest.TestCase):
         self.assertEqual(commands, [
             ["git", "-C", self.ROOT, "worktree", "add", "--detach", "/tmp/prev",
              "platform-2026.10.10"],
+            ["cp", "-p", os.path.join(self.ROOT, ".env"), "/tmp/prev/.env"],
             ["python3", "/tmp/prev/install/release.py"],
             self.THIS,
         ])
         self.assertIn("platform-2026.10.10", summary)
         self.assertIn("ADR-021", summary)
+
+    def test_the_release_reads_the_gates_env_in_its_worktree(self):
+        # release.py reads .env from its own checkout; a tag's worktree has none, so a
+        # release that reads more than step 0 would find every endpoint empty.
+        commands, _ = gate.install_plan("platform-2026.10.12", "/tmp/prev", fresh=False)
+        worktree, copy, previous = commands[0], commands[1], commands[2]
+        self.assertEqual(worktree[3:5], ["worktree", "add"])
+        self.assertEqual(copy, ["cp", "-p", os.path.join(self.ROOT, ".env"), "/tmp/prev/.env"])
+        self.assertEqual(previous, ["python3", "/tmp/prev/install/release.py"])
 
     def test_without_a_release_installs_this_commit_and_says_so(self):
         commands, summary = gate.install_plan(None, "/tmp/prev", fresh=False)
@@ -258,8 +268,8 @@ class Install(unittest.TestCase):
     def test_dry_run_installs_the_release_then_dry_runs_this_commit_over_it(self):
         commands, summary = gate.install_plan("platform-2026.10.10", "/tmp/prev", fresh=False,
                                               dry_run=True)
-        self.assertEqual(commands[1], ["python3", "/tmp/prev/install/release.py"])
-        self.assertEqual(commands[2], self.THIS + ["--dry-run"])
+        self.assertEqual(commands[2], ["python3", "/tmp/prev/install/release.py"])
+        self.assertEqual(commands[3], self.THIS + ["--dry-run"])
         self.assertIn("server-side dry-run", summary)
 
     def test_dry_run_without_a_release_dry_runs_this_commit(self):
