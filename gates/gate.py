@@ -396,17 +396,46 @@ def recorder_logs_command(env):
             "deployment/recorder", "--tail=-1"]
 
 
-def check_traffic(log_text, expectation_lists):
-    """(problems, lines): a count of the records, then one line per expectation."""
+# When this commit's install over the last release ended, for check-traffic's restart window.
+INSTALL_RECORD = "/tmp/lakehouse-gate-install.json"
+
+
+def restart_events_command(namespace):
+    return ["kubectl", "--context", CONTEXT, "-n", namespace, "get", "events",
+            "--field-selector",
+            f"involvedObject.name={release.POLARIS_PG},reason=UpgradingInstance", "-o", "json"]
+
+
+def restart_window(events, install_end):
+    """polaris-pg's restart during the upgrade: from its first UpgradingInstance event to the
+    end of this commit's install; None without both (Kade, 2026-10-12). CNPG emits no event
+    when a restart ends, and step 1 waits for it, so the install's end bounds it."""
+    if not install_end:
+        return None
+    times = [e.get("eventTime") or e.get("firstTimestamp") or e.get("lastTimestamp")
+             for e in events.get("items", [])
+             if e.get("involvedObject", {}).get("kind") == "Cluster"
+             and e["involvedObject"].get("name") == release.POLARIS_PG
+             and e.get("reason") == "UpgradingInstance"]
+    times = [t for t in times if t and traffic.when(t) <= traffic.when(install_end)]
+    return (min(times, key=traffic.when), install_end) if times else None
+
+
+def check_traffic(log_text, expectation_lists, restart=None):
+    """(problems, lines): a count of the records, the restart window if any, then one line per
+    expectation."""
     recorded = traffic.records(log_text)
     by_proto = {p: sum(1 for r in recorded
                        if r.get("proto") == p and r.get("event") != "listening")
                 for p in ("http", "pg")}
     lines = [f"Recorder: {by_proto['http'] + by_proto['pg']} records: {by_proto['http']} HTTP, "
              f"{by_proto['pg']} PostgreSQL."]
+    if restart:
+        lines.append(f"{release.POLARIS_PG} restarted during the upgrade from {restart[0]} to "
+                     f"{restart[1]}: only there may a rule let through what it allows.")
     problems = []
     for expectations in expectation_lists:
-        more_problems, more_lines = traffic.check(recorded, expectations)
+        more_problems, more_lines = traffic.check(recorded, expectations, restart)
         problems += more_problems
         lines += more_lines
     return problems, lines
@@ -1220,7 +1249,13 @@ def main(argv):
         env = release.load_env(ROOT, os.environ)
         log = subprocess.run(recorder_logs_command(env), capture_output=True, text=True,
                              check=True).stdout
-        problems, lines = check_traffic(log, [traffic.load(path) for path in argv[2:]])
+        install_end = None
+        if os.path.exists(INSTALL_RECORD):
+            with open(INSTALL_RECORD, encoding="utf-8") as f:
+                install_end = json.load(f)["end"]
+        events = json.loads(output(restart_events_command(env["NS_CATALOG_POLARIS"])))
+        problems, lines = check_traffic(log, [traffic.load(path) for path in argv[2:]],
+                                        restart_window(events, install_end))
         for line in lines:
             print(line)
         return 1 if problems else 0
@@ -1233,6 +1268,9 @@ def main(argv):
             print(summary, flush=True)
             for command in commands:
                 run(command)
+        if len(commands) > 1 and "--dry-run" not in argv:
+            with open(INSTALL_RECORD, "w", encoding="utf-8") as f:
+                json.dump({"end": dt.datetime.now(dt.timezone.utc).isoformat()}, f)
         return 0
     if argv[1:] == ["console-image"]:
         source = console_source()

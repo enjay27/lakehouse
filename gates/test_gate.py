@@ -876,6 +876,60 @@ class CheckTraffic(unittest.TestCase):
         self.assertEqual(len(problems), 1)
 
 
+def upgrading(*times, name="polaris-pg", reason="UpgradingInstance"):
+    return {"items": [{"involvedObject": {"kind": "Cluster", "name": name}, "reason": reason,
+                       "firstTimestamp": t} for t in times]}
+
+
+class RestartWindow(unittest.TestCase):
+    END = "2026-10-12T10:37:58+00:00"
+
+    def test_from_the_first_upgrading_instance_event_to_the_end_of_the_install(self):
+        events = upgrading("2026-10-12T10:34:40Z", "2026-10-12T10:34:00Z")
+        self.assertEqual(gate.restart_window(events, self.END),
+                         ("2026-10-12T10:34:00Z", self.END))
+
+    def test_no_window_without_a_restart_or_an_upgrade(self):
+        self.assertIsNone(gate.restart_window(upgrading(), self.END))
+        self.assertIsNone(gate.restart_window(upgrading("2026-10-12T10:34:00Z"), None))
+
+    def test_other_clusters_reasons_and_later_restarts_do_not_count(self):
+        self.assertIsNone(gate.restart_window(
+            upgrading("2026-10-12T10:34:00Z", name="polaris-pg-restore"), self.END))
+        self.assertIsNone(gate.restart_window(
+            upgrading("2026-10-12T10:34:00Z", reason="CreatingInstance"), self.END))
+        self.assertIsNone(gate.restart_window(upgrading("2026-10-12T10:40:00Z"), self.END))
+
+    def test_the_events_are_read_for_polaris_pg_in_its_namespace(self):
+        self.assertEqual(gate.restart_events_command("catalog-polaris"), [
+            "kubectl", "--context", gate.CONTEXT, "-n", "catalog-polaris", "get", "events",
+            "--field-selector", "involvedObject.name=polaris-pg,reason=UpgradingInstance",
+            "-o", "json"])
+
+    def test_check_traffic_names_the_window_and_passes_it_on(self):
+        log = json.dumps({"proto": "pg", "event": "statement", "time": "2026-10-12T10:37:06Z",
+                          "error": {"sqlstate": "57P01", "severity": "FATAL"}})
+        rule = [{"name": "no failed statement", "must": "not_exist",
+                 "match": {"event": "statement"},
+                 "allow_during_restart": {"error.sqlstate": "57P01"}}]
+        problems, lines = gate.check_traffic(log, [rule],
+                                             restart=("2026-10-12T10:34:00Z", self.END))
+        self.assertEqual(problems, [])
+        self.assertIn("polaris-pg restarted during the upgrade from 2026-10-12T10:34:00Z",
+                      lines[1])
+        problems, _ = gate.check_traffic(log, [rule])
+        self.assertEqual(len(problems), 1)
+
+    def test_only_the_two_rules_kade_named_carry_an_allowance(self):
+        with open(os.path.join(HERE, "expectations", "standins.json"), encoding="utf-8") as f:
+            rules = {e["name"]: e.get("allow_during_restart")
+                     for e in json.load(f)["expectations"]}
+        self.assertEqual({n: a for n, a in rules.items() if a}, {
+            "No PostgreSQL statement failed, but for a table that did not exist yet":
+                {"error.sqlstate": "57P01", "error.severity": "FATAL"},
+            "No upstream the recorder could not reach": {"listener": "pg"}})
+
+
 class CheckStandins(unittest.TestCase):
     CASES = [{"name": "root", "allow": True, "input": {"actor": {"principal": "root"}}},
              {"name": "stranger", "allow": False, "input": {"actor": {"principal": "x"}}}]

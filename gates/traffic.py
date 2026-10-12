@@ -10,7 +10,14 @@ recorder redacted from one that was never sent.
 The output names each expectation and how many records matched, never a body (ADR-002). A
 failed must-not also names up to five of the records that matched, by the fields in
 NAMED_FIELDS only: never a path, a body, a statement or an error message.
+
+A must-not may carry `allow_during_restart`, conditions like `match`'s: while polaris-pg
+restarts during the gate's upgrade (`restart`, a pair of ISO times), a record that matches
+both is let through, counted and named as allowed. Outside that window, or with no restart,
+it fails like any other (Kade, 2026-10-12).
 """
+
+import datetime as dt
 
 import json
 import re
@@ -71,17 +78,36 @@ def named(record):
                     for value in [lookup(record, path)] if value is not _MISSING)
 
 
-def check(recorded, expectations):
+def when(text):
+    return dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+
+
+def _during(record, restart):
+    if restart is None or not isinstance(record.get("time"), str):
+        return False
+    return when(restart[0]) <= when(record["time"]) <= when(restart[1])
+
+
+def check(recorded, expectations, restart=None):
     """(problems, one output line per expectation, then the records a failed must-not
-    matched)."""
+    matched or an allowance let through). `restart` is polaris-pg's restart window, or None."""
     problems, lines = [], []
     for e in expectations:
         if e["must"] not in MUSTS:
             raise ValueError(f"{e['name']}: must is {e['must']!r}, not one of {MUSTS}")
+        allowance = e.get("allow_during_restart")
+        if allowance is not None and e["must"] != "not_exist":
+            raise ValueError(f"{e['name']}: only a must-not may carry allow_during_restart")
         found = [r for r in recorded if matches(r, e["match"])]
+        allowed = [r for r in found
+                   if allowance is not None and matches(r, allowance) and _during(r, restart)]
+        found = [r for r in found if not any(r is a for a in allowed)]
         passed = len(found) > 0 if e["must"] == "exist" else not found
         line = f"{'ok  ' if passed else 'FAIL'} {e['name']}: {len(found)} matching records"
+        if allowed:
+            line += f", {len(allowed)} allowed during the restart"
         lines.append(line)
+        lines += [f"     allowed: {named(r)}" for r in allowed[:NAMED_MAX]]
         if not passed:
             problems.append(line)
             lines += [f"     {named(r)}" for r in found[:NAMED_MAX]]
