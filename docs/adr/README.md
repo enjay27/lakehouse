@@ -90,6 +90,7 @@ flowchart LR
 | [039](039-a-platform-pr-merges-only-when-passing-dry-run-and-smoke-gates-cover-its-head.md) | A platform PR merges only when passing dry-run and smoke gates cover its head | Amended by ADR-040 |
 | [040](040-log-batch-fixtures-come-from-a-real-utc-roll-and-a-log-batch-gate-ships-them-into-an-opensearch-stand-in.md) | Log batch fixtures come from a real UTC roll; a Log Batch Gate ships them into an OpenSearch stand-in | Amended by ADR-041 |
 | [041](041-the-log-batch-gate-creates-fixtures-only-when-no-unexpired-artifact-holds-their-spec-hash.md) | The Log Batch Gate creates fixtures only when no unexpired artifact holds their spec hash | Accepted |
+| [042](042-the-release-workflow-pushes-the-log-batchs-image-to-ghcr-and-clusters-pull-it-from-a-registry-named-in-env.md) | The release workflow pushes the log batch's image to GHCR; clusters pull it from a registry named in `.env` | Proposed |
 
 ## Not ADRs
 
