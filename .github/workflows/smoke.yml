@@ -1,16 +1,16 @@
-# The smoke gate (ADR-018): runs on a push to gate/smoke/<task> and nightly on main. Advisory:
-# its result is reported in the PR, it does not block a merge (ADR-019). kind with three nodes
-# and the pinned CNPG operator (ADR-017, ADR-029), the gate's Secrets (ADR-006), the stand-ins
-# for other teams' services (ADR-031), the latest release tag installed from its checkout and
-# this commit's release over it (ADR-021), or with `fresh` this commit's alone; then the
-# running Cluster polaris-pg is checked against its values, its three instances on three nodes
-# (ADR-016), the stand-ins answer as Polaris needs them to (ADR-026), Polaris runs as its values
-# say and gives root a token every replica accepts (ADR-016, ADR-026), PyIceberg as an ordinary
-# principal writes a table into a catalog on the S3 endpoint and reads it back while the policy
-# refuses what it is not granted (ADR-026, ADR-031), the log batch publishes the hour of
-# traffic sent to both Polaris pods once, keeping the refused requests and counting the reads,
-# and a stand-in Fluent Bit reads it as the contract (ADR-024, ADR-036), and the recorder saw
-# those exchanges and none it must not (ADR-034).
+# The smoke gate (ADR-038): runs on a push to gate/smoke/<task> and nightly on main. A PR that
+# changes platform files merges only when a passing run covers its head (ADR-039). kind with
+# three nodes and the pinned CNPG operator (ADR-017, ADR-029), the gate's Secrets (ADR-006), the
+# stand-ins for other teams' services (ADR-031), the latest release tag installed from its
+# checkout and this commit's release over it (ADR-021), or with `fresh` this commit's alone;
+# then the running Cluster polaris-pg is checked against its values, its three instances on
+# three nodes (ADR-016), the stand-ins answer as Polaris needs them to (ADR-026), Polaris runs
+# as its values say and gives root a token every replica accepts (ADR-016, ADR-026), PyIceberg
+# as an ordinary principal writes a table into a catalog on the S3 endpoint and reads it back
+# while the policy refuses what it is not granted (ADR-026, ADR-031), the log batch publishes
+# the hour of traffic sent to both Polaris pods once, keeping the refused requests and counting
+# the reads, and a stand-in Fluent Bit reads it as the contract (ADR-024, ADR-036), and the
+# recorder saw those exchanges and none it must not (ADR-034).
 # The console, built from its pinned commit, is checked last: a
 # maintainer signs in as the browser does and may only read; those steps never block, and a
 # last step warns of any that failed (ADR-028). The release gate

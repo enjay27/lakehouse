@@ -1,4 +1,4 @@
-"""kubeconform schemas from CustomResourceDefinitions (ADR-010, ADR-018): the static gate
+"""kubeconform schemas from CustomResourceDefinitions (ADR-010, ADR-038): the static gate
 validates rendered charts against the CRDs in use, today CNPG's from the gate's pinned chart.
 
 `write(docs, root)` writes `<root>/<group>/<kind>_<version>.json` for each served version of

@@ -1,4 +1,4 @@
-# The static gate (ADR-018): the tests of scripts/, gates/, install/ and the log batch
+# The static gate (ADR-038): the tests of scripts/, gates/, install/ and the log batch
 # (images/polaris-log-batch, ADR-036); helm lint, then the
 # charts/ tests: the rendered charts, their values schemas and kubeconform against the CRDs in
 # use (ADR-016, ADR-010), with helm and kubeconform from gates/pins.json and PyYAML pinned by
