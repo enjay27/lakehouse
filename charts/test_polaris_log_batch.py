@@ -54,7 +54,7 @@ def helm_template(*sets, values=None):
 
 
 def render(*sets):
-    result = helm_template(*sets, values=release.batch_values())
+    result = helm_template(*sets, values=release.batch_values({}))
     if result.returncode != 0:
         raise AssertionError(result.stderr)
     return [d for d in yaml.safe_load_all(result.stdout) if d]
@@ -167,11 +167,11 @@ class ValuesSchema(unittest.TestCase):
         self.assertIn("tag", result.stderr)
 
     def test_an_unknown_value_is_refused(self):
-        result = helm_template("nosuch=1", values=release.batch_values())
+        result = helm_template("nosuch=1", values=release.batch_values({}))
         self.assertNotEqual(result.returncode, 0)
 
     def test_a_schedule_other_than_a_cron_line_is_refused(self):
-        result = helm_template("schedule=hourly", values=release.batch_values())
+        result = helm_template("schedule=hourly", values=release.batch_values({}))
         self.assertNotEqual(result.returncode, 0)
 
 

@@ -882,7 +882,7 @@ class LogBatch(unittest.TestCase):
         self.assertEqual(helm[helm.index("-n") + 1], "catalog-polaris")
         self.assertEqual(helm[helm.index("upgrade"):helm.index("upgrade") + 4],
                          ["upgrade", "--install", "polaris-log-batch", release.BATCH_CHART])
-        self.assertEqual(calls.values, [release.batch_values()])
+        self.assertEqual(calls.values, [release.batch_values(BOOTSTRAP_ENV)])
         files = [helm[i + 1] for i, a in enumerate(helm) if a == "-f"]
         self.assertFalse(os.path.exists(files[0]), "the generated values file is left behind")
         self.assertIn(f"Step 2: cronjob/polaris-log-batch in catalog-polaris runs "
@@ -913,6 +913,47 @@ class LogBatch(unittest.TestCase):
         self.assertIn("--dry-run=server", calls.calls[0])
         self.assertEqual(len(calls.calls), 1)
         self.assertIn("dry-run", "\n".join(notes))
+
+    def test_a_registry_in_env_names_the_image_installed_and_read_back(self):
+        env = {**BOOTSTRAP_ENV, "IMAGE_REGISTRY": MIRROR}
+        image = release.batch_image(registry=MIRROR)
+        calls = FakeBatch(image=image)
+        problems, notes = release.log_batch(env, calls)
+        self.assertEqual(problems, [])
+        self.assertEqual(calls.values[0]["image"]["repository"], f"{MIRROR}/polaris-log-batch")
+        self.assertIn(f"runs {image}", "\n".join(notes))
+        problems, _ = release.log_batch(env, FakeBatch())
+        self.assertIn(f"expected {image}", "\n".join(problems))
+
+
+MIRROR = "mirror.example.invalid:5000/platform"
+
+
+class BatchImage(unittest.TestCase):
+    """ADR-042: the release pushes the batch's image to GHCR; IMAGE_REGISTRY names a mirror."""
+
+    def test_the_default_is_the_github_container_registry(self):
+        self.assertEqual(release.DEFAULT_IMAGE_REGISTRY, "ghcr.io/enjay27/lakehouse")
+        self.assertTrue(release.batch_image().startswith(
+            "ghcr.io/enjay27/lakehouse/polaris-log-batch:"))
+
+    def test_an_empty_or_missing_registry_is_the_default(self):
+        for env in ({}, {"IMAGE_REGISTRY": ""}):
+            with self.subTest(env=env):
+                self.assertEqual(release.image_registry(env), release.DEFAULT_IMAGE_REGISTRY)
+
+    def test_a_registry_in_env_is_used_without_a_trailing_slash(self):
+        self.assertEqual(release.image_registry({"IMAGE_REGISTRY": MIRROR}), MIRROR)
+        self.assertEqual(release.image_registry({"IMAGE_REGISTRY": MIRROR + "/"}), MIRROR)
+
+    def test_a_mirror_keeps_the_name_and_the_tag(self):
+        default, mirrored = release.batch_image(), release.batch_image(registry=MIRROR)
+        self.assertEqual(mirrored, f"{MIRROR}/polaris-log-batch:{default.rsplit(':', 1)[1]}")
+
+    def test_the_values_split_the_image_at_its_tag(self):
+        self.assertEqual(release.batch_values({"IMAGE_REGISTRY": MIRROR}),
+                         {"image": {"repository": f"{MIRROR}/polaris-log-batch",
+                                    "tag": release.batch_image().rsplit(":", 1)[1]}})
 
 
 class Cors(unittest.TestCase):
@@ -951,6 +992,13 @@ class Main(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("KUBE_CONTEXT", result.stdout + result.stderr)
 
+
+    def test_batch_image_prints_the_image_the_release_pushes_whatever_env_says(self):
+        result = subprocess.run([sys.executable, release.__file__, "batch-image"],
+                                capture_output=True, text=True, check=False,
+                                env={"PATH": os.environ.get("PATH", ""),
+                                     "IMAGE_REGISTRY": MIRROR})
+        self.assertEqual((result.returncode, result.stdout), (0, release.batch_image() + "\n"))
 
     def test_an_unknown_option_exits_2(self):
         result = subprocess.run([sys.executable, release.__file__, "--upgrade"],
