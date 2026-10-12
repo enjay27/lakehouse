@@ -9,15 +9,18 @@
                   PostgreSQL instances apart, then installs the CNPG operator from its pinned
                   chart archive into NS_CNPG_SYSTEM and waits for it. The operator exists here
                   only because the gate has no operator team (ADR-029); a release never
-                  installs it. Before CNPG, kind's local-path-provisioner gets the class
+                  installs it. After it, cert-manager and the Barman Cloud Plugin from their
+                  pinned release manifests, the plugin in NS_CNPG_SYSTEM, each waited for
+                  (ADR-043). Before CNPG, kind's local-path-provisioner gets the class
                   `shared` on a runner directory every node mounts: ReadWriteMany for the
                   log claim (ADR-036).
   secrets         writes `.env` for the gate (its context, the stand-ins' endpoints and
-                  the S3 stand-in's two keys, Polaris's and the smoke tests', which are the
-                  gate's own, ADR-031), then runs
+                  the S3 stand-in's three keys, Polaris's, the smoke tests' and the backups',
+                  which are the gate's own, ADR-031, ADR-043), then runs
                   scripts/init_env.py --apply-secrets (ADR-006). Refuses an existing `.env`.
   standins        applies the stand-ins (gates/standins.py: SeaweedFS for S3, OPA with
-                  gates/opa/policy.rego) in NS_STANDINS and waits for them (ADR-031). Never
+                  gates/opa/policy.rego) in NS_STANDINS and waits for them (ADR-031), then
+                  creates the backup bucket in SeaweedFS and checks it (ADR-043). Never
                   part of a release; the install's endpoint check needs them on the gate.
                   With them the recorder (ADR-034), with a TLS certificate made here.
   check-standins  runs gates/check_standins.sh in a short-lived curl pod in Polaris's namespace:
@@ -31,7 +34,8 @@
                   must have happened and ones that must not (ADR-034). Prints counts, never a body.
   install [--fresh] [--dry-run]
                   installs the latest release HEAD contains (released_tags) from a checkout of
-                  its tag, then this commit's release over it (ADR-021); with no tag, or with
+                  its tag, with the gate's `.env` copied into it, then this commit's release
+                  over it (ADR-021); with no tag, or with
                   --fresh, only this commit's release. With --dry-run, this commit's release is
                   a server-side dry-run over the installed one (ADR-038). Prints which it did.
   check-polaris-pg
@@ -71,11 +75,20 @@
                   as gate_smoke, with the smoke tests' own S3 key (Secret smoke-s3), writes a
                   table into gate_catalog on the S3 endpoint and reads it back, and the policy
                   endpoint refuses what the gate's policy does not grant (ADR-026, ADR-031).
+  check-restore   proves a restore (ADR-043 §4): an on-demand `Backup` of polaris-pg through
+                  the Barman Cloud Plugin, waited for until completed; then the `Cluster`
+                  polaris-pg-restore, one instance bootstrapped from the ObjectStore
+                  polaris-backup, its base backup and archived WAL to the latest, waited for
+                  until Ready and then healthy on several reads in a row, past CNPG's restart
+                  after the recovery; then gates/check_restore.sh in a pod on Polaris's
+                  PostgreSQL image reads from it, as Polaris, the realm's root principal and
+                  gate_catalog.
+                  polaris-pg-restore is deleted whatever happened.
 
 Every kubectl and helm call names the gate's context, and a namespace where the object has
 one. Nothing here reaches any cluster but the kind cluster it creates (ADR-017).
 
-Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | check-polaris-pg | check-polaris | console-image | batch-image | check-logs | check-console | check-iceberg
+Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | check-polaris-pg | check-polaris | console-image | batch-image | check-logs | check-console | check-iceberg | check-restore
 """
 
 import copy
@@ -108,14 +121,20 @@ CONTEXT = f"kind-{CLUSTER}"
 TOOLS = ("kind", "kubectl", "helm", "kubeconform")
 # The binary inside each tool's archive; the others are plain binaries.
 ARCHIVE_MEMBERS = {"helm": "linux-amd64/helm", "kubeconform": "kubeconform"}
+# The release manifests' own names (gates/pins.json `manifests`, ADR-043 §3).
+CERT_MANAGER_NAMESPACE = "cert-manager"
+CERT_MANAGER_DEPLOYMENTS = ("cert-manager", "cert-manager-cainjector", "cert-manager-webhook")
+PLUGIN_DEPLOYMENT = "barman-cloud"
 # On the gate the S3 stand-in is the gate's own, so the gate makes up its credentials, Polaris's
-# and the smoke tests'; on a test or target cluster they are another team's and typed in by
-# hand (ADR-031).
+# the smoke tests' and the backups'; on a test or target cluster they are another team's and
+# typed in by hand (ADR-031, ADR-043).
 GATE_ENV_GENERATED = ("POLARIS_S3_ACCESS_KEY_ID", "POLARIS_S3_SECRET_ACCESS_KEY",
-                      "SMOKE_S3_ACCESS_KEY_ID", "SMOKE_S3_SECRET_ACCESS_KEY")
+                      "SMOKE_S3_ACCESS_KEY_ID", "SMOKE_S3_SECRET_ACCESS_KEY",
+                      "POLARIS_BACKUP_S3_ACCESS_KEY_ID", "POLARIS_BACKUP_S3_SECRET_ACCESS_KEY")
 # On the gate, the endpoints of other teams' services are the stand-ins' (ADR-031).
 STANDIN_REGION = "us-east-1"
 STANDIN_BUCKET = "polaris-warehouse"
+STANDIN_BACKUP_BUCKET = "polaris-backup"
 # Polaris's own S3 key, as the AWS SDK reads it: catalogs without STS are read and written with
 # it (charts/polaris/values-lakehouse.yaml).
 POLARIS_S3_ENV = {"AWS_ACCESS_KEY_ID": "accessKeyId", "AWS_SECRET_ACCESS_KEY": "secretAccessKey"}
@@ -204,13 +223,30 @@ def shared_storage_class():
             "reclaimPolicy": "Delete", "volumeBindingMode": "WaitForFirstConsumer"}
 
 
-def up_commands(pins, chart_path, namespace):
+def plugin_manifest(text, namespace):
+    """The plugin's release manifest, refused unless every namespace it names is `namespace`:
+    it names its own, and the plugin must run in the operator's (ADR-043 §3)."""
+    named = {line.split(":", 1)[1].strip() for line in text.splitlines()
+             if line.strip().startswith("namespace:")}
+    if not named:
+        raise ValueError("the plugin's manifest names no namespace")
+    if named != {namespace}:
+        raise ValueError(f"the plugin's manifest names {', '.join(sorted(named))}, "
+                         f"not the operator's namespace {namespace}")
+    return text
+
+
+def up_commands(pins, chart_path, namespace, manifests):
     """(argv, stdin) in order: the cluster, the control-plane taken off NoSchedule, the shared
-    class next to kind's `standard` (the provisioner restarted to read it), then CNPG."""
+    class next to kind's `standard` (the provisioner restarted to read it), CNPG, then
+    cert-manager and the plugin from `manifests` (name to text), each waited for."""
     config = {"nodePathMap": [],
               "storageClassConfigs": {"standard": {"nodePathMap": STANDARD_NODE_PATHS},
                                       SHARED_CLASS: {"sharedFileSystemPath": SHARED_NODE_DIR}}}
     provisioner = ["kubectl", "--context", CONTEXT, "-n", "local-path-storage"]
+    # Server-side: cert-manager's CRDs are too large for the last-applied annotation.
+    apply = ["kubectl", "--context", CONTEXT, "apply", "--server-side", "--field-manager=gate",
+             "-f", "-"]
     return [
         (["kind", "create", "cluster", "--name", CLUSTER,
           "--config", os.path.join(HERE, "kind.yaml"),
@@ -226,6 +262,12 @@ def up_commands(pins, chart_path, namespace):
                         "--timeout=3m"], None),
         (["helm", "--kube-context", CONTEXT, "install", "cnpg", chart_path,
           "--namespace", namespace, "--create-namespace", "--wait", "--timeout", "5m"], None),
+        (apply, manifests["cert_manager"]),
+        (["kubectl", "--context", CONTEXT, "-n", CERT_MANAGER_NAMESPACE, "rollout", "status",
+          *[f"deployment/{d}" for d in CERT_MANAGER_DEPLOYMENTS], "--timeout=5m"], None),
+        (apply, manifests["barman_cloud_plugin"]),
+        (["kubectl", "--context", CONTEXT, "-n", namespace, "rollout", "status",
+          f"deployment/{PLUGIN_DEPLOYMENT}", "--timeout=5m"], None),
     ]
 
 
@@ -237,6 +279,7 @@ def standin_endpoints(ns):
         "S3_ENDPOINT": f"http://{recorder}:{standins.S3_PORT}",
         "S3_REGION": STANDIN_REGION,
         "POLARIS_WAREHOUSE_BUCKET": STANDIN_BUCKET,
+        "POLARIS_BACKUP_BUCKET": STANDIN_BACKUP_BUCKET,
         "POLARIS_OPA_URL": f"http://{recorder}:{standins.OPA_PORT}{standins.OPA_PACKAGE_PATH}",
         "POLARIS_DB_HOST": recorder,
     }
@@ -278,13 +321,21 @@ def write_gate_env(path, template_text):
     init_env.write_env(path, gate_env(template_text))
 
 
-def standins_commands(env):
-    """Apply the stand-ins' List (on stdin), then wait until both are ready."""
+def standins_commands(env, manifest):
+    """(argv, stdin) in order: apply the stand-ins' List `manifest`, wait until all three are
+    ready, then create the backup bucket with SeaweedFS's shell (`weed mini -bucket` makes only
+    the warehouse's) and check that its filer lists it (ADR-043)."""
+    ns = ["kubectl", "--context", CONTEXT, "-n", env["NS_STANDINS"]]
+    bucket = env["POLARIS_BACKUP_BUCKET"]
     return [
-        ["kubectl", "--context", CONTEXT, "apply", "--server-side", "--field-manager=gate",
-         "-f", "-"],
-        ["kubectl", "--context", CONTEXT, "-n", env["NS_STANDINS"], "rollout", "status",
-         "deployment/seaweedfs", "deployment/opa", "deployment/recorder", "--timeout=5m"],
+        (["kubectl", "--context", CONTEXT, "apply", "--server-side", "--field-manager=gate",
+          "-f", "-"], manifest),
+        (ns + ["rollout", "status", "deployment/seaweedfs", "deployment/opa",
+               "deployment/recorder", "--timeout=5m"], None),
+        (ns + ["exec", "-i", "deployment/seaweedfs", "--", "weed", "shell"],
+         f"s3.bucket.create -name {bucket}\n"),
+        (ns + ["exec", "deployment/seaweedfs", "--", "curl", "-sf", "-o", "/dev/null",
+               f"http://127.0.0.1:{standins.FILER_PORT}/buckets/{bucket}/"], None),
     ]
 
 
@@ -347,24 +398,54 @@ def recorder_logs_command(env):
             "deployment/recorder", "--tail=-1"]
 
 
-def check_traffic(log_text, expectation_lists):
-    """(problems, lines): a count of the records, then one line per expectation."""
+# When this commit's install over the last release ended, for check-traffic's restart window.
+INSTALL_RECORD = "/tmp/lakehouse-gate-install.json"
+
+
+def restart_events_command(namespace):
+    return ["kubectl", "--context", CONTEXT, "-n", namespace, "get", "events",
+            "--field-selector",
+            f"involvedObject.name={release.POLARIS_PG},reason=UpgradingInstance", "-o", "json"]
+
+
+def restart_window(events, install_end):
+    """polaris-pg's restart during the upgrade: from its first UpgradingInstance event to the
+    end of this commit's install; None without both (Kade, 2026-10-12). CNPG emits no event
+    when a restart ends, and step 1 waits for it, so the install's end bounds it."""
+    if not install_end:
+        return None
+    times = [e.get("eventTime") or e.get("firstTimestamp") or e.get("lastTimestamp")
+             for e in events.get("items", [])
+             if e.get("involvedObject", {}).get("kind") == "Cluster"
+             and e["involvedObject"].get("name") == release.POLARIS_PG
+             and e.get("reason") == "UpgradingInstance"]
+    times = [t for t in times if t and traffic.when(t) <= traffic.when(install_end)]
+    return (min(times, key=traffic.when), install_end) if times else None
+
+
+def check_traffic(log_text, expectation_lists, restart=None):
+    """(problems, lines): a count of the records, the restart window if any, then one line per
+    expectation."""
     recorded = traffic.records(log_text)
     by_proto = {p: sum(1 for r in recorded
                        if r.get("proto") == p and r.get("event") != "listening")
                 for p in ("http", "pg")}
     lines = [f"Recorder: {by_proto['http'] + by_proto['pg']} records: {by_proto['http']} HTTP, "
              f"{by_proto['pg']} PostgreSQL."]
+    if restart:
+        lines.append(f"{release.POLARIS_PG} restarted during the upgrade from {restart[0]} to "
+                     f"{restart[1]}: only there may a rule let through what it allows.")
     problems = []
     for expectations in expectation_lists:
-        more_problems, more_lines = traffic.check(recorded, expectations)
+        more_problems, more_lines = traffic.check(recorded, expectations, restart)
         problems += more_problems
         lines += more_lines
     return problems, lines
 
 
 def install_plan(previous, previous_dir, fresh, dry_run=False):
-    """The commands that install a release on the gate, and the line that says which."""
+    """The commands that install a release on the gate, and the line that says which. The
+    release before this one runs from a worktree of its tag, with the gate's `.env`."""
     this = ["python3", os.path.join(ROOT, "install", "release.py")] + (
         ["--dry-run"] if dry_run else [])
     then = " (server-side dry-run)" if dry_run else ""
@@ -374,6 +455,8 @@ def install_plan(previous, previous_dir, fresh, dry_run=False):
         return [this], f"No release to upgrade from: fresh install{then} (ADR-021)."
     return [
         ["git", "-C", ROOT, "worktree", "add", "--detach", previous_dir, previous],
+        # release.py reads .env from its own checkout, and a tag's worktree has none.
+        ["cp", "-p", os.path.join(ROOT, ".env"), os.path.join(previous_dir, ".env")],
         ["python3", os.path.join(previous_dir, "install", "release.py")],
         this,
     ], f"Upgrade: {previous} installed from its tag, then this commit over it{then} (ADR-021)."
@@ -555,6 +638,103 @@ def check_iceberg_commands(env, image, name):
          ICEBERG_CATALOG, env["S3_ENDPOINT"], env["S3_REGION"],
          env["POLARIS_WAREHOUSE_BUCKET"]],
     ]
+
+
+# The restore the smoke gate proves (ADR-043 §4): its Cluster, sized for the gate only.
+RESTORE = "polaris-pg-restore"
+RESTORE_SIZE = "1Gi"
+BACKUP_TIMEOUT = 600
+RESTORE_TIMEOUT = "900s"
+
+
+def backup_manifest(env, name):
+    """An on-demand Backup of polaris-pg through the Barman Cloud Plugin."""
+    return {"apiVersion": "postgresql.cnpg.io/v1", "kind": "Backup",
+            "metadata": {"name": name, "namespace": env["NS_CATALOG_POLARIS"]},
+            "spec": {"cluster": {"name": release.POLARIS_PG}, "method": "plugin",
+                     "pluginConfiguration": {"name": release.PLUGIN_NAME}}}
+
+
+def backup_outcome(backup):
+    """None while the Backup runs; (phase, error) once it completed or failed."""
+    status = backup.get("status", {})
+    if status.get("phase") in ("completed", "failed"):
+        return status["phase"], status.get("error", "")
+    return None
+
+
+def restore_cluster(env, image):
+    """polaris-pg-restore: one instance bootstrapped from polaris-pg's ObjectStore, with no
+    recovery target, so every archived WAL is replayed. It names no plugin of its own, so it
+    never archives into polaris-pg's backups. The Polaris user keeps its password from
+    polaris-db."""
+    source = release.POLARIS_PG
+    return {"apiVersion": "postgresql.cnpg.io/v1", "kind": "Cluster",
+            "metadata": {"name": RESTORE, "namespace": env["NS_CATALOG_POLARIS"]},
+            "spec": {"instances": 1, "imageName": image, "storage": {"size": RESTORE_SIZE},
+                     "bootstrap": {"recovery": {
+                         "source": source, "database": release.POLARIS_DATABASE,
+                         "owner": "polaris", "secret": {"name": release.POLARIS_DB_SECRET}}},
+                     "externalClusters": [{
+                         "name": source,
+                         "plugin": {"name": release.PLUGIN_NAME, "parameters": {
+                             "barmanObjectName": release.POLARIS_BACKUP_STORE,
+                             "serverName": source}}}]}}
+
+
+def check_restore_command(env, image, database, name):
+    """The pod that runs check_restore.sh (on stdin) as Polaris against the restore."""
+    creds = [{"name": var, "valueFrom": {"secretKeyRef": {"name": release.POLARIS_DB_SECRET,
+                                                          "key": key}}}
+             for var, key in (("PGUSER", "username"), ("PGPASSWORD", "password"))]
+    overrides = {"spec": {"containers": [{"name": name, "image": image, "env": creds,
+                                          "stdin": True, "stdinOnce": True}]}}
+    return ["kubectl", "--context", CONTEXT, "-n", env["NS_CATALOG_POLARIS"], "run", name,
+            f"--image={image}", "--restart=Never", "--rm", "-i", "--quiet",
+            "--pod-running-timeout=3m", "--override-type=strategic",
+            "--overrides", json.dumps(overrides),
+            "--command", "--", "sh", "-s", "--", f"{RESTORE}-rw", database,
+            release.POLARIS_REALM, ICEBERG_CATALOG]
+
+
+def check_restore(env):
+    """Backs up polaris-pg, restores it into polaris-pg-restore, reads it, deletes it.
+    Returns (problems, notes)."""
+    ns = env["NS_CATALOG_POLARIS"]
+    kubectl = ["kubectl", "--context", CONTEXT, "-n", ns]
+    apply = kubectl + ["apply", "--server-side", "--field-manager=gate", "-f", "-"]
+    pg = polaris_pg_values()
+    name = f"{release.POLARIS_PG}-gate-{os.getpid()}"
+    run(apply, json.dumps(backup_manifest(env, name)))
+    phase, error = wait_for(kubectl + ["get", f"backup/{name}", "-o", "json"], backup_outcome,
+                            f"Backup {name}", timeout=BACKUP_TIMEOUT)
+    if phase != "completed":
+        return [f"Backup {name} of {release.POLARIS_PG} failed: {error}"], []
+    notes = [f"Backup {name} of {release.POLARIS_PG} completed through the plugin."]
+    try:
+        run(apply, json.dumps(restore_cluster(env, pg["image"])))
+        ready = subprocess.run(kubectl + ["wait", "--for=condition=Ready", f"cluster/{RESTORE}",
+                                          f"--timeout={RESTORE_TIMEOUT}"], check=False)
+        if ready.returncode != 0:
+            return [f"Cluster {RESTORE} did not get Ready from "
+                    f"{release.POLARIS_BACKUP_STORE}"], notes
+        # CNPG restarts the restored instance once after the recovery: Ready, then refusing
+        # connections (smoke 38245393066), as polaris-pg after an upgrade.
+        problem = release.settle(release.call, CONTEXT, ns, cluster=RESTORE)
+        if problem:
+            return [problem], notes
+        notes.append(f"Cluster {RESTORE} restored from {release.POLARIS_BACKUP_STORE} is Ready, "
+                     f"healthy on {release.SETTLE_READS} reads {release.SETTLE_INTERVAL} s apart.")
+        with open(os.path.join(HERE, "check_restore.sh"), encoding="utf-8") as f:
+            script = f.read()
+        command = check_restore_command(env, pg["image"], pg["database"],
+                                        f"check-restore-{os.getpid()}")
+        if subprocess.run(command, input=script, text=True, check=False).returncode != 0:
+            return [f"Cluster {RESTORE} lacks what polaris-pg held"], notes
+        return [], notes
+    finally:
+        subprocess.run(kubectl + ["delete", "cluster", RESTORE, "--ignore-not-found",
+                                  "--wait", "--timeout=5m"], check=False)
 
 
 def console_source(path=os.path.join(CONSOLE_IMAGE_DIR, "source.json")):
@@ -1033,9 +1213,12 @@ def main(argv):
             chart_path = os.path.join(d, os.path.basename(chart["url"]))
             with open(chart_path, "wb") as f:
                 f.write(fetch(chart["url"], chart["sha256"]))
+            manifests = {name: fetch(pin["url"], pin["sha256"]).decode("utf-8")
+                         for name, pin in pins["manifests"].items()}
+            plugin_manifest(manifests["barman_cloud_plugin"], namespace)
             os.makedirs(SHARED_HOST_DIR, exist_ok=True)
             os.chmod(SHARED_HOST_DIR, 0o777)
-            for command, stdin in up_commands(pins, chart_path, namespace):
+            for command, stdin in up_commands(pins, chart_path, namespace, manifests):
                 run(command, stdin)
         return 0
     if argv[1:] == ["secrets"]:
@@ -1050,10 +1233,11 @@ def main(argv):
                 tempfile.TemporaryDirectory() as d:
             manifest = json.dumps(standins.manifests(env, pins, f.read(), code.read(),
                                                      recorder_certificate(env, d)))
-        apply, wait = standins_commands(env)
+        (apply, _), *rest = standins_commands(env, manifest)
         print("+ " + " ".join(apply) + "  (the stand-ins' List on stdin)", flush=True)
         subprocess.run(apply, input=manifest, text=True, check=True)
-        run(wait)
+        for command, stdin in rest:
+            run(command, stdin)
         return 0
     if argv[1:] == ["check-standins"]:
         env = release.load_env(ROOT, os.environ)
@@ -1073,7 +1257,13 @@ def main(argv):
         env = release.load_env(ROOT, os.environ)
         log = subprocess.run(recorder_logs_command(env), capture_output=True, text=True,
                              check=True).stdout
-        problems, lines = check_traffic(log, [traffic.load(path) for path in argv[2:]])
+        install_end = None
+        if os.path.exists(INSTALL_RECORD):
+            with open(INSTALL_RECORD, encoding="utf-8") as f:
+                install_end = json.load(f)["end"]
+        events = json.loads(output(restart_events_command(env["NS_CATALOG_POLARIS"])))
+        problems, lines = check_traffic(log, [traffic.load(path) for path in argv[2:]],
+                                        restart_window(events, install_end))
         for line in lines:
             print(line)
         return 1 if problems else 0
@@ -1086,6 +1276,9 @@ def main(argv):
             print(summary, flush=True)
             for command in commands:
                 run(command)
+        if len(commands) > 1 and "--dry-run" not in argv:
+            with open(INSTALL_RECORD, "w", encoding="utf-8") as f:
+                json.dump({"end": dt.datetime.now(dt.timezone.utc).isoformat()}, f)
         return 0
     if argv[1:] == ["console-image"]:
         source = console_source()
@@ -1150,6 +1343,11 @@ def main(argv):
         print("+ " + " ".join(apply) + "  (the ConfigMap iceberg-smoke on stdin)", flush=True)
         subprocess.run(apply, input=manifest, text=True, check=True)
         return subprocess.run(pod, check=False).returncode
+    if argv[1:] == ["check-restore"]:
+        problems, notes = check_restore(release.load_env(ROOT, os.environ))
+        for line in notes + problems:
+            print(line, flush=True)
+        return 1 if problems else 0
     print(__doc__.strip().splitlines()[-1], file=sys.stderr)
     return 2
 

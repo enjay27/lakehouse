@@ -75,6 +75,85 @@ class Check(unittest.TestCase):
         _, lines = traffic.check(traffic.records(LOG), [expectation("exist", listener="opa")])
         self.assertNotIn("CREATE_CATALOG", "\n".join(lines))
 
+    # Smoke 38217979245 found 2 failed statements and could say nothing more: a failed
+    # must-not now names what matched, by fields that hold no body, statement or message.
+    def test_a_failed_must_not_names_each_matching_record_by_its_safe_fields(self):
+        failed = {"proto": "pg", "listener": "pg", "event": "statement",
+                  "time": "2026-10-12T07:33:01.5+00:00", "user": "polaris",
+                  "database": "polaris", "sql": "SELECT secret_column FROM t",
+                  "error": {"severity": "FATAL", "sqlstate": "57P01",
+                            "message": "terminating connection due to administrator command"}}
+        problems, lines = traffic.check([failed, OPA], [
+            expectation("not_exist", event="statement",
+                        **{"error.sqlstate": {"regex": "^(?!42P01$)"}})])
+        self.assertEqual(len(problems), 1)
+        self.assertEqual(lines[1], "     time=2026-10-12T07:33:01.5+00:00 proto=pg listener=pg "
+                                   "event=statement user=polaris database=polaris "
+                                   "error.severity=FATAL error.sqlstate=57P01")
+        text = "\n".join(lines)
+        for unsafe in ("secret_column", "terminating", "SELECT"):
+            self.assertNotIn(unsafe, text)
+
+    def test_an_http_record_is_named_without_its_path_or_bodies(self):
+        _, lines = traffic.check(traffic.records(LOG), [
+            expectation("not_exist", listener="s3")])
+        self.assertEqual(lines[1], "     proto=http listener=s3 method=PUT status=403")
+
+    def test_at_most_five_records_are_named_then_how_many_more(self):
+        many = [{"proto": "pg", "event": "statement", "time": str(i)} for i in range(7)]
+        _, lines = traffic.check(many, [expectation("not_exist", event="statement")])
+        self.assertEqual(len(lines), 1 + 5 + 1)
+        self.assertEqual(lines[-1], "     and 2 more")
+
+    def test_a_passing_or_must_exist_expectation_names_no_record(self):
+        _, lines = traffic.check(traffic.records(LOG), [
+            expectation("exist", listener="opa"), expectation("exist", listener="pg")])
+        self.assertEqual(len(lines), 2)
+
+    # Kade, 2026-10-12: the upgrade that adds the plugin restarts polaris-pg; inside that window
+    # only, a must-not may let through the records its `allow_during_restart` names.
+    RESTART = ("2026-10-12T10:34:00+00:00", "2026-10-12T10:37:58+00:00")
+
+    def restart_rule(self):
+        return {"name": "no failed statement", "must": "not_exist",
+                "match": {"event": "statement", "error.sqlstate": {"regex": "^(?!42P01$)"}},
+                "allow_during_restart": {"error.sqlstate": "57P01", "error.severity": "FATAL"}}
+
+    def statement(self, time, sqlstate="57P01", severity="FATAL"):
+        return {"proto": "pg", "event": "statement", "time": time,
+                "error": {"sqlstate": sqlstate, "severity": severity}}
+
+    def test_an_allowed_record_inside_the_restart_passes_and_is_named_as_allowed(self):
+        problems, lines = traffic.check([self.statement("2026-10-12T10:37:06.861+00:00")],
+                                        [self.restart_rule()], restart=self.RESTART)
+        self.assertEqual(problems, [])
+        self.assertEqual(lines[0], "ok   no failed statement: 0 matching records, "
+                                   "1 allowed during the restart")
+        self.assertIn("error.sqlstate=57P01", lines[1])
+
+    def test_the_same_record_outside_the_restart_fails(self):
+        for time in ("2026-10-12T10:33:59.999+00:00", "2026-10-12T10:38:00+00:00"):
+            with self.subTest(time=time):
+                problems, _ = traffic.check([self.statement(time)], [self.restart_rule()],
+                                            restart=self.RESTART)
+                self.assertEqual(len(problems), 1)
+
+    def test_without_a_restart_nothing_is_allowed(self):
+        problems, _ = traffic.check([self.statement("2026-10-12T10:37:06.861+00:00")],
+                                    [self.restart_rule()])
+        self.assertEqual(len(problems), 1)
+
+    def test_a_record_the_allowance_does_not_name_fails_inside_the_restart(self):
+        problems, _ = traffic.check(
+            [self.statement("2026-10-12T10:37:06+00:00", sqlstate="25006", severity="ERROR")],
+            [self.restart_rule()], restart=self.RESTART)
+        self.assertEqual(len(problems), 1)
+
+    def test_only_a_must_not_may_carry_an_allowance(self):
+        rule = {**self.restart_rule(), "must": "exist"}
+        with self.assertRaises(ValueError):
+            traffic.check([], [rule])
+
     def test_an_unknown_must_is_refused(self):
         with self.assertRaises(ValueError):
             traffic.check([], [expectation("maybe", listener="opa")])

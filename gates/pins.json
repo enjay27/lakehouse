@@ -34,6 +34,20 @@
     "sha256": "b53d3991fe84bcf38767e7702cae78666265427a127a26fff168ab4207d2b1df",
     "source": "digest in https://cloudnative-pg.github.io/charts/index.yaml, matched by the archive, read 2026-10-10"
   },
+  "manifests": {
+    "cert_manager": {
+      "version": "v1.21.2",
+      "url": "https://github.com/cert-manager/cert-manager/releases/download/v1.21.2/cert-manager.yaml",
+      "sha256": "e03b668ec8675214af6b0a671699d088f2601fa3878e0dbe1b41d3feafd1879f",
+      "source": "sha256 of the release asset downloaded from GitHub, read 2026-10-12; no published checksum for it; released 2026-09-11 (ADR-043)"
+    },
+    "barman_cloud_plugin": {
+      "version": "v0.15.0",
+      "url": "https://github.com/cloudnative-pg/plugin-barman-cloud/releases/download/v0.15.0/manifest.yaml",
+      "sha256": "1c483eae12a7424ad28ac66bdfee771b510ee8e234cb8756c3ade7254cef2fad",
+      "source": "sha256 of the release asset downloaded from GitHub, read 2026-10-12; no published checksum for it; released 2026-09-03, v0.15.1 under two weeks old (ADR-043)"
+    }
+  },
   "standin_images": {
     "seaweedfs": {
       "image": "chrislusf/seaweedfs:4.47@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882",

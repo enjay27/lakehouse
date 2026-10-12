@@ -21,6 +21,12 @@ spec:
       owner: {{ .Values.owner }}
       secret:
         name: {{ .Values.credentialsSecret }}
+  # WAL archived continuously through the Barman Cloud Plugin to objectstore.yaml (ADR-043).
+  plugins:
+    - name: barman-cloud.cloudnative-pg.io
+      isWALArchiver: true
+      parameters:
+        barmanObjectName: polaris-backup
   storage:
     size: {{ .Values.storage.size }}
     {{- with .Values.storage.storageClass }}

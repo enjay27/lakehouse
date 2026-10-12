@@ -1,0 +1,18 @@
+# A base backup of polaris-pg every day through the Barman Cloud Plugin (ADR-043).
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: polaris-pg-daily
+  labels:
+    app.kubernetes.io/name: polaris-postgres
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+    helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  cluster:
+    name: polaris-pg
+  method: plugin
+  pluginConfiguration:
+    name: barman-cloud.cloudnative-pg.io
+  backupOwnerReference: self

@@ -23,3 +23,15 @@ storage:
 database: polaris
 owner: polaris
 credentialsSecret: polaris-db
+
+# Backups through the Barman Cloud Plugin (ADR-043). The endpoint and bucket have no default:
+# install/release.py passes S3_ENDPOINT and POLARIS_BACKUP_BUCKET from .env. The key is the
+# `polaris-backup-s3` Secret from scripts/init_env.py --apply-secrets (ADR-006).
+backup:
+  endpointURL: ""
+  bucket: ""
+  credentialsSecret: polaris-backup-s3
+  # Base backups and WAL older than this are deleted by the plugin: <n>d, <n>w or <n>m.
+  retention: 30d
+  # CNPG's cron has seconds first: every day at 02:00 in the operator's time zone.
+  schedule: "0 0 2 * * *"
