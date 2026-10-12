@@ -51,6 +51,19 @@ class Pins(unittest.TestCase):
         self.assertRegex(pins["node_image"]["image"],
                          r"^kindest/node:v1\.\d+\.\d+@sha256:[0-9a-f]{64}$")
 
+    def test_cert_manager_and_the_plugin_are_pinned_release_manifests(self):
+        # ADR-043 §3: the gate installs both, each pinned with its digest.
+        manifests = gate.load_pins(os.path.join(HERE, "pins.json"))["manifests"]
+        self.assertEqual(sorted(manifests), ["barman_cloud_plugin", "cert_manager"])
+        for name, pin in manifests.items():
+            with self.subTest(manifest=name):
+                self.assertRegex(pin["sha256"], r"^[0-9a-f]{64}$")
+                self.assertRegex(pin["version"], r"^v\d+\.\d+\.\d+$")
+                self.assertTrue(pin["url"].startswith("https://github.com/"))
+                self.assertIn(f"/download/{pin['version']}/", pin["url"])
+                self.assertTrue(pin["url"].endswith(".yaml"))
+                self.assertTrue(pin["source"])
+
     def test_the_operator_pin_is_supported_by_the_install_script(self):
         pins = gate.load_pins(os.path.join(HERE, "pins.json"))
         with open(os.path.join(HERE, "..", "install", "supported.json"), encoding="utf-8") as f:
@@ -108,22 +121,52 @@ class Tools(unittest.TestCase):
 
 class Commands(unittest.TestCase):
     PINS = {"node_image": {"image": "kindest/node:v1.36.4@sha256:" + "a" * 64}}
+    MANIFESTS = {"cert_manager": "cert-manager manifest",
+                 "barman_cloud_plugin": "plugin manifest"}
 
     def commands(self):
-        return gate.up_commands(self.PINS, "/tmp/chart.tgz", "cnpg-system")
+        return gate.up_commands(self.PINS, "/tmp/chart.tgz", "cnpg-system", self.MANIFESTS)
 
-    def test_up_creates_the_three_node_cluster_first_and_installs_cnpg_last(self):
-        steps = self.commands()
-        (create, stdin), (helm, _) = steps[0], steps[-1]
+    def helm_index(self, steps):
+        return next(i for i, (argv, _) in enumerate(steps) if argv[0] == "helm")
+
+    def test_up_creates_the_three_node_cluster_first(self):
+        (create, stdin) = self.commands()[0]
         self.assertIsNone(stdin)
         self.assertEqual(create[:4], ["kind", "create", "cluster", "--name"])
         self.assertEqual(create[create.index("--name") + 1], gate.CLUSTER)
         self.assertEqual(create[create.index("--image") + 1], self.PINS["node_image"]["image"])
         self.assertTrue(create[create.index("--config") + 1].endswith("gates/kind.yaml"))
+
+    def test_up_installs_cnpg_from_the_chart_archive_and_waits(self):
+        steps = self.commands()
+        helm, stdin = steps[self.helm_index(steps)]
+        self.assertIsNone(stdin)
         self.assertEqual(helm[:3], ["helm", "--kube-context", gate.CONTEXT])
         self.assertIn("/tmp/chart.tgz", helm)
         self.assertEqual(helm[helm.index("--namespace") + 1], "cnpg-system")
         self.assertIn("--wait", helm)
+
+    def test_after_cnpg_cert_manager_then_the_plugin_are_applied_and_waited_for(self):
+        # ADR-043 §3: cert-manager in its own namespace, then the plugin's manifest, which
+        # needs cert-manager's webhook for its Issuer and Certificates, in the operator's.
+        steps = self.commands()
+        after = steps[self.helm_index(steps) + 1:]
+        self.assertEqual(len(after), 4)
+        (cm_apply, cm_text), (cm_wait, w1), (pl_apply, pl_text), (pl_wait, w2) = after
+        for apply in (cm_apply, pl_apply):
+            self.assertEqual(apply, ["kubectl", "--context", gate.CONTEXT, "apply",
+                                     "--server-side", "--field-manager=gate", "-f", "-"])
+        self.assertEqual((cm_text, pl_text), ("cert-manager manifest", "plugin manifest"))
+        self.assertEqual((w1, w2), (None, None))
+        self.assertEqual(cm_wait, ["kubectl", "--context", gate.CONTEXT, "-n",
+                                   gate.CERT_MANAGER_NAMESPACE, "rollout", "status",
+                                   "deployment/cert-manager",
+                                   "deployment/cert-manager-cainjector",
+                                   "deployment/cert-manager-webhook", "--timeout=5m"])
+        self.assertEqual(pl_wait, ["kubectl", "--context", gate.CONTEXT, "-n", "cnpg-system",
+                                   "rollout", "status", f"deployment/{gate.PLUGIN_DEPLOYMENT}",
+                                   "--timeout=5m"])
 
     def test_up_lets_the_control_plane_take_pods_before_cnpg(self):
         taint, _ = self.commands()[1]
@@ -148,7 +191,8 @@ class Commands(unittest.TestCase):
 
     def test_the_shared_class_is_applied_and_the_provisioner_restarted_before_cnpg(self):
         steps = self.commands()
-        (apply, stdin), = [c for c in steps if "apply" in c[0]]
+        helm = self.helm_index(steps)
+        (apply, stdin), = [c for c in steps[:helm] if "apply" in c[0]]
         storage_class = json.loads(stdin)
         self.assertEqual((storage_class["kind"], storage_class["metadata"]["name"]),
                          ("StorageClass", gate.SHARED_CLASS))
@@ -159,9 +203,20 @@ class Commands(unittest.TestCase):
         status = next(i for i, n in enumerate(names) if "rollout status" in n)
         self.assertIn("deployment/local-path-provisioner", names[restart])
         self.assertLess(restart, status)
-        self.assertLess(status, len(steps) - 1)
-        for argv, _ in steps[1:-1]:
-            self.assertEqual(argv[1:3], ["--context", gate.CONTEXT])
+        self.assertLess(status, helm)
+        for argv, _ in steps[1:]:
+            if argv[0] == "kubectl":
+                self.assertEqual(argv[1:3], ["--context", gate.CONTEXT])
+
+    def test_the_plugin_manifest_must_name_only_the_operators_namespace(self):
+        # The release manifest names its namespace itself; applied elsewhere, the plugin would
+        # not run next to the operator (ADR-043 §3).
+        text = "kind: Deployment\nmetadata:\n  name: barman-cloud\n  namespace: cnpg-system\n"
+        self.assertEqual(gate.plugin_manifest(text, "cnpg-system"), text)
+        with self.assertRaisesRegex(ValueError, "cnpg-system.*operators"):
+            gate.plugin_manifest(text, "operators")
+        with self.assertRaisesRegex(ValueError, "no namespace"):
+            gate.plugin_manifest("kind: Deployment\n", "cnpg-system")
 
     def test_the_kind_config_has_one_control_plane_and_two_workers(self):
         with open(os.path.join(HERE, "kind.yaml"), encoding="utf-8") as f:

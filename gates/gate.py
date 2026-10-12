@@ -9,7 +9,9 @@
                   PostgreSQL instances apart, then installs the CNPG operator from its pinned
                   chart archive into NS_CNPG_SYSTEM and waits for it. The operator exists here
                   only because the gate has no operator team (ADR-029); a release never
-                  installs it. Before CNPG, kind's local-path-provisioner gets the class
+                  installs it. After it, cert-manager and the Barman Cloud Plugin from their
+                  pinned release manifests, the plugin in NS_CNPG_SYSTEM, each waited for
+                  (ADR-043). Before CNPG, kind's local-path-provisioner gets the class
                   `shared` on a runner directory every node mounts: ReadWriteMany for the
                   log claim (ADR-036).
   secrets         writes `.env` for the gate (its context, the stand-ins' endpoints and
@@ -108,6 +110,10 @@ CONTEXT = f"kind-{CLUSTER}"
 TOOLS = ("kind", "kubectl", "helm", "kubeconform")
 # The binary inside each tool's archive; the others are plain binaries.
 ARCHIVE_MEMBERS = {"helm": "linux-amd64/helm", "kubeconform": "kubeconform"}
+# The release manifests' own names (gates/pins.json `manifests`, ADR-043 §3).
+CERT_MANAGER_NAMESPACE = "cert-manager"
+CERT_MANAGER_DEPLOYMENTS = ("cert-manager", "cert-manager-cainjector", "cert-manager-webhook")
+PLUGIN_DEPLOYMENT = "barman-cloud"
 # On the gate the S3 stand-in is the gate's own, so the gate makes up its credentials, Polaris's
 # and the smoke tests'; on a test or target cluster they are another team's and typed in by
 # hand (ADR-031).
@@ -204,13 +210,30 @@ def shared_storage_class():
             "reclaimPolicy": "Delete", "volumeBindingMode": "WaitForFirstConsumer"}
 
 
-def up_commands(pins, chart_path, namespace):
+def plugin_manifest(text, namespace):
+    """The plugin's release manifest, refused unless every namespace it names is `namespace`:
+    it names its own, and the plugin must run in the operator's (ADR-043 §3)."""
+    named = {line.split(":", 1)[1].strip() for line in text.splitlines()
+             if line.strip().startswith("namespace:")}
+    if not named:
+        raise ValueError("the plugin's manifest names no namespace")
+    if named != {namespace}:
+        raise ValueError(f"the plugin's manifest names {', '.join(sorted(named))}, "
+                         f"not the operator's namespace {namespace}")
+    return text
+
+
+def up_commands(pins, chart_path, namespace, manifests):
     """(argv, stdin) in order: the cluster, the control-plane taken off NoSchedule, the shared
-    class next to kind's `standard` (the provisioner restarted to read it), then CNPG."""
+    class next to kind's `standard` (the provisioner restarted to read it), CNPG, then
+    cert-manager and the plugin from `manifests` (name to text), each waited for."""
     config = {"nodePathMap": [],
               "storageClassConfigs": {"standard": {"nodePathMap": STANDARD_NODE_PATHS},
                                       SHARED_CLASS: {"sharedFileSystemPath": SHARED_NODE_DIR}}}
     provisioner = ["kubectl", "--context", CONTEXT, "-n", "local-path-storage"]
+    # Server-side: cert-manager's CRDs are too large for the last-applied annotation.
+    apply = ["kubectl", "--context", CONTEXT, "apply", "--server-side", "--field-manager=gate",
+             "-f", "-"]
     return [
         (["kind", "create", "cluster", "--name", CLUSTER,
           "--config", os.path.join(HERE, "kind.yaml"),
@@ -226,6 +249,12 @@ def up_commands(pins, chart_path, namespace):
                         "--timeout=3m"], None),
         (["helm", "--kube-context", CONTEXT, "install", "cnpg", chart_path,
           "--namespace", namespace, "--create-namespace", "--wait", "--timeout", "5m"], None),
+        (apply, manifests["cert_manager"]),
+        (["kubectl", "--context", CONTEXT, "-n", CERT_MANAGER_NAMESPACE, "rollout", "status",
+          *[f"deployment/{d}" for d in CERT_MANAGER_DEPLOYMENTS], "--timeout=5m"], None),
+        (apply, manifests["barman_cloud_plugin"]),
+        (["kubectl", "--context", CONTEXT, "-n", namespace, "rollout", "status",
+          f"deployment/{PLUGIN_DEPLOYMENT}", "--timeout=5m"], None),
     ]
 
 
@@ -1033,9 +1062,12 @@ def main(argv):
             chart_path = os.path.join(d, os.path.basename(chart["url"]))
             with open(chart_path, "wb") as f:
                 f.write(fetch(chart["url"], chart["sha256"]))
+            manifests = {name: fetch(pin["url"], pin["sha256"]).decode("utf-8")
+                         for name, pin in pins["manifests"].items()}
+            plugin_manifest(manifests["barman_cloud_plugin"], namespace)
             os.makedirs(SHARED_HOST_DIR, exist_ok=True)
             os.chmod(SHARED_HOST_DIR, 0o777)
-            for command, stdin in up_commands(pins, chart_path, namespace):
+            for command, stdin in up_commands(pins, chart_path, namespace, manifests):
                 run(command, stdin)
         return 0
     if argv[1:] == ["secrets"]:
