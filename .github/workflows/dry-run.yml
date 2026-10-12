@@ -1,5 +1,5 @@
-# The dry-run gate (ADR-018): runs on a push to gate/dry-run/<task>, the same commit a session
-# opens its PR from. gate-check (ADR-019) looks for a successful run of this workflow, by its
+# The dry-run gate (ADR-038): runs on a push to gate/dry-run/<task>, the same commit a session
+# opens its PR from. gate-check (ADR-039) looks for a successful run of this workflow, by its
 # path, on that branch. kind with three nodes and the pinned CNPG operator (ADR-017, ADR-029),
 # then the gate's Secrets (gates/gate.py secrets, ADR-006), the stand-ins for other teams'
 # services (gates/gate.py standins, ADR-031), the latest release the commit

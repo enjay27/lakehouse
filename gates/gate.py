@@ -1,4 +1,4 @@
-"""The kind gate (ADR-017, ADR-018, ADR-029): pinned tools, the cluster, the CNPG operator.
+"""The kind gate (ADR-017, ADR-029, ADR-038): pinned tools, the cluster, the CNPG operator.
 
   tools BIN_DIR [NAME...]
                   downloads kind, kubectl, helm and kubeconform (or only the NAMEs) from
@@ -33,7 +33,7 @@
                   installs the latest release HEAD contains (released_tags) from a checkout of
                   its tag, then this commit's release over it (ADR-021); with no tag, or with
                   --fresh, only this commit's release. With --dry-run, this commit's release is
-                  a server-side dry-run over the installed one (ADR-018). Prints which it did.
+                  a server-side dry-run over the installed one (ADR-038). Prints which it did.
   check-polaris-pg
                   compares the running `Cluster` polaris-pg with the values its helm release
                   was installed with, and checks its instances run on different nodes

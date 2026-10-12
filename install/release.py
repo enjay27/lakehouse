@@ -6,7 +6,7 @@
    installs it first.
 1. Polaris, in `NS_CATALOG_POLARIS`. Its Secrets come first (scripts/init_env.py
    --apply-secrets, ADR-006). Datahub adds its steps in P3. The gates run this same script
-   (ADR-018).
+   (ADR-038).
    a. Its PostgreSQL: the `Cluster` polaris-pg from charts/polaris-postgres (ADR-008,
       ADR-010), installed with helm and waited on until Ready.
    b. The S3 endpoint and the policy endpoint from `.env` must answer, asked from Polaris's
@@ -31,7 +31,7 @@
       are printed and the install still passes.
 
 With --dry-run, the helm upgrades are server-side dry-runs, the bootstrap does not run and
-nothing waits: the dry-run gate (ADR-018).
+nothing waits: the dry-run gate (ADR-038).
 
 Settings come from `.env` at the repository root, then the environment, which wins. Every
 kubectl and helm call names `$KUBE_CONTEXT` (no default, ADR-004) and its namespace (ADR-007).

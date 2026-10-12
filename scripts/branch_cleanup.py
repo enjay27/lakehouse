@@ -7,7 +7,7 @@
    has that task.
 3. Everything else stays: `main`, `rc`, Kade's branches, other `gate/` names.
 
-`<task>` is the branch without its first segment, as in gate-check (ADR-019).
+`<task>` is the branch without its first segment, as in gate-check (ADR-039).
 
 Usage:
   python3 branch_cleanup.py BRANCHES_JSON PRS_JSON OWNER/REPO
