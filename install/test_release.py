@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
 import release  # noqa: E402
@@ -441,6 +442,38 @@ class EndpointScript(unittest.TestCase):
         finally:
             server.shutdown()
             server.server_close()
+
+
+class Call(unittest.TestCase):
+    def test_a_failed_command_returns_its_stdout_and_its_stderr(self):
+        code, out = release.call(["sh", "-c",
+                                  "echo said-on-stdout; echo said-on-stderr >&2; exit 3"])
+        self.assertEqual(code, 3)
+        self.assertIn("said-on-stdout", out)
+        self.assertIn("said-on-stderr", out)
+
+    def test_a_command_that_succeeds_returns_its_stdout_only(self):
+        self.assertEqual(release.call(["sh", "-c", "echo out; echo err >&2"]), (0, "out\n"))
+
+
+class EndpointsThroughCall(unittest.TestCase):
+    """#37: the URL that did not answer reaches the install's problem. A stand-in kubectl runs
+    the check's script here, its output on stdout as `kubectl run -i` relays the pod's."""
+
+    def test_the_problem_names_the_url_that_did_not_answer(self):
+        with tempfile.TemporaryDirectory() as d:
+            kubectl = os.path.join(d, "kubectl")
+            with open(kubectl, "w", encoding="utf-8") as f:
+                f.write('#!/bin/sh\nwhile [ "$1" != "--command" ]; do shift; done\n'
+                        'shift 2\nexec "$@"\n')
+            os.chmod(kubectl, 0o755)
+            closed = "http://127.0.0.1:9/"
+            env = {**ENDPOINT_ENV, "S3_ENDPOINT": closed, "POLARIS_OPA_URL": closed + "opa"}
+            with mock.patch.dict(os.environ, {"PATH": d + os.pathsep + os.environ["PATH"]}):
+                problems, _ = release.endpoints_answer(env, release.call, image=CURL,
+                                                       name="endpoint-check-test")
+        self.assertIn(f"{closed} did not answer", "\n".join(problems))
+        self.assertIn(f"{closed}opa did not answer", "\n".join(problems))
 
 
 BOOTSTRAP_ENV = {**ENDPOINT_ENV, "POLARIS_DB_HOST": "",

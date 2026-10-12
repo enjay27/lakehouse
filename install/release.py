@@ -75,8 +75,8 @@ POLARIS_SECRETS = (POLARIS_DB_SECRET, "polaris-s3", "polaris-token-signing")
 # Every `.env` variable that holds a credential: what goes into a Secret.
 CREDENTIAL_VARS = sorted({var for s in SECRETS for var in s.from_env.values()})
 # The admin tool image's entrypoint. The bootstrap pod runs it only once stdin ends, that is
-# once kubectl is attached, so none of its output is lost; all of it goes to stderr, which is
-# what a failed command returns here (call).
+# once kubectl is attached, so none of its output is lost; all of it goes to stderr, which a
+# failed command returns here (call) with its stdout.
 ADMIN_TOOL_ENTRYPOINT = "/opt/jboss/container/java/run/run-java.sh"
 BOOTSTRAP_WRAPPER = f'cat >/dev/null; exec {ADMIN_TOOL_ENTRYPOINT} "$@" 1>&2'
 # What Polaris 1.6.0's admin tool says, exit 3, for a realm that has its root principal
@@ -152,9 +152,13 @@ def operator_versions(deployments_json):
 
 
 def call(argv, stdin=None):
-    """Runs a command, with stdin if given; (exit code, stdout or, on failure, stderr)."""
+    """Runs a command, with stdin if given; (exit code, stdout or, on failure, stderr and then
+    stdout), so a failed pod's own report survives whichever stream kubectl relays it on (#37)."""
     result = subprocess.run(argv, input=stdin, capture_output=True, text=True, check=False)
-    return result.returncode, result.stdout if result.returncode == 0 else result.stderr
+    if result.returncode == 0:
+        return result.returncode, result.stdout
+    return result.returncode, "\n".join(part.strip() for part in (result.stderr, result.stdout)
+                                         if part.strip())
 
 
 def check_preconditions(env, run, supported):
