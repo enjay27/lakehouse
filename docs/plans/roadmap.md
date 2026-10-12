@@ -208,8 +208,10 @@ source does not matter for operation. What follows is the list they cover.
   books balance, each refused request is kept once from its pod, no read is kept but the rows
   count them, both pods' files are read, and the second run changes nothing.
   The release workflow pushes the batch's image to GHCR under its content-hash tag, and a
-  cluster pulls it from `IMAGE_REGISTRY` or GHCR (ADR-042, #55); the first release proves
-  the push.
+  cluster pulls it from `IMAGE_REGISTRY` or GHCR (ADR-042, #55); `platform-2026.10.12`,
+  the first release with Polaris, pushed it (#78).
+- Before Datahub (Kade, 2026-10-12): backups of Polaris's PostgreSQL with a restore proven
+  on the gate, then ADR-027's network policies; metrics (P5) and failover (#31) follow.
 - **Gate:** dry-run and smoke. **Linux:** the release installed on a test cluster.
 
 ### P3: Datahub
