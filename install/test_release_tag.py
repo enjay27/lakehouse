@@ -9,6 +9,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(__file__))
+import release  # noqa: E402
 import release_tag as rt  # noqa: E402
 
 PINS = {
@@ -16,6 +17,7 @@ PINS = {
     "cnpg_chart": {"version": "0.29.1", "operator_version": "1.30.1"},
 }
 SUPPORTED = {"cnpg_operator": ["1.30"]}
+BATCH_IMAGE = "ghcr.io/o/r/polaris-log-batch:0123456789ab"
 
 
 def check(name, conclusion="success", status="completed", url=None):
@@ -101,7 +103,7 @@ class Notes(unittest.TestCase):
         return rt.notes(tag="platform-2026.10.10", commit="c" * 40, previous=previous,
                         pr="https://github.com/o/r/pull/7", checks=all_green(),
                         log=["abc1234 A change", "def5678 Another"], pins=PINS,
-                        supported=SUPPORTED)
+                        supported=SUPPORTED, batch_image=BATCH_IMAGE)
 
     def test_names_the_tag_commit_and_pr(self):
         text = self.notes()
@@ -128,6 +130,12 @@ class Notes(unittest.TestCase):
         text = self.notes()
         self.assertIn("since platform-2026.10.09", text)
         self.assertIn("- abc1234 A change", text)
+
+    def test_names_the_batch_image_with_a_digest_the_tag_job_fills_in(self):
+        text = self.notes()
+        self.assertIn(f"`{BATCH_IMAGE}@{rt.DIGEST_PLACEHOLDER}`", text)
+        self.assertEqual(text.count(rt.DIGEST_PLACEHOLDER), 1)
+        self.assertNotIn("none in this release", text)
 
     def test_the_first_release_says_so(self):
         self.assertIn("First release: nothing to upgrade from.", self.notes(previous=None))
@@ -171,6 +179,7 @@ class Main(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("node image `kindest/node:v1.36.4@sha256:", out)
         self.assertIn("First release", out)
+        self.assertIn(f"`{release.batch_image()}@{rt.DIGEST_PLACEHOLDER}`", out)
 
     def test_unknown_arguments_exit_2(self):
         self.assertEqual(self.run_main(["release"])[0], 2)

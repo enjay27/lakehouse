@@ -14,7 +14,9 @@ Usage:
       CHECK_RUNS_JSON is the head commit's check runs (a list of {name, status, conclusion});
       exits 0 when every release-gate check succeeded, else 1 with the problems.
   python3 install/release_tag.py notes TAG COMMIT PREVIOUS|- PR_URL CHECK_RUNS_JSON LOG_FILE
-      prints the release notes; LOG_FILE holds one commit per line since PREVIOUS.
+      prints the release notes; LOG_FILE holds one commit per line since PREVIOUS. The log
+      batch's image is named with DIGEST_PLACEHOLDER for its digest, which the release
+      workflow's tag job replaces with the digest its image job pushed or found (ADR-042).
 """
 
 import json
@@ -22,8 +24,12 @@ import os
 import re
 import sys
 
+import release
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
+# Stands for the log batch image's digest in the notes, until the tag job writes it (ADR-042).
+DIGEST_PLACEHOLDER = "BATCH_IMAGE_DIGEST"
 TAG_RE = re.compile(r"^platform-(\d{4})\.(\d{2})\.(\d{2})(?:\.(\d+))?$")
 DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
 # The check names the `rc` ruleset requires (ADR-033): release-gate.yml's jobs and static.yml.
@@ -70,7 +76,7 @@ def verify(check_runs):
     return problems
 
 
-def notes(tag, commit, previous, pr, checks, log, pins, supported):
+def notes(tag, commit, previous, pr, checks, log, pins, supported, batch_image):
     image = pins["node_image"]["image"]
     kubernetes = image.split(":", 1)[1].split("@", 1)[0]
     chart = pins["cnpg_chart"]
@@ -92,7 +98,7 @@ def notes(tag, commit, previous, pr, checks, log, pins, supported):
         "",
         "## Versions",
         "",
-        "- Charts and images: none in this release yet.",
+        f"- The log batch's image: `{batch_image}@{DIGEST_PLACEHOLDER}` (ADR-042).",
         f"- Gate: kind on Kubernetes {kubernetes}, node image `{image}`.",
         f"- CloudNativePG on the gate: chart {chart['version']}, operator "
         f"{chart['operator_version']}. Operator versions this release supports: "
@@ -135,7 +141,8 @@ def main(argv):
             log = f.read().splitlines()
         print(notes(tag, commit, None if prev == "-" else prev, pr, _load(checks_path), log,
                     _load(os.path.join(ROOT, "gates", "pins.json")),
-                    _load(os.path.join(HERE, "supported.json"))), end="")
+                    _load(os.path.join(HERE, "supported.json")), release.batch_image()),
+              end="")
         return 0
     print(__doc__.strip().splitlines()[0], file=sys.stderr)
     return 2

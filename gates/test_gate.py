@@ -238,6 +238,30 @@ POLARIS_DB_PASSWORD=
 """
 
 
+class BatchImage(unittest.TestCase):
+    """ADR-042: the gate builds the batch's image and loads it into kind under the name
+    release.py installs, from IMAGE_REGISTRY or GHCR."""
+
+    def test_builds_and_loads_the_image_under_the_name_release_installs(self):
+        mirror = "mirror.example.invalid/platform"
+        build, load = gate.batch_image_commands(registry=mirror)
+        image = gate.release.batch_image(registry=mirror)
+        self.assertEqual(build[:2], ["docker", "build"])
+        self.assertEqual(build[build.index("--tag") + 1], image)
+        self.assertEqual(load, ["kind", "load", "docker-image", image, "--name", gate.CLUSTER])
+
+    def test_the_default_is_the_github_container_registry(self):
+        build, _ = gate.batch_image_commands()
+        self.assertTrue(build[build.index("--tag") + 1].startswith(
+            "ghcr.io/enjay27/lakehouse/polaris-log-batch:"))
+
+    def test_the_gates_env_from_the_template_leaves_the_registry_empty(self):
+        with open(os.path.join(gate.ROOT, ".env.template"), encoding="utf-8") as f:
+            env = gate.init_env.parse(gate.gate_env(f.read(), gen=lambda name: "x"))
+        self.assertEqual(env["IMAGE_REGISTRY"], "")
+        self.assertEqual(gate.release.image_registry(env), gate.release.DEFAULT_IMAGE_REGISTRY)
+
+
 class GateEnv(unittest.TestCase):
     def test_the_gate_context_and_the_stand_in_credentials_are_set(self):
         env = gate.init_env.parse(gate.gate_env(TEMPLATE, gen=lambda name: f"gen-{name}"))

@@ -207,7 +207,9 @@ source does not matter for operation. What follows is the list they cover.
   output from the claim, read-only: every line and row holds contract v2, every summary's
   books balance, each refused request is kept once from its pod, no read is kept but the rows
   count them, both pods' files are read, and the second run changes nothing.
-  Open: how the batch's image reaches a target cluster (ADR-036).
+  The release workflow pushes the batch's image to GHCR under its content-hash tag, and a
+  cluster pulls it from `IMAGE_REGISTRY` or GHCR (ADR-042, #55); the first release proves
+  the push.
 - **Gate:** dry-run and smoke. **Linux:** the release installed on a test cluster.
 
 ### P3: Datahub

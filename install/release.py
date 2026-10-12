@@ -23,8 +23,9 @@
       their log files to the claim.
 2. After every service of step 1 (ADR-029, ADR-037):
    a. The log batch (ADR-036): charts/polaris-log-batch with the image built from this
-      checkout (batch_image), then the CronJob read back to check it runs that image. Its
-      failure stops the install.
+      checkout (batch_image), pulled from `IMAGE_REGISTRY` or, when it is empty, the GitHub
+      Container Registry the release workflow pushes it to (ADR-042); then the CronJob read
+      back to check it runs that image. Its failure stops the install.
    b. The console, when `POLARIS_CONSOLE_ENABLED=true` (ADR-028): charts/polaris-console with
       its values-lakehouse.yaml and the URL at which the browser reaches Polaris, waited on
       until rolled out. A maintainer tool, never part of how Polaris operates: its problems
@@ -37,7 +38,10 @@ Settings come from `.env` at the repository root, then the environment, which wi
 kubectl and helm call names `$KUBE_CONTEXT` (no default, ADR-004) and its namespace (ADR-007).
 Needs kubectl and helm.
 
-Usage: python3 install/release.py [--dry-run]
+`batch-image` prints the batch's image on the GitHub Container Registry, whatever `.env` says:
+the image the release workflow pushes (ADR-042).
+
+Usage: python3 install/release.py [--dry-run] | batch-image
        Exits 0 when every step passed, 1 with the problems, 2 on an unknown option.
 """
 
@@ -88,7 +92,9 @@ BATCH = "polaris-log-batch"
 BATCH_CHART = os.path.join(ROOT, "charts", BATCH)
 BATCH_IMAGE_DIR = os.path.join(ROOT, "images", BATCH)
 BATCH_IMAGE_FILES = ("Dockerfile", "polaris_log_batch.py")
-BATCH_IMAGE_REPOSITORY = f"lakehouse/{BATCH}"
+# Where the release workflow pushes this repository's images, and where a cluster pulls them
+# from while `IMAGE_REGISTRY` is empty (ADR-042).
+DEFAULT_IMAGE_REGISTRY = "ghcr.io/enjay27/lakehouse"
 POLARIS_CHART = os.path.join(ROOT, "charts", "polaris")
 POLARIS_VALUES = os.path.join(POLARIS_CHART, "values-lakehouse.yaml")
 CONSOLE = "polaris-console"
@@ -232,20 +238,27 @@ def console_values(env):
                                "polarisRealm": POLARIS_REALM}}}
 
 
-def batch_image(directory=BATCH_IMAGE_DIR):
-    """The batch's image: its repository, and the first 12 hex digits of a SHA-256 over the
-    names and contents of the files that go into it."""
+def image_registry(env):
+    """The registry and path the cluster pulls this repository's images from (ADR-042):
+    `IMAGE_REGISTRY`, or the GitHub Container Registry while it is empty."""
+    return env.get("IMAGE_REGISTRY", "").rstrip("/") or DEFAULT_IMAGE_REGISTRY
+
+
+def batch_image(directory=BATCH_IMAGE_DIR, registry=DEFAULT_IMAGE_REGISTRY):
+    """The batch's image: the registry, its name, and the first 12 hex digits of a SHA-256
+    over the names and contents of the files that go into it."""
     digest = hashlib.sha256()
     for name in BATCH_IMAGE_FILES:
         with open(os.path.join(directory, name), "rb") as f:
             data = f.read()
         digest.update(f"{name}\0{len(data)}\0".encode() + data)
-    return f"{BATCH_IMAGE_REPOSITORY}:{digest.hexdigest()[:12]}"
+    return f"{registry}/{BATCH}:{digest.hexdigest()[:12]}"
 
 
-def batch_values():
-    """The batch chart's values from this checkout: the image built from it."""
-    repository, tag = batch_image().rsplit(":", 1)
+def batch_values(env):
+    """The batch chart's values from this checkout and `.env`: the image built from it, in
+    the registry the cluster pulls from."""
+    repository, tag = batch_image(registry=image_registry(env)).rsplit(":", 1)
     return {"image": {"repository": repository, "tag": tag}}
 
 
@@ -397,11 +410,12 @@ def polaris(env, run, dry_run=False):
 
 def log_batch(env, run, dry_run=False):
     """Step 2, first: the log batch's CronJob from charts/polaris-log-batch with the image built
-    from this checkout, then read back to check it runs that image (ADR-036). A failure stops
-    the install (ADR-037). Returns (problems, notes)."""
+    from this checkout, in the registry from `.env` (ADR-042), then read back to check it runs
+    that image (ADR-036). A failure stops the install (ADR-037). Returns (problems, notes)."""
     namespace, context = env["NS_CATALOG_POLARIS"], env["KUBE_CONTEXT"]
+    expected = batch_image(registry=image_registry(env))
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
-        json.dump(batch_values(), f)
+        json.dump(batch_values(env), f)
     try:
         helm = ["helm", "--kube-context", context, "-n", namespace, "upgrade", "--install",
                 BATCH, BATCH_CHART, "-f", f.name]
@@ -418,9 +432,9 @@ def log_batch(env, run, dry_run=False):
     if code != 0:
         return [f"cronjob/{BATCH} in {namespace} cannot be read: {out.strip()}"], []
     image = out.strip()
-    if image != batch_image():
+    if image != expected:
         return [f"cronjob/{BATCH} in {namespace} runs {image or 'no image'}, "
-                f"expected {batch_image()}"], []
+                f"expected {expected}"], []
     return [], [f"Step 2: cronjob/{BATCH} in {namespace} runs {image}."]
 
 
@@ -478,6 +492,9 @@ def install(env, run, supported, dry_run):
 
 
 def main(argv):
+    if argv[1:] == ["batch-image"]:
+        print(batch_image())
+        return 0
     if argv[1:] not in ([], ["--dry-run"]):
         print(__doc__.strip().splitlines()[-2].strip(), file=sys.stderr)
         return 2

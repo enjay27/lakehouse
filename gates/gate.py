@@ -609,9 +609,11 @@ def check_console_command(env, image, name):
             env["POLARIS_CONSOLE_API_URL"], release.POLARIS_REALM]
 
 
-def batch_image_commands(directory=release.BATCH_IMAGE_DIR):
-    """Build the log batch's image, tagged as release.py names it, and load it into kind."""
-    image = release.batch_image(directory)
+def batch_image_commands(directory=release.BATCH_IMAGE_DIR,
+                         registry=release.DEFAULT_IMAGE_REGISTRY):
+    """Build the log batch's image, tagged as release.py names it in that registry (ADR-042),
+    and load it into kind, which runs it without pulling."""
+    image = release.batch_image(directory, registry)
     return [["docker", "build", "--file", os.path.join(directory, "Dockerfile"),
              "--tag", image, directory],
             ["kind", "load", "docker-image", image, "--name", CLUSTER]]
@@ -1098,7 +1100,8 @@ def main(argv):
                 run(command)
         return 0
     if argv[1:] == ["batch-image"]:
-        for command in batch_image_commands():
+        env = release.load_env(ROOT, os.environ)
+        for command in batch_image_commands(registry=release.image_registry(env)):
             run(command)
         return 0
     if argv[1:] == ["check-logs"]:

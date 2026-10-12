@@ -4,10 +4,15 @@
 #     head commit,
 #   - the rc commit's tree is that head's tree, so the tag names what the gate tested,
 #   - the commit carries no platform-* tag yet.
+# Before the tag, the image job pushes the log batch's image to the GitHub Container Registry
+# under its content-hash tag (ADR-042): built for linux/amd64 only when that tag is not there
+# yet, never overwritten, then read back without credentials, so a private package stops the
+# release before its tag.
 # The tag is platform-YYYY.MM.DD (.N for a later release the same day), created with a GitHub
-# release whose notes list the versions, the gate's checks and the commits since the last
-# release. Only the tagging job can write; the platform-* ruleset keeps tags from moving or
-# being deleted. Claude sessions start this workflow only when Kade asks.
+# release whose notes list the versions with the image's digest, the gate's checks and the
+# commits since the last release. Only the tagging job can write the repository, only the image
+# job packages; the platform-* ruleset keeps tags from moving or being deleted. Claude sessions
+# start this workflow only when Kade asks.
 name: Release
 
 on:
@@ -88,9 +93,65 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "notes=$(base64 -w0 "$RUNNER_TEMP/notes.md")" >> "$GITHUB_OUTPUT"
 
+  image:
+    name: the log batch's image on GHCR
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write  # push the log batch's image (ADR-042)
+    outputs:
+      image: ${{ steps.push.outputs.image }}
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Push the image unless its tag exists, then read it without credentials
+        id: push
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          image=$(python3 install/release.py batch-image)
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          docker login ghcr.io --username "$ACTOR" --password-stdin <<<"$GH_TOKEN"
+          # A tag is never overwritten: build and push only when GHCR says it is not there
+          # (not found, or no package yet, which GHCR refuses); any other error stops.
+          if out=$(docker buildx imagetools inspect "$image" 2>&1); then
+            echo "$image is on GHCR already: not built, not pushed." >> "$GITHUB_STEP_SUMMARY"
+          elif grep -qiE 'not found|denied|forbidden|403' <<<"$out"; then
+            docker build --platform linux/amd64 \
+              --label "org.opencontainers.image.source=https://github.com/$REPO" \
+              --file images/polaris-log-batch/Dockerfile --tag "$image" images/polaris-log-batch
+            docker push "$image"
+            echo "Pushed $image." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::error::GHCR did not say whether $image exists: $out"
+            exit 1
+          fi
+          docker logout ghcr.io
+          anonymous=$(mktemp -d)
+          if ! digest=$(DOCKER_CONFIG=$anonymous docker buildx imagetools inspect "$image" \
+                          --format '{{json .Manifest.Digest}}' 2>&1); then
+            echo "::error::$image cannot be pulled without credentials ($digest): make the package public in its settings, then run the release again (ADR-042)"
+            exit 1
+          fi
+          digest=$(jq -r . <<<"$digest")
+          if ! [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::unexpected digest for $image: $digest"
+            exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Anyone can pull $image@$digest." >> "$GITHUB_STEP_SUMMARY"
+
   tag:
     name: tag and GitHub release
-    needs: check
+    needs: [check, image]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -102,9 +163,18 @@ jobs:
           REPO: ${{ github.repository }}
           TAG: ${{ needs.check.outputs.tag }}
           NOTES: ${{ needs.check.outputs.notes }}
+          IMAGE: ${{ needs.image.outputs.image }}
+          DIGEST: ${{ needs.image.outputs.digest }}
         run: |
           set -euo pipefail
           base64 -d <<<"$NOTES" > "$RUNNER_TEMP/notes.md"
+          # The notes name the image the image job pushed or found; its digest replaces the
+          # placeholder (install/release_tag.py DIGEST_PLACEHOLDER).
+          if [ "$(grep -cF "\`$IMAGE@BATCH_IMAGE_DIGEST\`" "$RUNNER_TEMP/notes.md")" != 1 ]; then
+            echo "::error::the notes do not name $IMAGE once with its digest placeholder"
+            exit 1
+          fi
+          sed -i "s|@BATCH_IMAGE_DIGEST\`|@$DIGEST\`|" "$RUNNER_TEMP/notes.md"
           gh release create "$TAG" --repo "$REPO" --target "$GITHUB_SHA" --title "$TAG" \
             --notes-file "$RUNNER_TEMP/notes.md"
           echo "Released $TAG at $GITHUB_SHA." >> "$GITHUB_STEP_SUMMARY"
