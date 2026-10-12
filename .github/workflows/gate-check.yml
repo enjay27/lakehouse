@@ -1,7 +1,9 @@
-# gate-check (ADR-019): a PR that changes platform files passes only when a passing dry-run on
-# gate/dry-run/<task> covers its head (ADR-018). Runs on every PR except those into rc, whose
-# release gate runs the dry-run itself (ADR-033). auto-merge.yml lists this
-# workflow by its name, "Gate check", and requires its check `gate-check` by name (ADR-022).
+# gate-check (ADR-039): a PR that changes platform files passes only when a passing dry-run on
+# gate/dry-run/<task> and a passing smoke on gate/smoke/<task> cover its head (ADR-038); one that
+# changes batch or fixture spec files also needs a passing log-batch on gate/log-batch/<task>
+# (ADR-040 §5). Runs on every PR except those into rc, whose release gate runs dry-run and smoke
+# itself (ADR-033). auto-merge.yml lists this workflow by its name, "Gate check", and requires
+# its check `gate-check` by name (ADR-022).
 # The rule, scripts/gate_check.py, is checked out from main, never from the PR, so a PR cannot
 # change the rule that judges it; until main has the script (the PR that adds it) the PR's
 # copy runs. A PR that edits this file still runs its own copy of the workflow.
@@ -24,7 +26,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
-      actions: read  # the dry-run runs on gate/dry-run/<task>
+      actions: read  # the runs on gate/dry-run/<task>, gate/smoke/<task>, gate/log-batch/<task>
     steps:
       - name: Check out the PR head with its history
         uses: actions/checkout@v7
@@ -41,7 +43,7 @@ jobs:
           path: .gate
           persist-credentials: false
 
-      - name: A passing dry-run covers the head
+      - name: Passing runs of the gates the PR needs cover the head
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -55,8 +57,14 @@ jobs:
             echo "main has no gate_check.py yet; running the PR's copy"
             script=pr/scripts/gate_check.py
           fi
-          gate_branch=$(python3 "$script" --gate-branch "$HEAD_BRANCH")
-          gh api -X GET "repos/$REPO/actions/runs" -f branch="$gate_branch" -f status=success \
-            -F per_page=100 > "$RUNNER_TEMP/runs.json"
+          # One page of successful runs per gate branch, merged into one list.
+          n=0
+          for gate_branch in $(python3 "$script" --gate-branch "$HEAD_BRANCH"); do
+            n=$((n + 1))
+            gh api -X GET "repos/$REPO/actions/runs" -f branch="$gate_branch" -f status=success \
+              -F per_page=100 > "$RUNNER_TEMP/runs-$n.json"
+          done
+          jq -s '{workflow_runs: (map(.workflow_runs) | add)}' "$RUNNER_TEMP"/runs-*.json \
+            > "$RUNNER_TEMP/runs.json"
           python3 "$script" "$HEAD_BRANCH" "$BASE_SHA" "$HEAD_SHA" "$RUNNER_TEMP/runs.json" pr \
             | tee -a "$GITHUB_STEP_SUMMARY"

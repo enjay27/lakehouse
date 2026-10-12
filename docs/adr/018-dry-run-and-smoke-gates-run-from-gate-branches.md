@@ -1,6 +1,6 @@
 # ADR-018: Dry-run and smoke gates run from throwaway `gate/*` branches on the PR's exact commit
 
-- **Status:** Amended by ADR-032
+- **Status:** Superseded by ADR-038
 - **Date:** 2026-10-10
 - **Related:** ADR-016, ADR-017, ADR-019, ADR-021
 

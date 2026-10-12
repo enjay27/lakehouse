@@ -87,7 +87,7 @@ source does not matter for operation. What follows is the list they cover.
 
 ### P1: the gates and the foundation
 
-- The kind gate with dry-run and smoke workflows (ADR-017, ADR-018), gate-check (ADR-019),
+- The kind gate with dry-run and smoke workflows (ADR-017, ADR-038), gate-check (ADR-039),
   and the release flow `main` → `rc` → tag (ADR-033, ADR-021). The first release has nothing
   to upgrade from.
 - The CloudNativePG operator on the gate and test clusters only, at the pinned version; on
@@ -117,14 +117,99 @@ source does not matter for operation. What follows is the list they cover.
 
 - The PostgreSQL `Cluster`, then the local Polaris chart (ADR-009). Settings are verified on
   the running object (ADR-016).
-- Bootstrap: the realm and root principal from Secrets (ADR-006), then a catalog on the S3
-  endpoint (SeaweedFS stand-in on the gate, ADR-031).
-- Smoke tests through the Iceberg REST API, as an ordinary principal: create a namespace and
-  a table, write, read, and check that a principal without a grant is refused.
-- The console from `apache/polaris-tools`. If no image is published, it is built from a
-  pinned commit in the job (ADR-017).
-- The log batch (ADR-014) and its output format for Fluent Bit (ADR-024). A
-  stand-in Fluent Bit on the gate proves the hand-off.
+- `charts/polaris-postgres` (2026-10-10): the `Cluster` polaris-pg, three instances with
+  required anti-affinity, installed by `install/release.py` step 1. The static gate renders
+  it, checks its values schema and runs kubeconform (v0.8.0, pinned) on CNPG's CRD from the
+  pinned chart, with PyYAML pinned by hash (Kade's choice). The gate's kind control-plane
+  takes pods, so three nodes hold the instances apart; the smoke gate checks them on the
+  running object instead of the one-instance scratch `Cluster`. Gates on commit `20190c2`
+  (2026-10-10), both upgrading from `platform-2026.10.10`: dry-run
+  [38073559912](https://github.com/enjay27/lakehouse/actions/runs/38073559912), smoke
+  [38073559994](https://github.com/enjay27/lakehouse/actions/runs/38073559994) (the `Cluster`
+  Ready in 1 min 32 s, three instances on three nodes).
+- The stand-ins (2026-10-11, ADR-031): SeaweedFS 4.47 (`weed mini`, the bucket created at
+  start) and OPA 1.21.0 with the gate's test policy `gates/opa/policy.rego`, in `NS_STANDINS`,
+  installed by `gates/gate.py standins` before every gate install. The policy follows what
+  Polaris 1.6.0 actually sends and reads, from its source: `docs/contracts/polaris-opa-input.md`
+  (the URL names the package, the answer is `result.allow`). `release.py` now stops before
+  Polaris unless the S3 and policy endpoints answer from Polaris's namespace (ADR-029); the
+  smoke gate's `check-standins` makes an S3 round trip with Polaris's credentials and checks
+  the policy's allowed and refused cases.
+  Gates on commit `4f173d8` (2026-10-11), both upgrading from `platform-2026.10.10`: dry-run
+  [38121760939](https://github.com/enjay27/lakehouse/actions/runs/38121760939), smoke
+  [38121760980](https://github.com/enjay27/lakehouse/actions/runs/38121760980) (the stand-ins
+  ready in seconds; the S3 round trip and all 7 policy cases, 3 allowed and 4 refused, ok).
+- The recorder (2026-10-11, ADR-034, ADR-035): `gates/recorder/proxy.py`, Python standard
+  library only, forwards every byte unchanged between Polaris's three connections and their
+  services (OPA, SeaweedFS, polaris-pg; PostgreSQL TLS ends at the recorder, plain TCP to
+  polaris-pg, since TLS on both sides fails SCRAM channel binding) and writes one JSON line per
+  exchange, credentials and stored values left out. On the gate `.env` names it for
+  `S3_ENDPOINT`, `POLARIS_OPA_URL` and the new `POLARIS_DB_HOST`. `check-standins` adds logins
+  as Polaris with and without TLS through it; `check-traffic` matches the records against
+  `gates/expectations/standins.json` (9 exchanges that must exist, 6 that must not). Polaris's
+  own expectations come with its chart.
+  Gates on commit `f30915a` (2026-10-11), both upgrading from `platform-2026.10.10`: dry-run
+  [38123639581](https://github.com/enjay27/lakehouse/actions/runs/38123639581), smoke
+  [38123641118](https://github.com/enjay27/lakehouse/actions/runs/38123641118) (logins as
+  Polaris through the recorder with `sslmode=require` and `disable` ok, so polaris-pg accepts
+  the recorder's plain TCP; 21 records, 13 HTTP and 8 PostgreSQL; all 15 expectations ok).
+- Polaris 1.6.0 (2026-10-11, ADR-009, ADR-026): `charts/polaris` is upstream's chart from
+  `apache-polaris-1.6.0`, unchanged but for trailing whitespace, without its `ci/` and
+  `tests/`; our settings are in `values-lakehouse.yaml`: 2 replicas with required
+  anti-affinity and a PodDisruptionBudget, `relational-jdbc` with `sslmode=require`, tokens
+  signed with the shared symmetric key, the OPA authorizer (Kade's choices). `release.py` step
+  1 then bootstraps the realm `POLARIS` with the admin tool (an already bootstrapped realm is
+  kept) and installs Polaris. The smoke gate's `check-polaris` compares the running objects
+  with the values and gets root a token both replicas accept; `polaris.json` holds the
+  recorder to Polaris's own exchanges. Gates on commit `1683851` (2026-10-11), both upgrading
+  from `platform-2026.10.10`: dry-run
+  [38125705407](https://github.com/enjay27/lakehouse/actions/runs/38125705407), smoke
+  [38125706002](https://github.com/enjay27/lakehouse/actions/runs/38125706002) (2 replicas on
+  2 nodes; the token accepted by both pods; 142 records; all 21 expectations ok).
+- A catalog on the S3 endpoint and the Iceberg REST smoke tests (2026-10-11, ADR-026,
+  ADR-031): `gates/iceberg/smoke.py` runs PyIceberg 0.12.0 (Kade's choice: the target
+  environments' Python clients use it; pinned by hash) as the principal gate_smoke. Root
+  creates gate_catalog on S3 with `stsUnavailable` and no key in its properties; PyIceberg,
+  with its own S3 key (Secret smoke-s3) and no vended credentials, creates a table, appends
+  rows and reads them back; the policy refuses gate_smoke a drop and gate_other everything.
+  Polaris writes table metadata with its own key, which reaches the AWS SDK through
+  `extraEnv` (Kade's choice). What Polaris 1.6.0 does on S3 without STS, and why a key in a
+  catalog's properties leaks into every table's metadata:
+  `docs/contracts/polaris-s3-without-sts.md`. `iceberg.json` holds the recorder to the S3
+  writes of each client and to the policy's answers. Passed on a1af23b: dry-run
+  [38131673029](https://github.com/enjay27/lakehouse/actions/runs/38131673029), smoke
+  [38131673239](https://github.com/enjay27/lakehouse/actions/runs/38131673239) (3 rows
+  written and read back; the 3 refusals each a 403; 334 records; all 32 expectations ok).
+- The console from `apache/polaris-tools` (2026-10-11, ADR-028): no image is published, so
+  the smoke gate builds it from commit 3edb60f (`images/polaris-console`) with our lockfile
+  (Kade's choice: npm packages released at least two weeks before, each checked by sha512;
+  the UBI base images pinned by digest) and loads it into kind. `charts/polaris-console` is
+  upstream's chart at that commit with our values. It is off by default
+  (`POLARIS_CONSOLE_ENABLED`); when enabled, `release.py` installs it after Polaris (step 2,
+  never blocking), and Polaris allows its origin (CORS) only then. `gate.py check-console`
+  signs gate_maintainer in as the browser does (Kade's choice: over HTTP); the gate's policy
+  lets it read only. Passed on 79814d6: dry-run
+  [38133756210](https://github.com/enjay27/lakehouse/actions/runs/38133756210), smoke
+  [38133756150](https://github.com/enjay27/lakehouse/actions/runs/38133756150) (the image
+  built and loaded; the 10 sign-in checks ok; console.json's 3 expectations and the other 32
+  ok). Open: how the image reaches a target cluster (ADR-028).
+- The log batch (2026-10-11, ADR-014, ADR-024, ADR-036, ADR-037, #45). Polaris writes one
+  JSON file per pod to the `ReadWriteMany` claim `polaris-logs`, which `release.py` step 1
+  creates before Polaris; step 2 installs the batch's CronJob before the console, and its
+  failure stops the install. Smoke [38143901431](https://github.com/enjay27/lakehouse/actions/runs/38143901431)
+  and dry-run [38143901179](https://github.com/enjay27/lakehouse/actions/runs/38143901179)
+  passed on `976eeb4` (#51). Its output is contract v2 (`docs/contracts/polaris-logs.md`):
+  the archive's audit policy keeps refusals, errors and changes and counts the rest in
+  resource, principal and app_dropped rows; its kept lines and counters match the Fluent Bit
+  Lua filter it came from (the archive's step16, six seeds, 2026-10-11). The smoke gate's
+  `check-logs` sends each Polaris pod reads with root's token and requests without one, runs
+  the batch twice with its clock past that hour, and a stand-in Fluent Bit 5.1.2 reads the
+  output from the claim, read-only: every line and row holds contract v2, every summary's
+  books balance, each refused request is kept once from its pod, no read is kept but the rows
+  count them, both pods' files are read, and the second run changes nothing.
+  The release workflow pushes the batch's image to GHCR under its content-hash tag, and a
+  cluster pulls it from `IMAGE_REGISTRY` or GHCR (ADR-042, #55); the first release proves
+  the push.
 - **Gate:** dry-run and smoke. **Linux:** the release installed on a test cluster.
 
 ### P3: Datahub
@@ -143,6 +228,7 @@ source does not matter for operation. What follows is the list they cover.
   caller's protocol and a principal like the one it uses in production. Classes:
   - the catalog gateway: the management API;
   - StarRocks' Iceberg client: the catalog API, one principal per user;
+  - PyIceberg, the Python clients' library (the smoke tests already use 0.12.0);
   - Trino, through its Iceberg REST catalog connector;
   - Spark and Flink ETL jobs writing Iceberg tables;
   - a Kafka Connect Iceberg sink on the ETL Kafka;
@@ -184,7 +270,7 @@ when Kade learns the target clusters' version.
 | Kubernetes (gate, kind) | 1.36 (`kindest/node:v1.36.4`) | Kade: latest stable; 1.37 exists, but CloudNativePG 1.30 supports 1.34–1.36 |
 | CloudNativePG operator (gate only, ADR-029) | 1.30.1 | latest; target unknown |
 | Polaris | 1.6.0 | Kade (ADR-009) |
-| PostgreSQL for Polaris | 16, 3 instances | Kade |
+| PostgreSQL for Polaris | 16 (CNPG image 16.15, by digest in `charts/polaris-postgres`), 3 instances, required anti-affinity | Kade |
 | Pooler for Polaris | none | open: Kade does not know (ADR-010) |
 | Datahub | v1.7.0 | Kade: latest |
 | PostgreSQL for Datahub | 16 | same as Polaris; target unknown |
@@ -210,5 +296,3 @@ when Kade learns the target clusters' version.
   Linux test cluster.
 - [#9](https://github.com/enjay27/lakehouse/issues/9): versions pinned above; the pooler and the
   CPU architecture are still open (Kade).
-- ADR-014: how the log volume is shared across nodes; decided before the log batch is built
-  (P2).

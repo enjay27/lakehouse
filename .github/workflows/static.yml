@@ -1,6 +1,10 @@
-# The static gate (ADR-018): the tests of scripts/, gates/ and install/, the ADR check
-# (ADR-000), the repository check (ADR-002, ADR-006), the CLAUDE.md limits and whitespace
-# errors over the whole tree. Runs on every push to claude/** and main, and on every PR.
+# The static gate (ADR-038): the tests of scripts/, gates/, install/ and the log batch
+# (images/polaris-log-batch, ADR-036); helm lint, then the
+# charts/ tests: the rendered charts, their values schemas and kubeconform against the CRDs in
+# use (ADR-016, ADR-010), with helm and kubeconform from gates/pins.json and PyYAML pinned by
+# hash; the ADR check (ADR-000), the repository check (ADR-002, ADR-006), the CLAUDE.md limits
+# and whitespace errors over the whole tree. Runs on every push to claude/** and main, and on
+# every PR.
 # auto-merge.yml lists this workflow by its name, "Static" (ADR-022).
 name: Static
 
@@ -19,7 +23,7 @@ jobs:
   static:
     name: static
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -32,6 +36,21 @@ jobs:
         run: |
           python3 -m unittest discover -s gates -v
           python3 -m unittest discover -s install -v
+      - name: Log batch tests (ADR-036)
+        run: python3 -m unittest discover -s images/polaris-log-batch -v
+      - name: Chart tools and Python packages at pinned versions
+        run: |
+          python3 gates/gate.py tools "$RUNNER_TEMP/bin" helm kubeconform
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --require-hashes -r charts/requirements.txt
+      - name: helm lint
+        run: |
+          set -euo pipefail
+          for chart in charts/*/Chart.yaml; do helm lint --strict "$(dirname "$chart")"; done
+      - name: Chart tests (ADR-016)
+        run: |
+          "$RUNNER_TEMP/venv/bin/python" -m unittest discover -s charts -v
       - name: ADRs follow ADR-000
         run: python3 scripts/adr_check.py
       - name: Repository check

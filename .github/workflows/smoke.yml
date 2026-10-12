@@ -1,10 +1,21 @@
-# The smoke gate (ADR-018): runs on a push to gate/smoke/<task> and nightly on main. Advisory:
-# its result is reported in the PR, it does not block a merge (ADR-019). kind with three nodes
-# and the pinned CNPG operator (ADR-017, ADR-029), the latest release tag installed from its
-# checkout and this commit's release over it (ADR-021), or with `fresh` this commit's alone,
-# then a one-instance PostgreSQL Cluster that must become Ready. The release gate calls it
-# twice on every PR into rc, upgrade and fresh (ADR-033). Not a PR check into main, so
-# auto-merge.yml does not list it.
+# The smoke gate (ADR-038): runs on a push to gate/smoke/<task> and nightly on main. A PR that
+# changes platform files merges only when a passing run covers its head (ADR-039). kind with
+# three nodes and the pinned CNPG operator (ADR-017, ADR-029), the gate's Secrets (ADR-006), the
+# stand-ins for other teams' services (ADR-031), the latest release tag installed from its
+# checkout and this commit's release over it (ADR-021), or with `fresh` this commit's alone;
+# then the running Cluster polaris-pg is checked against its values, its three instances on
+# three nodes (ADR-016), the stand-ins answer as Polaris needs them to (ADR-026), Polaris runs
+# as its values say and gives root a token every replica accepts (ADR-016, ADR-026), PyIceberg
+# as an ordinary principal writes a table into a catalog on the S3 endpoint and reads it back
+# while the policy refuses what it is not granted (ADR-026, ADR-031), the log batch publishes
+# the hour of traffic sent to both Polaris pods once, keeping the refused requests and counting
+# the reads, and a stand-in Fluent Bit reads it as the contract (ADR-024, ADR-036), and the
+# recorder saw those exchanges and none it must not (ADR-034).
+# The console, built from its pinned commit, is checked last: a
+# maintainer signs in as the browser does and may only read; those steps never block, and a
+# last step warns of any that failed (ADR-028). The release gate
+# calls it twice on every PR into rc, upgrade and fresh (ADR-033). Not a PR check into main,
+# so auto-merge.yml does not list it.
 name: Smoke
 
 on:
@@ -35,6 +46,8 @@ jobs:
     env:
       KUBE_CONTEXT: kind-lakehouse-gate
       NS_CNPG_SYSTEM: cnpg-system
+      NS_CATALOG_POLARIS: catalog-polaris
+      NS_STANDINS: standins
     steps:
       - uses: actions/checkout@v7
         with:
@@ -49,6 +62,21 @@ jobs:
       - name: kind cluster and the CNPG operator (gate only, ADR-029)
         run: python3 gates/gate.py up
 
+      - name: The gate's Secrets (ADR-006)
+        run: python3 gates/gate.py secrets
+
+      # The console is a maintainer tool: its failure is reported, never blocking (ADR-028).
+      - name: The Polaris console's image, built from its pinned commit and loaded into kind (ADR-028)
+        id: console-image
+        continue-on-error: true
+        run: python3 gates/gate.py console-image
+
+      - name: The log batch's image, built from this checkout and loaded into kind (ADR-036)
+        run: python3 gates/gate.py batch-image
+
+      - name: The stand-ins, SeaweedFS and OPA (gate only, ADR-031)
+        run: python3 gates/gate.py standins
+
       - name: Install the last release, then this commit over it (ADR-021)
         env:
           FRESH: ${{ inputs.fresh }}
@@ -60,14 +88,85 @@ jobs:
             python3 gates/gate.py install | tee -a "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: A PostgreSQL Cluster becomes Ready
+      - name: The running Cluster polaris-pg matches its values (ADR-016)
         run: |
-          python3 gates/gate.py smoke-cnpg
-          echo "A one-instance CNPG Cluster became Ready." >> "$GITHUB_STEP_SUMMARY"
+          set -euo pipefail
+          python3 gates/gate.py check-polaris-pg | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: The stand-ins answer as Polaris needs them to (ADR-026, ADR-031)
+        run: |
+          set -euo pipefail
+          python3 gates/gate.py check-standins | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Polaris runs as its values say, and every replica accepts root's token (ADR-016, ADR-026)
+        run: |
+          set -euo pipefail
+          python3 gates/gate.py check-polaris | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: PyIceberg as an ordinary principal writes and reads a table on S3; the policy refuses the rest (ADR-026, ADR-031)
+        run: |
+          set -euo pipefail
+          python3 gates/gate.py check-iceberg | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: The batch publishes both pods' traffic once; a stand-in Fluent Bit reads it as the contract (ADR-024, ADR-036)
+        run: |
+          set -euo pipefail
+          python3 gates/gate.py check-logs | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: The recorder saw what it must, and nothing it must not (ADR-034)
+        run: |
+          set -euo pipefail
+          python3 gates/gate.py check-traffic gates/expectations/standins.json gates/expectations/polaris.json gates/expectations/iceberg.json | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # The console is a maintainer tool: its checks are reported, never blocking (ADR-028).
+      - name: A maintainer signs in to the console as the browser does; the policy lets it read only (ADR-026, ADR-028)
+        id: console-sign-in
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python3 gates/gate.py check-console | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: The recorder saw the policy endpoint answer the console's maintainer (ADR-028, ADR-034)
+        id: console-traffic
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python3 gates/gate.py check-traffic gates/expectations/console.json | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # continue-on-error shows a failed console step as passed; this step says which failed.
+      - name: The console's failed steps, reported and never blocking (ADR-028)
+        if: ${{ !cancelled() }}
+        env:
+          CONSOLE_IMAGE: ${{ steps.console-image.outcome }}
+          CONSOLE_SIGN_IN: ${{ steps.console-sign-in.outcome }}
+          CONSOLE_TRAFFIC: ${{ steps.console-traffic.outcome }}
+        run: |
+          failed=0
+          for step in CONSOLE_IMAGE CONSOLE_SIGN_IN CONSOLE_TRAFFIC; do
+            if [ "${!step}" = failure ]; then
+              failed=1
+              echo "::warning title=Console step failed::$step failed; the console is not blocking (ADR-028), read its log"
+              echo "- Console step $step failed (not blocking, ADR-028)" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+          if [ "$failed" = 0 ]; then
+            echo "- The console's steps did not fail" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: State of the cluster on failure
         if: failure()
         run: |
           kubectl --context "$KUBE_CONTEXT" get nodes -o wide || true
           kubectl --context "$KUBE_CONTEXT" get pods -A -o wide || true
-          kubectl --context "$KUBE_CONTEXT" -n gate-smoke get events --sort-by=.lastTimestamp || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_POLARIS" get cluster,pods,pvc -o wide || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_POLARIS" get events --sort-by=.lastTimestamp || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_STANDINS" get pods -o wide || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_STANDINS" get events --sort-by=.lastTimestamp || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_STANDINS" logs deployment/seaweedfs --tail=60 || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_STANDINS" logs deployment/opa --tail=60 || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_STANDINS" logs deployment/recorder --tail=60 || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_POLARIS" get deployment,configmap -o wide || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_POLARIS" logs -l app.kubernetes.io/name=polaris --tail=80 --prefix || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_POLARIS" get cronjob,job,pods -l app.kubernetes.io/name=polaris-log-batch -o wide || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_POLARIS" logs -l app.kubernetes.io/name=polaris-log-batch --tail=40 --prefix || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_POLARIS" logs -l app.kubernetes.io/name=fluent-bit-standin --tail=40 --prefix || true

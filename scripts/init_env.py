@@ -56,6 +56,11 @@ SECRETS = [
     Secret("polaris-s3", "NS_CATALOG_POLARIS", "Opaque",
            {"accessKeyId": "POLARIS_S3_ACCESS_KEY_ID",
             "secretAccessKey": "POLARIS_S3_SECRET_ACCESS_KEY"}, {}),
+    # The smoke tests' own S3 key: PyIceberg writes and reads data files with it, never with
+    # Polaris's.
+    Secret("smoke-s3", "NS_CATALOG_POLARIS", "Opaque",
+           {"accessKeyId": "SMOKE_S3_ACCESS_KEY_ID",
+            "secretAccessKey": "SMOKE_S3_SECRET_ACCESS_KEY"}, {}),
     Secret("datahub-db", "NS_CATALOG_DATAHUB", "kubernetes.io/basic-auth",
            {"password": "DATAHUB_DB_PASSWORD"}, {"username": "datahub"}),
 ]

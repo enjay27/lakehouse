@@ -59,14 +59,14 @@ flowchart LR
 | [011](011-object-storage-is-minio.md) | Object storage is MinIO, from a local chart at a pinned release | Superseded by ADR-023 |
 | [012](012-install-order-operators-first-then-storage-services-monitoring.md) | Install order: operators, storage, then each service's PostgreSQL and the service, then monitoring | Superseded by ADR-029 |
 | [013](013-logs-ship-to-opensearch-in-the-monitoring-namespace.md) | Logs ship with Fluent Bit to OpenSearch, which runs in the monitoring namespace | Superseded by ADR-024 |
-| [014](014-polaris-writes-one-log-file-per-pod-for-an-hourly-batch.md) | Polaris writes one log file per pod, read by an hourly batch released separately | Accepted |
+| [014](014-polaris-writes-one-log-file-per-pod-for-an-hourly-batch.md) | Polaris writes one log file per pod, read by an hourly batch released separately | Amended by ADR-036 |
 | **Measurement and verification** | | |
 | [015](015-measurements-run-on-the-plain-upstream-schema.md) | Measurements run on the plain upstream Polaris schema; no custom indexes | Accepted |
 | [016](016-settings-are-verified-on-the-running-object.md) | A setting is verified on the running object against the chart default, never in the values file | Accepted |
 | **Gates and releases** | | |
 | [017](017-the-linux-gate-cluster-is-kind-with-three-nodes.md) | The Linux gate cluster is kind with three nodes on a GitHub-hosted runner | Amended by ADR-023 |
-| [018](018-dry-run-and-smoke-gates-run-from-gate-branches.md) | Dry-run and smoke gates run from throwaway `gate/*` branches on the PR's exact commit | Amended by ADR-032 |
-| [019](019-a-platform-pr-merges-only-when-a-dry-run-covers-its-head.md) | A platform PR merges only when a passing dry-run gate covers its head | Amended by ADR-033 |
+| [018](018-dry-run-and-smoke-gates-run-from-gate-branches.md) | Dry-run and smoke gates run from throwaway `gate/*` branches on the PR's exact commit | Superseded by ADR-038 |
+| [019](019-a-platform-pr-merges-only-when-a-dry-run-covers-its-head.md) | A platform PR merges only when a passing dry-run gate covers its head | Superseded by ADR-039 |
 | [020](020-a-release-tag-is-created-only-by-the-release-workflow.md) | A release tag is created only by the release workflow, after the full Linux gate | Superseded by ADR-033 |
 | [021](021-gates-upgrade-from-the-last-release-rebuilt-from-its-tag.md) | Gates upgrade from the last release, rebuilt from its tag; no machine snapshots | Amended by ADR-033 |
 | [022](022-claude-prs-merge-through-the-auto-merge-workflow.md) | Claude's PRs merge through an auto-merge workflow once every check on the head is green | Amended by ADR-030 |
@@ -75,13 +75,22 @@ flowchart LR
 | [024](024-the-log-batch-hands-processed-files-to-the-observability-teams-fluent-bit.md) | The log batch hands processed files to the observability team's Fluent Bit | Accepted |
 | [025](025-datahub-with-postgresql-on-cnpg-a-small-kafka-and-a-small-opensearch.md) | Datahub runs with PostgreSQL on CloudNativePG, a single-broker Kafka and a small OpenSearch | Accepted |
 | [026](026-polaris-issues-its-own-tokens-and-asks-an-opa-policy-endpoint.md) | Polaris issues its own tokens and asks an OPA policy endpoint; principals are created by the catalog gateway | Accepted |
-| [027](027-ingress-is-denied-by-default-and-allowed-per-caller.md) | Ingress to this repository's namespaces is denied by default and allowed per caller | Accepted |
+| [027](027-ingress-is-denied-by-default-and-allowed-per-caller.md) | Ingress to this repository's namespaces is denied by default and allowed per caller | Amended by ADR-034 |
 | [028](028-the-polaris-console-is-a-maintainer-tool-outside-the-release-path.md) | The Polaris console is a maintainer tool, built from a pinned commit and kept off the release path | Accepted |
 | [029](029-the-cnpg-operator-belongs-to-the-operator-team-installed-here-only-on-the-gate.md) | The CloudNativePG operator belongs to the operator team; this repository installs it only on the gate and test clusters | Accepted |
 | [030](030-auto-merge-leaves-prs-that-change-the-merge-rules-or-the-checks-to-kade.md) | Auto-merge leaves PRs that change the merge rules or the checks to Kade | Accepted |
-| [031](031-other-teams-services-are-interfaces-stand-ins-only-on-the-gate-seaweedfs-for-s3.md) | Other teams' services are interfaces in `.env`; stand-ins only on the gate, SeaweedFS for S3 | Accepted |
+| [031](031-other-teams-services-are-interfaces-stand-ins-only-on-the-gate-seaweedfs-for-s3.md) | Other teams' services are interfaces in `.env`; stand-ins only on the gate, SeaweedFS for S3 | Amended by ADR-034 |
 | [032](032-a-cleanup-workflow-deletes-merged-claude-branches-and-their-gate-branches.md) | A cleanup workflow deletes merged `claude/*` branches and their `gate/*` branches | Accepted |
 | [033](033-release-candidates-are-gated-on-a-pr-from-main-into-rc-the-release-workflow-tags-rc.md) | Release candidates are gated on a PR from `main` into `rc`; the release workflow tags `rc` | Accepted |
+| [034](034-recording-proxies-on-the-gate-prove-each-connection-and-its-exchanges.md) | Recording proxies on the gate prove each of Polaris's connections and its exchanges | Amended by ADR-035 |
+| [035](035-the-postgresql-recorder-ends-the-clients-tls-and-talks-plain-to-postgresql.md) | The PostgreSQL recorder ends the client's TLS and talks plain TCP to PostgreSQL | Accepted |
+| [036](036-polaris-and-the-log-batch-share-one-readwritemany-claim-and-the-batch-publishes-each-utc-hour-once.md) | Polaris and the log batch share one ReadWriteMany claim; the batch publishes each UTC hour once | Amended by ADR-037 |
+| [037](037-the-log-batch-installs-in-adr-029s-step-2-and-its-failure-stops-the-install.md) | The log batch installs in ADR-029's step 2, and its failure stops the install | Accepted |
+| [038](038-dry-run-and-smoke-run-from-gate-branches-before-the-pr-opens.md) | Dry-run and smoke gates run from throwaway `gate/*` branches on the PR's exact commit, before the PR opens | Amended by ADR-040 |
+| [039](039-a-platform-pr-merges-only-when-passing-dry-run-and-smoke-gates-cover-its-head.md) | A platform PR merges only when passing dry-run and smoke gates cover its head | Amended by ADR-040 |
+| [040](040-log-batch-fixtures-come-from-a-real-utc-roll-and-a-log-batch-gate-ships-them-into-an-opensearch-stand-in.md) | Log batch fixtures come from a real UTC roll; a Log Batch Gate ships them into an OpenSearch stand-in | Amended by ADR-041 |
+| [041](041-the-log-batch-gate-creates-fixtures-only-when-no-unexpired-artifact-holds-their-spec-hash.md) | The Log Batch Gate creates fixtures only when no unexpired artifact holds their spec hash | Accepted |
+| [042](042-the-release-workflow-pushes-the-log-batchs-image-to-ghcr-and-clusters-pull-it-from-a-registry-named-in-env.md) | The release workflow pushes the log batch's image to GHCR; clusters pull it from a registry named in `.env` | Accepted |
 
 ## Not ADRs
 

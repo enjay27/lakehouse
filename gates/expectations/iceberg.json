@@ -1,0 +1,174 @@
+{
+  "_comment": "What the recorder must have seen after gate.py check-iceberg (gates/iceberg/smoke.py): PyIceberg 0.12.0 as gate_smoke writing and reading a table in gate_catalog through Polaris 1.6.0, and the policy endpoint refusing what the gate's policy does not grant (ADR-026, ADR-031, ADR-034). Polaris's S3 client says `s3fileio/`, PyIceberg's (PyArrow) `aws-sdk-cpp/`, Polaris's policy client `Apache-HttpClient/`; measured locally against the pinned images. Read with standins.json, whose must-nots hold for every record. Matched by gates/traffic.py.",
+  "expectations": [
+    {
+      "name": "Polaris wrote a table's metadata file with its own S3 client",
+      "must": "exist",
+      "match": {
+        "proto": "http",
+        "listener": "s3",
+        "method": "PUT",
+        "status": 200,
+        "path": {
+          "regex": "^/polaris-warehouse/gate_catalog/smoke/run_[0-9]+/metadata/[0-9]{5}-[^/]+\\.metadata\\.json$"
+        },
+        "request_headers.user-agent": {
+          "regex": "^s3fileio/"
+        }
+      }
+    },
+    {
+      "name": "PyIceberg wrote a Parquet data file with its own S3 client",
+      "must": "exist",
+      "match": {
+        "proto": "http",
+        "listener": "s3",
+        "method": "PUT",
+        "status": 200,
+        "path": {
+          "regex": "^/polaris-warehouse/gate_catalog/smoke/run_[0-9]+/data/[^/]+\\.parquet$"
+        },
+        "request_headers.user-agent": {
+          "regex": "^aws-sdk-cpp/"
+        }
+      }
+    },
+    {
+      "name": "PyIceberg wrote a manifest with its own S3 client",
+      "must": "exist",
+      "match": {
+        "proto": "http",
+        "listener": "s3",
+        "method": "PUT",
+        "status": 200,
+        "path": {
+          "regex": "^/polaris-warehouse/gate_catalog/smoke/run_[0-9]+/metadata/[^/]+\\.avro$"
+        },
+        "request_headers.user-agent": {
+          "regex": "^aws-sdk-cpp/"
+        }
+      }
+    },
+    {
+      "name": "PyIceberg read a Parquet data file back",
+      "must": "exist",
+      "match": {
+        "proto": "http",
+        "listener": "s3",
+        "method": "GET",
+        "status": 206,
+        "path": {
+          "regex": "^/polaris-warehouse/gate_catalog/smoke/run_[0-9]+/data/[^/]+\\.parquet$"
+        },
+        "request_headers.user-agent": {
+          "regex": "^aws-sdk-cpp/"
+        }
+      }
+    },
+    {
+      "name": "OPA allowed gate_smoke to create a table, asked by Polaris",
+      "must": "exist",
+      "match": {
+        "proto": "http",
+        "listener": "opa",
+        "method": "POST",
+        "status": 200,
+        "request_headers.user-agent": {
+          "regex": "^Apache-HttpClient/"
+        },
+        "request_body.json.input.actor.principal": "gate_smoke",
+        "request_body.json.input.action": "CREATE_TABLE_DIRECT",
+        "response_body.json.result.allow": true
+      }
+    },
+    {
+      "name": "OPA allowed gate_smoke to add a snapshot, asked by Polaris",
+      "must": "exist",
+      "match": {
+        "proto": "http",
+        "listener": "opa",
+        "method": "POST",
+        "status": 200,
+        "request_headers.user-agent": {
+          "regex": "^Apache-HttpClient/"
+        },
+        "request_body.json.input.actor.principal": "gate_smoke",
+        "request_body.json.input.action": "ADD_TABLE_SNAPSHOT",
+        "response_body.json.result.allow": true
+      }
+    },
+    {
+      "name": "OPA refused gate_smoke dropping a table, asked by Polaris",
+      "must": "exist",
+      "match": {
+        "proto": "http",
+        "listener": "opa",
+        "method": "POST",
+        "status": 200,
+        "request_headers.user-agent": {
+          "regex": "^Apache-HttpClient/"
+        },
+        "request_body.json.input.actor.principal": "gate_smoke",
+        "request_body.json.input.action": "DROP_TABLE_WITHOUT_PURGE",
+        "response_body.json.result.allow": false
+      }
+    },
+    {
+      "name": "OPA refused gate_other loading a table, asked by Polaris",
+      "must": "exist",
+      "match": {
+        "proto": "http",
+        "listener": "opa",
+        "method": "POST",
+        "status": 200,
+        "request_headers.user-agent": {
+          "regex": "^Apache-HttpClient/"
+        },
+        "request_body.json.input.actor.principal": "gate_other",
+        "request_body.json.input.action": "LOAD_TABLE",
+        "response_body.json.result.allow": false
+      }
+    },
+    {
+      "name": "OPA never allowed gate_other anything",
+      "must": "not_exist",
+      "match": {
+        "proto": "http",
+        "listener": "opa",
+        "request_body.json.input.actor.principal": "gate_other",
+        "response_body.json.result.allow": true
+      }
+    },
+    {
+      "name": "Polaris never asked for vended credentials",
+      "must": "not_exist",
+      "match": {
+        "proto": "http",
+        "listener": "opa",
+        "request_body.json.input.action": {
+          "regex": "_DELEGATION$"
+        },
+        "request_headers.user-agent": {
+          "regex": "^Apache-HttpClient/"
+        }
+      }
+    },
+    {
+      "name": "PyIceberg wrote nothing outside gate_catalog",
+      "must": "not_exist",
+      "match": {
+        "proto": "http",
+        "listener": "s3",
+        "method": {
+          "regex": "^(PUT|POST|DELETE)$"
+        },
+        "path": {
+          "regex": "^(?!/polaris-warehouse/gate_catalog/)"
+        },
+        "request_headers.user-agent": {
+          "regex": "^aws-sdk-cpp/"
+        }
+      }
+    }
+  ]
+}

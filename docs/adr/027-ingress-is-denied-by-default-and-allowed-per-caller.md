@@ -1,6 +1,6 @@
 # ADR-027: Ingress to this repository's namespaces is denied by default and allowed per caller
 
-- **Status:** Accepted
+- **Status:** Amended by ADR-034
 - **Date:** 2026-10-10
 - **Related:** ADR-007, ADR-023, ADR-025, ADR-026
 

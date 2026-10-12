@@ -1,0 +1,6 @@
+{
+  "repository": "https://github.com/apache/polaris-tools.git",
+  "commit": "3edb60fcb591e5f0f9f2fbf79ff0f457baae500e",
+  "path": "console",
+  "_source": "ADR-028: the newest commit at least two weeks old (2026-09-22), read 2026-10-11; package-lock.json here was made from its console/package.json with npm 10.9.4, `npm install --package-lock-only --ignore-scripts --before=2026-09-27`"
+}

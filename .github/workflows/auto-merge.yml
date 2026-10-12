@@ -6,7 +6,7 @@
 # a PR that changes .github/workflows/ or the gate scripts or whose files cannot be read
 # whole (ADR-030).
 # Add each new PR check workflow's name to `workflows:` in the PR that adds it. The merge also
-# requires the checks `static` and `gate-check` (ADR-019) by name: with two workflows starting
+# requires the checks `static` and `gate-check` (ADR-039) by name: with two workflows starting
 # this one, either may finish before the other has started, and a check not started yet must
 # not be skipped.
 # `workflow_run` workflows are read from main, and the gate script is checked out from main,

@@ -1,0 +1,108 @@
+# This repository's settings for the upstream chart (ADR-009); values.yaml stays upstream's.
+# install/release.py adds the values that come from `.env`: the database host in the JDBC URL
+# and the policy endpoint. charts/test_polaris.py compares each setting with the chart default
+# (ADR-016).
+
+# Two replicas on two nodes, one always up: both sign tokens with the same key (ADR-026).
+# The target clusters' counts are open (#9).
+replicaCount: 2
+
+image:
+  repository: apache/polaris
+  # Docker Hub index digest (docker-content-digest, recomputed), read 2026-10-11.
+  tag: "1.6.0@sha256:9738b2052dea20aabf0cd42521424ff963fee41b0ee888fef9f512efb256602a"
+
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: polaris
+            app.kubernetes.io/instance: polaris
+        topologyKey: kubernetes.io/hostname
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+  maxUnavailable: ~
+
+managementService:
+  ports:
+    - name: polaris-mgmt
+      port: 8182
+
+realmContext:
+  realms:
+    - POLARIS
+
+# PostgreSQL on CloudNativePG (ADR-008, ADR-010): the login from the Secret init_env.py
+# creates (ADR-006); the JDBC URL from release.py, not from the Secret.
+persistence:
+  type: relational-jdbc
+  relationalJdbc:
+    secret:
+      name: polaris-db
+      username: username
+      password: password
+      jdbcUrl: ""
+
+# The S3 credentials, typed into `.env` by hand (ADR-031). `storage.secret` reaches only
+# Polaris's STS client; catalogs on S3 without STS (`stsUnavailable`) read and write with the
+# AWS SDK's default credentials, so the same Secret is also passed as AWS_ACCESS_KEY_ID and
+# AWS_SECRET_ACCESS_KEY. The catalog's properties never carry a key.
+storage:
+  secret:
+    name: polaris-s3
+    awsAccessKeyId: accessKeyId
+    awsSecretAccessKey: secretAccessKey
+
+extraEnv:
+  - name: AWS_ACCESS_KEY_ID
+    valueFrom:
+      secretKeyRef:
+        name: polaris-s3
+        key: accessKeyId
+  - name: AWS_SECRET_ACCESS_KEY
+    valueFrom:
+      secretKeyRef:
+        name: polaris-s3
+        key: secretAccessKey
+  # UTC, so the hourly rolls are named in UTC (ADR-036).
+  - name: TZ
+    value: UTC
+
+# One JSON log file per pod on the shared claim polaris-logs, which release.py creates before
+# Polaris (ADR-014, ADR-036). The chart's own `logging.file` stays off: its claim is
+# ReadWriteOnce and belongs to the release. Rolled hourly; the size roll is set out of reach,
+# since it cannot be turned off. Stdout is unchanged (ADR-024).
+extraVolumes:
+  - name: polaris-logs
+    persistentVolumeClaim:
+      claimName: polaris-logs
+
+extraVolumeMounts:
+  - name: polaris-logs
+    mountPath: /deployments/logs
+
+# Polaris issues its own tokens, signed with one key shared by every replica (ADR-026).
+authentication:
+  type: internal
+  tokenBroker:
+    type: symmetric-key
+    secret:
+      name: polaris-token-signing
+      symmetricKey:
+        secretKey: signingKey
+
+# Polaris asks the OPA policy endpoint (ADR-026); its URL comes from release.py.
+# Key names: docs/contracts/polaris-opa-input.md.
+advancedConfig:
+  polaris.authorization.type: opa
+  # The file appender (ADR-036); the batch reads these names (images/polaris-log-batch).
+  quarkus.log.file.enabled: "true"
+  quarkus.log.file.path: "/deployments/logs/polaris-${HOSTNAME}.log"
+  quarkus.log.file.json.enabled: "true"
+  quarkus.log.file.rotation.file-suffix: ".yyyy-MM-dd-HH.gz"
+  quarkus.log.file.rotation.rotate-on-boot: "false"
+  quarkus.log.file.rotation.max-file-size: "2G"
+  quarkus.log.file.rotation.max-backup-index: "50"
