@@ -10,7 +10,8 @@
    --apply-secrets, ADR-006). Datahub adds its steps in P3. The gates run this same script
    (ADR-038).
    a. Its PostgreSQL: the `Cluster` polaris-pg from charts/polaris-postgres (ADR-008,
-      ADR-010), installed with helm and waited on until Ready.
+      ADR-010), installed with helm and waited on until Ready. Its backups go to
+      `POLARIS_BACKUP_BUCKET` on `S3_ENDPOINT` with the key in `polaris-backup-s3` (ADR-043).
    b. The S3 endpoint and the policy endpoint from `.env` must answer, asked from Polaris's
       namespace by one short-lived curl pod (install/images.json): any HTTP status is an
       answer, no connection is not (ADR-029, ADR-031). It runs with --dry-run too.
@@ -72,6 +73,9 @@ POLARIS_PG = "polaris-pg"
 POLARIS_PG_RELEASE = "polaris-postgres"
 POLARIS_PG_CHART = os.path.join(ROOT, "charts", "polaris-postgres")
 POLARIS_DB_SECRET = "polaris-db"
+# polaris-pg's backups (ADR-043): the chart's ObjectStore and the Secret with their key.
+POLARIS_BACKUP_STORE = "polaris-backup"
+POLARIS_BACKUP_SECRET = "polaris-backup-s3"
 POLARIS = "polaris"
 POLARIS_REALM = "POLARIS"
 POLARIS_DATABASE = "polaris"
@@ -226,20 +230,37 @@ def check_plugin(base, namespace, run):
                 f"(Service {service['metadata']['name']})."]
 
 
+def postgres_values(env):
+    """charts/polaris-postgres's values from `.env`: where the backups go (ADR-043)."""
+    return {"backup": {"endpointURL": env["S3_ENDPOINT"],
+                       "bucket": env["POLARIS_BACKUP_BUCKET"]}}
+
+
 def polaris_postgres(env, run, dry_run=False):
-    """Step 1, Polaris's PostgreSQL. Returns (problems, notes); no call without a namespace."""
+    """Step 1, Polaris's PostgreSQL. Returns (problems, notes); no call without a namespace or
+    the backups' endpoint and bucket."""
     namespace = env.get("NS_CATALOG_POLARIS", "")
     if not namespace:
         return ["NS_CATALOG_POLARIS is empty: set Polaris's namespace in .env (ADR-007)"], []
+    empty = [var for var in ("S3_ENDPOINT", "POLARIS_BACKUP_BUCKET") if not env.get(var)]
+    if empty:
+        return [f"{var} is empty: polaris-pg's backups need it in .env (ADR-043)"
+                for var in empty], []
     context = env["KUBE_CONTEXT"]
+    secrets_needed = (POLARIS_DB_SECRET, POLARIS_BACKUP_SECRET)
     code, _ = run(["kubectl", "--context", context, "-n", namespace, "get", "secret",
-                   POLARIS_DB_SECRET, "-o", "name"])
+                   *secrets_needed, "-o", "name"])
     if code != 0:
-        return [f"Secret {POLARIS_DB_SECRET} not found in {namespace}: run "
+        return [f"Secrets {', '.join(secrets_needed)} must exist in {namespace}: run "
                 "scripts/init_env.py --apply-secrets first (ADR-006)"], []
-    helm = ["helm", "--kube-context", context, "-n", namespace, "upgrade", "--install",
-            POLARIS_PG_RELEASE, POLARIS_PG_CHART]
-    code, out = run(helm + (["--dry-run=server"] if dry_run else []))
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+        json.dump(postgres_values(env), f)
+    try:
+        helm = ["helm", "--kube-context", context, "-n", namespace, "upgrade", "--install",
+                POLARIS_PG_RELEASE, POLARIS_PG_CHART, "-f", f.name]
+        code, out = run(helm + (["--dry-run=server"] if dry_run else []))
+    finally:
+        os.unlink(f.name)
     if code != 0:
         return [f"helm upgrade {POLARIS_PG_RELEASE} in {namespace} failed: {out.strip()}"], []
     if dry_run:

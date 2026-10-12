@@ -172,7 +172,9 @@ class Preconditions(unittest.TestCase):
         self.assertEqual(len(problems), 2)
 
 
-POLARIS_ENV = {**ENV, "NS_CATALOG_POLARIS": "catalog-polaris"}
+POLARIS_ENV = {**ENV, "NS_CATALOG_POLARIS": "catalog-polaris",
+               "S3_ENDPOINT": "http://s3.example.invalid:8333",
+               "POLARIS_BACKUP_BUCKET": "polaris-backup"}
 
 
 class FakeCalls:
@@ -180,10 +182,16 @@ class FakeCalls:
 
     def __init__(self, secret=True, helm=(0, ""), wait=(0, "")):
         self.secret, self.helm, self.wait, self.calls = secret, helm, wait, []
+        self.values = []
 
     def __call__(self, argv):
         self.calls.append(argv)
         if argv[0] == "helm":
+            files = [argv[i + 1] for i, a in enumerate(argv) if a == "-f"]
+            for path in files:
+                if path.endswith(".json"):
+                    with open(path, encoding="utf-8") as f:
+                        self.values.append(json.load(f))
             return self.helm
         if "secret" in argv:
             return (0, "secret/polaris-db") if self.secret else (1, "NotFound")
@@ -251,6 +259,36 @@ class PolarisPostgres(unittest.TestCase):
         problems, _ = self.step(FakeCalls(wait=(1, "timed out")))
         self.assertIn("polaris-pg", "\n".join(problems))
         self.assertIn("timed out", "\n".join(problems))
+
+    # ADR-043 §2: backups to the S3 endpoint from .env, into their own bucket, with their key.
+    def test_the_backups_endpoint_and_bucket_come_from_env_in_a_values_file(self):
+        for dry_run in (False, True):
+            with self.subTest(dry_run=dry_run):
+                calls = FakeCalls()
+                self.step(calls, dry_run=dry_run)
+                self.assertEqual(calls.values, [{"backup": {
+                    "endpointURL": "http://s3.example.invalid:8333",
+                    "bucket": "polaris-backup"}}])
+                self.assertFalse(any(os.path.exists(a) for c in calls.calls for a in c
+                                     if a.endswith(".json")))
+
+    def test_the_backup_key_secret_is_required_with_the_database_one(self):
+        calls = FakeCalls()
+        self.step(calls)
+        secret = calls.calls[0]
+        self.assertEqual(secret[secret.index("secret") + 1:secret.index("-o")],
+                         ["polaris-db", "polaris-backup-s3"])
+        problems, _ = self.step(FakeCalls(secret=False))
+        self.assertIn("polaris-backup-s3", "\n".join(problems))
+
+    def test_an_empty_bucket_or_endpoint_stops_before_any_call(self):
+        for var in ("POLARIS_BACKUP_BUCKET", "S3_ENDPOINT"):
+            with self.subTest(var=var):
+                calls = FakeCalls()
+                problems, _ = self.step(calls, env={**POLARIS_ENV, var: ""})
+                self.assertIn(var, "\n".join(problems))
+                self.assertIn("ADR-043", "\n".join(problems))
+                self.assertEqual(calls.calls, [])
 
 
 class Steps(unittest.TestCase):
