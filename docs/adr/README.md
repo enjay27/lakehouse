@@ -92,6 +92,7 @@ flowchart LR
 | [041](041-the-log-batch-gate-creates-fixtures-only-when-no-unexpired-artifact-holds-their-spec-hash.md) | The Log Batch Gate creates fixtures only when no unexpired artifact holds their spec hash | Accepted |
 | [042](042-the-release-workflow-pushes-the-log-batchs-image-to-ghcr-and-clusters-pull-it-from-a-registry-named-in-env.md) | The release workflow pushes the log batch's image to GHCR; clusters pull it from a registry named in `.env` | Accepted |
 | [043](043-every-postgresql-backs-up-to-s3-through-the-barman-cloud-plugin-which-the-operator-team-installs.md) | Every PostgreSQL backs up to S3 through the Barman Cloud Plugin, which the operator team installs | Accepted |
+| [044](044-polaris-network-policies-are-a-chart-installed-before-its-postgresql-and-proven-on-the-gate.md) | Polaris's network policies are a chart installed before its PostgreSQL, and the gate proves each rule | Proposed |
 
 ## Not ADRs
 
