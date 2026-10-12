@@ -11,6 +11,9 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(__file__))
 import release  # noqa: E402
 
+# The settle reads after a helm upgrade of polaris-pg do not wait in these tests.
+release.SETTLE_INTERVAL = 0
+
 ENV = {"KUBE_CONTEXT": "kind-lakehouse-gate", "NS_CNPG_SYSTEM": "cnpg-system"}
 
 
@@ -180,9 +183,11 @@ POLARIS_ENV = {**ENV, "NS_CATALOG_POLARIS": "catalog-polaris",
 class FakeCalls:
     """Answers step 1's kubectl and helm calls; records every call."""
 
-    def __init__(self, secret=True, helm=(0, ""), wait=(0, "")):
+    def __init__(self, secret=True, helm=(0, ""), wait=(0, ""), clusters=None):
         self.secret, self.helm, self.wait, self.calls = secret, helm, wait, []
         self.values = []
+        # The Cluster as each `get` reads it; the last answer repeats.
+        self.clusters = list(clusters or [cluster_status()])
 
     def __call__(self, argv):
         self.calls.append(argv)
@@ -197,7 +202,15 @@ class FakeCalls:
             return (0, "secret/polaris-db") if self.secret else (1, "NotFound")
         if "wait" in argv:
             return self.wait
+        if f"cluster/{release.POLARIS_PG}" in argv and "get" in argv:
+            answer = self.clusters.pop(0) if len(self.clusters) > 1 else self.clusters[0]
+            return (0, json.dumps(answer)) if isinstance(answer, dict) else answer
         raise AssertionError(f"unexpected call {argv}")
+
+
+def cluster_status(phase="Cluster in healthy state", ready=3, instances=3):
+    return {"spec": {"instances": instances},
+            "status": {"phase": phase, "readyInstances": ready}}
 
 
 class PolarisPostgres(unittest.TestCase):
@@ -208,7 +221,8 @@ class PolarisPostgres(unittest.TestCase):
         calls = FakeCalls()
         problems, notes = self.step(calls)
         self.assertEqual(problems, [])
-        self.assertEqual([c[0] for c in calls.calls], ["kubectl", "helm", "kubectl"])
+        self.assertEqual([c[0] for c in calls.calls], ["kubectl", "helm", "kubectl"]
+                         + ["kubectl"] * release.SETTLE_READS)
         helm = calls.calls[1]
         self.assertEqual(helm[:3], ["helm", "--kube-context", "kind-lakehouse-gate"])
         self.assertEqual(helm[helm.index("-n") + 1], "catalog-polaris")
@@ -254,6 +268,41 @@ class PolarisPostgres(unittest.TestCase):
     def test_a_failed_helm_stops_with_its_error(self):
         problems, _ = self.step(FakeCalls(helm=(1, "admission webhook denied")))
         self.assertIn("admission webhook denied", "\n".join(problems))
+
+    # CNPG sets no observedGeneration on Ready: after an upgrade, `kubectl wait` passed before
+    # the operator began restarting the instances (smoke 38215183351, adding the plugin).
+    def test_after_ready_the_cluster_must_read_healthy_several_times_in_a_row(self):
+        calls = FakeCalls(clusters=[
+            cluster_status(), cluster_status("Upgrading cluster", ready=2),
+            cluster_status("Waiting for the instances to become active", ready=2),
+            cluster_status(), cluster_status(), cluster_status()])
+        problems, notes = self.step(calls)
+        self.assertEqual(problems, [])
+        reads = [c for c in calls.calls if f"cluster/{release.POLARIS_PG}" in c and "get" in c]
+        self.assertEqual(len(reads), 6)
+        for argv in reads:
+            self.assertEqual(argv[:5], ["kubectl", "--context", "kind-lakehouse-gate", "-n",
+                                        "catalog-polaris"])
+            self.assertEqual(argv[-2:], ["-o", "json"])
+        self.assertIn("healthy", "\n".join(notes))
+
+    def test_all_instances_must_be_ready_for_a_healthy_read(self):
+        calls = FakeCalls(clusters=[cluster_status(ready=2)] * 2 + [cluster_status()])
+        problems, _ = self.step(calls)
+        self.assertEqual(problems, [])
+        reads = [c for c in calls.calls if f"cluster/{release.POLARIS_PG}" in c and "get" in c]
+        self.assertEqual(len(reads), 2 + release.SETTLE_READS)
+
+    def test_a_cluster_that_never_settles_stops_with_its_phase(self):
+        with mock.patch.object(release, "SETTLE_TIMEOUT", 0):
+            problems, _ = self.step(FakeCalls(clusters=[cluster_status("Upgrading cluster", 2)]))
+        self.assertIn("polaris-pg", "\n".join(problems))
+        self.assertIn("Upgrading cluster", "\n".join(problems))
+
+    def test_a_dry_run_reads_no_cluster(self):
+        calls = FakeCalls()
+        self.step(calls, dry_run=True)
+        self.assertFalse([c for c in calls.calls if f"cluster/{release.POLARIS_PG}" in c])
 
     def test_a_cluster_that_never_gets_ready_stops(self):
         problems, _ = self.step(FakeCalls(wait=(1, "timed out")))

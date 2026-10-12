@@ -10,7 +10,8 @@
    --apply-secrets, ADR-006). Datahub adds its steps in P3. The gates run this same script
    (ADR-038).
    a. Its PostgreSQL: the `Cluster` polaris-pg from charts/polaris-postgres (ADR-008,
-      ADR-010), installed with helm and waited on until Ready. Its backups go to
+      ADR-010), installed with helm and waited on until Ready, then until it reads healthy
+      several times in a row, since a change can restart its instances. Its backups go to
       `POLARIS_BACKUP_BUCKET` on `S3_ENDPOINT` with the key in `polaris-backup-s3` (ADR-043).
    b. The S3 endpoint and the policy endpoint from `.env` must answer, asked from Polaris's
       namespace by one short-lived curl pod (install/images.json): any HTTP status is an
@@ -56,6 +57,7 @@ import secrets
 import subprocess
 import sys
 import tempfile
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -113,6 +115,14 @@ CONSOLE_CHART = os.path.join(ROOT, "charts", "polaris-console")
 CONSOLE_VALUES = os.path.join(CONSOLE_CHART, "values-lakehouse.yaml")
 CONSOLE_TIMEOUT = "300s"
 READY_TIMEOUT = "900s"
+# After the helm upgrade of polaris-pg: CNPG sets no observedGeneration on the Cluster's Ready
+# condition, so `kubectl wait` can pass before the operator acts on a new spec; on the smoke
+# gate it began restarting the instances 2 s after Ready (adding the plugin, ADR-043). The
+# Cluster must read healthy, every instance ready, this many times in a row, this far apart.
+SETTLE_READS = 3
+SETTLE_INTERVAL = 10
+SETTLE_TIMEOUT = 900
+HEALTHY_PHASE = "Cluster in healthy state"
 # The endpoint check's pod reads this script on stdin (`sh -s`), so it starts only once kubectl
 # is attached and no output is lost. Each URL in its arguments gets one request; any HTTP
 # status is an answer. Exits 1 when any URL gave none.
@@ -270,7 +280,34 @@ def polaris_postgres(env, run, dry_run=False):
                      f"--timeout={READY_TIMEOUT}"])
     if code != 0:
         return [f"Cluster {POLARIS_PG} in {namespace} is not Ready: {out.strip()}"], []
-    return [], [f"Step 1: Cluster {POLARIS_PG} in {namespace} is Ready."]
+    problem = settle(run, context, namespace)
+    if problem:
+        return [problem], []
+    return [], [f"Step 1: Cluster {POLARIS_PG} in {namespace} is Ready, healthy on "
+                f"{SETTLE_READS} reads {SETTLE_INTERVAL} s apart."]
+
+
+def settle(run, context, namespace):
+    """None once polaris-pg reads healthy with every instance ready SETTLE_READS times in a
+    row; a problem naming its last phase after SETTLE_TIMEOUT seconds."""
+    end, healthy, phase = time.monotonic() + SETTLE_TIMEOUT, 0, ""
+    while True:
+        code, out = run(["kubectl", "--context", context, "-n", namespace, "get",
+                         f"cluster/{POLARIS_PG}", "-o", "json"])
+        if code != 0:
+            return f"cannot read Cluster {POLARIS_PG} in {namespace}: {out.strip()}"
+        cluster = json.loads(out)
+        status = cluster.get("status", {})
+        phase = status.get("phase", "")
+        ok = (phase == HEALTHY_PHASE
+              and status.get("readyInstances") == cluster["spec"]["instances"])
+        healthy = healthy + 1 if ok else 0
+        if healthy >= SETTLE_READS:
+            return None
+        if time.monotonic() > end:
+            return (f"Cluster {POLARIS_PG} in {namespace} did not stay healthy for "
+                    f"{SETTLE_READS} reads in {SETTLE_TIMEOUT} s; last phase: {phase}")
+        time.sleep(SETTLE_INTERVAL)
 
 
 def jdbc_url(env):
