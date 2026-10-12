@@ -287,25 +287,25 @@ def polaris_postgres(env, run, dry_run=False):
                 f"{SETTLE_READS} reads {SETTLE_INTERVAL} s apart."]
 
 
-def settle(run, context, namespace):
-    """None once polaris-pg reads healthy with every instance ready SETTLE_READS times in a
+def settle(run, context, namespace, cluster=POLARIS_PG):
+    """None once `cluster` reads healthy with every instance ready SETTLE_READS times in a
     row; a problem naming its last phase after SETTLE_TIMEOUT seconds."""
     end, healthy, phase = time.monotonic() + SETTLE_TIMEOUT, 0, ""
     while True:
         code, out = run(["kubectl", "--context", context, "-n", namespace, "get",
-                         f"cluster/{POLARIS_PG}", "-o", "json"])
+                         f"cluster/{cluster}", "-o", "json"])
         if code != 0:
-            return f"cannot read Cluster {POLARIS_PG} in {namespace}: {out.strip()}"
-        cluster = json.loads(out)
-        status = cluster.get("status", {})
+            return f"cannot read Cluster {cluster} in {namespace}: {out.strip()}"
+        read = json.loads(out)
+        status = read.get("status", {})
         phase = status.get("phase", "")
         ok = (phase == HEALTHY_PHASE
-              and status.get("readyInstances") == cluster["spec"]["instances"])
+              and status.get("readyInstances") == read["spec"]["instances"])
         healthy = healthy + 1 if ok else 0
         if healthy >= SETTLE_READS:
             return None
         if time.monotonic() > end:
-            return (f"Cluster {POLARIS_PG} in {namespace} did not stay healthy for "
+            return (f"Cluster {cluster} in {namespace} did not stay healthy for "
                     f"{SETTLE_READS} reads in {SETTLE_TIMEOUT} s; last phase: {phase}")
         time.sleep(SETTLE_INTERVAL)
 

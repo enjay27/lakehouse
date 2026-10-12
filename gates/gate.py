@@ -79,8 +79,10 @@
                   the Barman Cloud Plugin, waited for until completed; then the `Cluster`
                   polaris-pg-restore, one instance bootstrapped from the ObjectStore
                   polaris-backup, its base backup and archived WAL to the latest, waited for
-                  until Ready; then gates/check_restore.sh in a pod on Polaris's PostgreSQL
-                  image reads from it, as Polaris, the realm's root principal and gate_catalog.
+                  until Ready and then healthy on several reads in a row, past CNPG's restart
+                  after the recovery; then gates/check_restore.sh in a pod on Polaris's
+                  PostgreSQL image reads from it, as Polaris, the realm's root principal and
+                  gate_catalog.
                   polaris-pg-restore is deleted whatever happened.
 
 Every kubectl and helm call names the gate's context, and a namespace where the object has
@@ -716,7 +718,13 @@ def check_restore(env):
         if ready.returncode != 0:
             return [f"Cluster {RESTORE} did not get Ready from "
                     f"{release.POLARIS_BACKUP_STORE}"], notes
-        notes.append(f"Cluster {RESTORE} restored from {release.POLARIS_BACKUP_STORE} is Ready.")
+        # CNPG restarts the restored instance once after the recovery: Ready, then refusing
+        # connections (smoke 38245393066), as polaris-pg after an upgrade.
+        problem = release.settle(release.call, CONTEXT, ns, cluster=RESTORE)
+        if problem:
+            return [problem], notes
+        notes.append(f"Cluster {RESTORE} restored from {release.POLARIS_BACKUP_STORE} is Ready, "
+                     f"healthy on {release.SETTLE_READS} reads {release.SETTLE_INTERVAL} s apart.")
         with open(os.path.join(HERE, "check_restore.sh"), encoding="utf-8") as f:
             script = f.read()
         command = check_restore_command(env, pg["image"], pg["database"],

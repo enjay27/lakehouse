@@ -340,6 +340,45 @@ class PolarisPostgres(unittest.TestCase):
                 self.assertEqual(calls.calls, [])
 
 
+class Settle(unittest.TestCase):
+    """settle reads the Cluster it is given, polaris-pg unless told otherwise."""
+
+    @staticmethod
+    def reads(*clusters):
+        calls, answers = [], list(clusters)
+
+        def run(argv):
+            calls.append(argv)
+            return 0, json.dumps(answers.pop(0) if len(answers) > 1 else answers[0])
+        return calls, run
+
+    def test_polaris_pg_by_default(self):
+        calls, run = self.reads(cluster_status())
+        self.assertIsNone(release.settle(run, "kind-lakehouse-gate", "catalog-polaris"))
+        self.assertTrue(all(f"cluster/{release.POLARIS_PG}" in argv for argv in calls))
+
+    # Smoke 38245393066: polaris-pg-restore read Ready, then refused psql while CNPG
+    # restarted it after the recovery (#83).
+    def test_the_cluster_it_is_given(self):
+        calls, run = self.reads(cluster_status(instances=1, ready=0),
+                                cluster_status(instances=1, ready=1))
+        self.assertIsNone(release.settle(run, "kind-lakehouse-gate", "catalog-polaris",
+                                         cluster="polaris-pg-restore"))
+        self.assertEqual(len(calls), 1 + release.SETTLE_READS)
+        for argv in calls:
+            self.assertEqual(argv, ["kubectl", "--context", "kind-lakehouse-gate", "-n",
+                                    "catalog-polaris", "get", "cluster/polaris-pg-restore",
+                                    "-o", "json"])
+
+    def test_a_problem_names_the_cluster_it_is_given(self):
+        _, run = self.reads(cluster_status("Setting up primary", ready=0, instances=1))
+        with mock.patch.object(release, "SETTLE_TIMEOUT", 0):
+            problem = release.settle(run, "kind-lakehouse-gate", "catalog-polaris",
+                                     cluster="polaris-pg-restore")
+        self.assertIn("Cluster polaris-pg-restore in catalog-polaris", problem)
+        self.assertIn("Setting up primary", problem)
+
+
 class Steps(unittest.TestCase):
     def test_step_0_problems_stop_before_step_1(self):
         calls = []

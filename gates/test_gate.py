@@ -11,6 +11,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
 import gate  # noqa: E402
@@ -824,6 +825,42 @@ class CheckRestore(unittest.TestCase):
 
     def test_check_restore_is_a_command(self):
         self.assertIn("check-restore", gate.__doc__.strip().splitlines()[-1])
+
+    def check(self, settled=None):
+        """Runs check_restore with every command faked; (problems, notes, events)."""
+        events = []
+
+        def subprocess_run(argv, **kwargs):
+            events.append(("wait" if "wait" in argv else
+                           "delete" if "delete" in argv else "psql", argv))
+            return subprocess.CompletedProcess(argv, 0)
+
+        def settle(run, context, namespace, cluster):
+            events.append(("settle", (run, context, namespace, cluster)))
+            return settled
+
+        with mock.patch.object(gate, "run"), \
+                mock.patch.object(gate, "wait_for", return_value=("completed", "")), \
+                mock.patch.object(gate, "polaris_pg_values",
+                                  return_value={"image": PG_IMAGE, "database": "polaris"}), \
+                mock.patch.object(gate.subprocess, "run", side_effect=subprocess_run), \
+                mock.patch.object(gate.release, "settle", side_effect=settle):
+            problems, notes = gate.check_restore(RESTORE_ENV)
+        return problems, notes, events
+
+    # Smoke 38245393066: Ready, then psql refused while CNPG restarted the restored instance.
+    def test_the_restore_settles_after_ready_and_before_psql(self):
+        problems, notes, events = self.check()
+        self.assertEqual(problems, [])
+        self.assertEqual([kind for kind, _ in events], ["wait", "settle", "psql", "delete"])
+        self.assertEqual(events[1][1], (gate.release.call, gate.CONTEXT, "catalog-polaris",
+                                        "polaris-pg-restore"))
+        self.assertIn("healthy", "\n".join(notes))
+
+    def test_a_restore_that_does_not_settle_is_a_problem_and_still_deleted(self):
+        problems, _, events = self.check(settled="Cluster polaris-pg-restore did not settle")
+        self.assertEqual(problems, ["Cluster polaris-pg-restore did not settle"])
+        self.assertEqual([kind for kind, _ in events], ["wait", "settle", "delete"])
 
 
 class Standins(unittest.TestCase):
