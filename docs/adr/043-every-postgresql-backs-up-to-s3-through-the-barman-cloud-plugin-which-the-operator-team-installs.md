@@ -1,6 +1,6 @@
 # ADR-043: Every PostgreSQL backs up to S3 through the Barman Cloud Plugin, which the operator team installs
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-12
 - **Related:** ADR-006, ADR-008, ADR-010, ADR-016, ADR-025, ADR-029, ADR-031
 
