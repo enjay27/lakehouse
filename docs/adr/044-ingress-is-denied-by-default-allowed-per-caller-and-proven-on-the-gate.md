@@ -1,6 +1,6 @@
 # ADR-044: Ingress is denied by default and allowed per caller; Polaris's policies are a chart, proven on the gate
 
-- **Status:** Accepted
+- **Status:** Amended by ADR-046
 - **Date:** 2026-10-13
 - **Related:** ADR-000, ADR-002, ADR-007, ADR-009, ADR-016, ADR-017, ADR-025, ADR-026, ADR-027, ADR-028, ADR-031, ADR-034, ADR-036, ADR-043, ADR-045
 
