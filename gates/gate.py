@@ -136,6 +136,7 @@ import standins  # noqa: E402
 import traffic  # noqa: E402
 
 CLUSTER = "lakehouse-gate"
+KIND_CONFIG = os.path.join(HERE, "kind.yaml")
 CONTEXT = f"kind-{CLUSTER}"
 TOOLS = ("kind", "kubectl", "helm", "kubeconform")
 # The binary inside each tool's archive; the others are plain binaries.
@@ -258,10 +259,11 @@ def plugin_manifest(text, namespace):
     return text
 
 
-def up_commands(pins, chart_path, namespace, manifests):
-    """(argv, stdin) in order: the cluster, the control-plane taken off NoSchedule, the shared
-    class next to kind's `standard` (the provisioner restarted to read it), CNPG, then
-    cert-manager and the plugin from `manifests` (name to text), each waited for."""
+def up_commands(pins, chart_path, namespace, manifests, kind_config=KIND_CONFIG):
+    """(argv, stdin) in order: the cluster from `kind_config`, the control-plane taken off
+    NoSchedule, the shared class next to kind's `standard` (the provisioner restarted to read
+    it), CNPG, then cert-manager and the plugin from `manifests` (name to text), each waited
+    for."""
     config = {"nodePathMap": [],
               "storageClassConfigs": {"standard": {"nodePathMap": STANDARD_NODE_PATHS},
                                       SHARED_CLASS: {"sharedFileSystemPath": SHARED_NODE_DIR}}}
@@ -271,7 +273,7 @@ def up_commands(pins, chart_path, namespace, manifests):
              "-f", "-"]
     return [
         (["kind", "create", "cluster", "--name", CLUSTER,
-          "--config", os.path.join(HERE, "kind.yaml"),
+          "--config", kind_config,
           "--image", pins["node_image"]["image"], "--wait", "180s"], None),
         (["kubectl", "--context", CONTEXT, "taint", "nodes", f"{CLUSTER}-control-plane",
           "node-role.kubernetes.io/control-plane:NoSchedule-"], None),
@@ -1268,8 +1270,9 @@ def check_logs(env, pins):
                          listings[1], records)
 
 
-def up(pins):
-    """`up`: see the module's docstring."""
+def up(pins, kind_config=KIND_CONFIG):
+    """`up`: see the module's docstring. The failover driver passes its own `kind_config`
+    (ADR-047 §3)."""
     namespace = os.environ.get("NS_CNPG_SYSTEM") or "cnpg-system"
     chart = pins["cnpg_chart"]
     with tempfile.TemporaryDirectory() as d:
@@ -1281,7 +1284,8 @@ def up(pins):
         plugin_manifest(manifests["barman_cloud_plugin"], namespace)
         os.makedirs(SHARED_HOST_DIR, exist_ok=True)
         os.chmod(SHARED_HOST_DIR, 0o777)
-        for command, stdin in up_commands(pins, chart_path, namespace, manifests):
+        for command, stdin in up_commands(pins, chart_path, namespace, manifests,
+                                          kind_config):
             run(command, stdin)
 
 
