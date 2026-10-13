@@ -68,7 +68,7 @@ source does not matter for operation. What follows is the list they cover.
     `.env`.
   - Object storage becomes an external S3 endpoint, with SeaweedFS only as the gate's
     stand-in (ADR-031).
-  - The install order without storage and monitoring (restated in full by ADR-029).
+  - The install order without storage and monitoring (restated in full by ADR-045).
   - Fluent Bit and OpenSearch belong to the observability team; this repository delivers the
     log files ADR-014 describes, in a documented format (ADR-024).
   - ADR-014: its open question (sharing the log volume across nodes) is answered before the
@@ -92,7 +92,7 @@ source does not matter for operation. What follows is the list they cover.
   to upgrade from.
 - The CloudNativePG operator on the gate and test clusters only, at the pinned version; on
   the target clusters it is the operator team's, and a release only checks it is present
-  (ADR-029, accepted by Kade on 2026-10-10).
+  (first decided by Kade on 2026-10-10; ADR-045).
 - gate-check first, before any platform file (done, PR #16); then ADR-030 (accepted), so
   auto-merge leaves PRs that change workflows or gate scripts, and drafts, to Kade
   ([#15](https://github.com/enjay27/lakehouse/issues/15)).
@@ -132,7 +132,7 @@ source does not matter for operation. What follows is the list they cover.
   installed by `gates/gate.py standins` before every gate install. The policy follows what
   Polaris 1.6.0 actually sends and reads, from its source: `docs/contracts/polaris-opa-input.md`
   (the URL names the package, the answer is `result.allow`). `release.py` now stops before
-  Polaris unless the S3 and policy endpoints answer from Polaris's namespace (ADR-029); the
+  Polaris unless the S3 and policy endpoints answer from Polaris's namespace (ADR-045); the
   smoke gate's `check-standins` makes an S3 round trip with Polaris's credentials and checks
   the policy's allowed and refused cases.
   Gates on commit `4f173d8` (2026-10-11), both upgrading from `platform-2026.10.10`: dry-run
@@ -216,7 +216,7 @@ source does not matter for operation. What follows is the list they cover.
   installs cert-manager and the plugin from pinned manifests, and the smoke gate's
   `check-restore` backs polaris-pg up, restores it into `polaris-pg-restore` and reads the
   root principal and the smoke tests' catalog from it.
-- Before Datahub (Kade, 2026-10-12): ADR-027's network policies next; metrics (P5) and
+- Before Datahub (Kade, 2026-10-12): ADR-044's network policies next; metrics (P5) and
   failover (#31) follow.
 - **Gate:** dry-run and smoke. **Linux:** the release installed on a test cluster.
 
@@ -276,7 +276,7 @@ when Kade learns the target clusters' version.
 | Item | Pin | Source |
 |---|---|---|
 | Kubernetes (gate, kind) | 1.36 (`kindest/node:v1.36.4`) | Kade: latest stable; 1.37 exists, but CloudNativePG 1.30 supports 1.34–1.36 |
-| CloudNativePG operator (gate only, ADR-029) | 1.30.1 | latest; target unknown |
+| CloudNativePG operator (gate only, ADR-045) | 1.30.1 | latest; target unknown |
 | cert-manager (gate only, ADR-043) | v1.21.2 | newest at least two weeks old; target unknown |
 | Barman Cloud Plugin (gate only, ADR-043) | v0.15.0 | newest at least two weeks old (v0.15.1 under two weeks); target unknown |
 | Polaris | 1.6.0 | Kade (ADR-009) |
