@@ -1,6 +1,6 @@
 # ADR-048: Ingress is denied by default and allowed per caller, CNPG's join pods included; smoke rebuilds a replica under the policies
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-13
 - **Related:** ADR-000, ADR-002, ADR-007, ADR-009, ADR-016, ADR-017, ADR-021, ADR-025, ADR-026, ADR-028, ADR-030, ADR-031, ADR-033, ADR-034, ADR-036, ADR-038, ADR-039, ADR-043, ADR-044, ADR-045, ADR-046, ADR-047
 
