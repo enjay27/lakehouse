@@ -1,4 +1,4 @@
-"""Tests for network.py (ADR-044 §5, §6). Run: python3 -m unittest discover -s gates"""
+"""Tests for network.py (ADR-048 §5, §6). Run: python3 -m unittest discover -s gates"""
 
 import errno
 import os
@@ -261,7 +261,7 @@ class Outcome(unittest.TestCase):
             "polaris-api": "reached"}})
         self.assertEqual(len(problems), 2)
         self.assertIn("does not enforce NetworkPolicy", problems[-1])
-        self.assertIn("ADR-044", problems[-1])
+        self.assertIn("ADR-048", problems[-1])
 
     def test_every_case_is_named_with_its_result(self):
         problems, lines = network.report(

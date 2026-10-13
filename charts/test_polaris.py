@@ -132,7 +132,7 @@ class Rendered(unittest.TestCase):
         self.assertEqual(match.group(1), chart_version())
 
     def test_the_pods_carry_the_label_polaris_pgs_policy_allows(self):
-        # ADR-044 §3; the chart sets no pod label by default.
+        # ADR-048 §3; the chart sets no pod label by default.
         self.assertEqual(self.defaults["podLabels"], {})
         labels = self.deployment["spec"]["template"]["metadata"]["labels"]
         self.assertEqual(labels[release.PG_CLIENT_LABEL], "true")

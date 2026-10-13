@@ -1,4 +1,4 @@
-"""Polaris's network policies on the gate (ADR-044 §5, §6). Never part of a release.
+"""Polaris's network policies on the gate (ADR-048 §5, §6). Never part of a release.
 
 - **Gate-only callers (§5):** `gate_policies(env)` is a v1 List of two allow policies in
   NS_CATALOG_POLARIS that `gate.py gate-policies` applies just before this commit's release:
@@ -10,7 +10,7 @@
   connection to each target of CASES. Two more pods carry CNPG's join label (POD_LABELS), one in
   Polaris's namespace and one in the unlabelled one (ADR-048 §6). An allowed case must connect; a refused one must time
   out or be reset. A refused case that connects means the cluster does not enforce
-  NetworkPolicy: ADR-044 says to stop there. polaris-pg's own Services expose 5432 only, so
+  NetworkPolicy: ADR-048 says to stop there. polaris-pg's own Services expose 5432 only, so
   the gate adds one, METRICS_SERVICE, for the instances' exporter on 9187.
 """
 
@@ -223,7 +223,7 @@ def report(cases, results):
             problems.append(f"FAIL {line}")
             leaked |= not case.allowed and result == "reached"
     if leaked:
-        problems.append("A connection ADR-044 refuses got through: this cluster does not "
+        problems.append("A connection ADR-048 refuses got through: this cluster does not "
                         "enforce NetworkPolicy. Stop here; a new ADR changes ADR-017's cluster "
-                        "with a CNI that does (ADR-044 §6).")
+                        "with a CNI that does (ADR-048 §6).")
     return problems, lines

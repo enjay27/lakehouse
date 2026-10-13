@@ -1,5 +1,5 @@
-"""Tests for charts/polaris-network-policies (ADR-044): default deny in Polaris's namespace and
-one allow policy per rule of ADR-044 §3, the values schema, and kubeconform against the
+"""Tests for charts/polaris-network-policies (ADR-048): default deny in Polaris's namespace and
+one allow policy per rule of ADR-048 §3, the values schema, and kubeconform against the
 NetworkPolicy schema of the gate's Kubernetes version, pinned in gates/pins.json.
 
 Run: python3 -m unittest discover -s charts
@@ -86,7 +86,7 @@ def namespace(key, value):
 
 
 class Rendered(unittest.TestCase):
-    """ADR-044 §3, with every caller class labelled and the console enabled."""
+    """ADR-048 §3, with every caller class labelled and the console enabled."""
 
     @classmethod
     def setUpClass(cls):
@@ -192,7 +192,7 @@ class PortsMatchTheCharts(unittest.TestCase):
 
 
 class EmptyCallers(unittest.TestCase):
-    """ADR-044 §2: an empty caller class allows no namespace; its rule is left out, never
+    """ADR-048 §2: an empty caller class allows no namespace; its rule is left out, never
     rendered without sources."""
 
     def test_no_labels_leave_polaris_api_to_datahub_only(self):

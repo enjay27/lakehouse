@@ -27,7 +27,7 @@ spec:
               cnpg.io/jobRole: join
 ---
 # The CNPG operator reads each instance's status on 8000 and connects on 5432; backups through
-# the plugin start through the status port too (ADR-043, ADR-044 §3).
+# the plugin start through the status port too (ADR-043, ADR-048 §3).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

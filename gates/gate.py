@@ -92,7 +92,7 @@
                   polaris-pg-restore is deleted whatever happened.
 
   gate-policies   applies the gate's own allow policies in Polaris's namespace (gates/network.py,
-                  ADR-044 §5): the check pods, labelled lakehouse-gate/check, reach every pod;
+                  ADR-048 §5): the check pods, labelled lakehouse-gate/check, reach every pod;
                   the PostgreSQL recorder reaches the CNPG instances on 5432. `install` runs
                   it right before this commit's release.
   check-network   creates a namespace per caller class with the gate's label, one without any
@@ -100,7 +100,7 @@
                   unlabelled pod in Polaris's namespace, and from a pod with CNPG's join label
                   in Polaris's namespace and in the unlabelled one, connects to each target of
                   gates/network.py's CASES: each allowed one must connect, each refused one
-                  must time out or be reset (ADR-044 §6). One that should be refused and
+                  must time out or be reset (ADR-048 §6). One that should be refused and
                   connects means the cluster does not enforce NetworkPolicy. polaris-pg's
                   exporter on 9187 is reached through a Service the gate adds (ADR-046 §4).
   check-metrics   asks the Prometheus stand-in, from a check pod, until every target is up:
@@ -167,7 +167,7 @@ POLARIS_S3_ENV = {"AWS_ACCESS_KEY_ID": "accessKeyId", "AWS_SECRET_ACCESS_KEY": "
 POLARIS_POD_LABELS = "app.kubernetes.io/name=polaris,app.kubernetes.io/instance=polaris"
 POLARIS_API_PORT, POLARIS_MGMT_PORT = 8181, 8182
 # Every pod the gate starts in Polaris's namespace to check it carries this label, which the
-# gate's own allow policy lets reach every pod there (ADR-044 §5).
+# gate's own allow policy lets reach every pod there (ADR-048 §5).
 CHECK_POD_LABEL = f"--labels={network.CHECK_LABEL}=true"
 # The catalog the smoke tests create and the gate's policy names (gates/opa/policy.rego).
 ICEBERG_CATALOG = "gate_catalog"
@@ -327,7 +327,7 @@ def console_settings(ns):
 def gate_env(template_text, gen=init_env.generate):
     """`.env` for the gate: its context, the stand-ins' endpoints, the S3 stand-in's
     credentials, the console's settings, the log claim's shared class and a namespace label
-    per caller class (ADR-044 §6); init_env fills the rest."""
+    per caller class (ADR-048 §6); init_env fills the rest."""
     template = init_env.parse(template_text)
     fixed = {"KUBE_CONTEXT": CONTEXT, **standin_endpoints(template["NS_STANDINS"]),
              **console_settings(template["NS_CATALOG_POLARIS"]),
@@ -477,7 +477,7 @@ def install_plan(previous, previous_dir, fresh, dry_run=False):
     release before this one runs from a worktree of its tag, with the gate's `.env`."""
     this = ["python3", os.path.join(ROOT, "install", "release.py")] + (
         ["--dry-run"] if dry_run else [])
-    # The gate's own allow policies (ADR-044 §5), right before this commit's release applies
+    # The gate's own allow policies (ADR-048 §5), right before this commit's release applies
     # Polaris's: never in a dry-run, which changes nothing.
     this = [this] if dry_run else [["python3", os.path.join(HERE, "gate.py"),
                                     "gate-policies"], this]
@@ -799,7 +799,7 @@ def check_restore_command(env, image, database, name):
 
 
 def check_network(env, pins):
-    """ADR-044 §6: the source namespaces, then from a pod in each a connection to each target
+    """ADR-048 §6: the source namespaces, then from a pod in each a connection to each target
     of network.CASES. Returns (problems, lines)."""
     objects = network.namespaces_manifest(env)
     objects["items"].append(network.metrics_service(env))

@@ -71,13 +71,13 @@ OPERATOR_LABEL = "app.kubernetes.io/name=cloudnative-pg"
 PLUGIN_CRD = "objectstores.barmancloud.cnpg.io"
 PLUGIN_NAME = "barman-cloud.cloudnative-pg.io"
 PLUGIN_LABEL = f"cnpg.io/pluginName={PLUGIN_NAME}"
-# Polaris's network policies (ADR-044), and the label a pod needs to reach polaris-pg.
+# Polaris's network policies (ADR-048), and the label a pod needs to reach polaris-pg.
 POLARIS_NETPOL_RELEASE = "polaris-network-policies"
 POLARIS_NETPOL_CHART = os.path.join(ROOT, "charts", POLARIS_NETPOL_RELEASE)
 PG_CLIENT_LABEL = "lakehouse/polaris-pg-client"
 # Polaris's pods, by the labels upstream's chart sets with release name POLARIS.
 POLARIS_POD_SELECTOR = "app.kubernetes.io/name=polaris,app.kubernetes.io/instance=polaris"
-# One namespace label per caller class in other teams' namespaces (ADR-044 §2).
+# One namespace label per caller class in other teams' namespaces (ADR-048 §2).
 CALLER_VARS = {"gateway": "POLARIS_GATEWAY_NAMESPACE_LABEL",
                "query": "POLARIS_QUERY_NAMESPACE_LABEL",
                "metrics": "METRICS_NAMESPACE_LABEL",
@@ -252,7 +252,7 @@ def check_plugin(base, namespace, run):
 
 
 def network_policy_values(env):
-    """charts/polaris-network-policies's values from `.env` (ADR-044 §2). Returns (values,
+    """charts/polaris-network-policies's values from `.env` (ADR-048 §2). Returns (values,
     problems, empty): a caller class whose variable is empty is left out, and named in
     `empty`; anything but `key=value` is a problem. The chart's schema checks the rest."""
     callers, problems, empty = {}, [], []
@@ -263,11 +263,11 @@ def network_policy_values(env):
             continue
         key, sep, value = text.partition("=")
         if not sep or not key:
-            problems.append(f"{var} must be one namespace label, key=value (ADR-044)")
+            problems.append(f"{var} must be one namespace label, key=value (ADR-048)")
             continue
         callers[name] = {"key": key, "value": value}
     problems += [f"{var} is empty: the network policies select that namespace by name "
-                 "(ADR-044)" for var in ("NS_CATALOG_DATAHUB", "NS_CNPG_SYSTEM")
+                 "(ADR-048)" for var in ("NS_CATALOG_DATAHUB", "NS_CNPG_SYSTEM")
                  if not env.get(var)]
     values = {"callers": callers,
               "namespaces": {"datahub": env.get("NS_CATALOG_DATAHUB", ""),
@@ -277,7 +277,7 @@ def network_policy_values(env):
 
 
 def network_policies(env, run, dry_run=False):
-    """Step 1, first: Polaris's network policies (ADR-044, ADR-045). Polaris's running pods
+    """Step 1, first: Polaris's network policies (ADR-048, ADR-045). Polaris's running pods
     get the client label before, so on the first upgrade to a release with policies they keep
     reaching polaris-pg until their own rollout. Returns (problems, notes)."""
     namespace = env.get("NS_CATALOG_POLARIS", "")
@@ -298,7 +298,7 @@ def network_policies(env, run, dry_run=False):
             if code != 0:
                 return [f"cannot label Polaris's pods in {namespace}: {out.strip()}"], []
             notes.append(f"Step 1: {len(pods)} running Polaris pods labelled "
-                         f"{PG_CLIENT_LABEL}=true before the network policies (ADR-044).")
+                         f"{PG_CLIENT_LABEL}=true before the network policies (ADR-048).")
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
         json.dump(values, f)
     try:
@@ -313,7 +313,7 @@ def network_policies(env, run, dry_run=False):
     refused = (f"; no namespace label in {', '.join(empty)}, so those callers are refused"
                if empty else "")
     done = "server-side dry-run passed" if dry_run else "installed"
-    notes.append(f"Step 1: network policies in {namespace}, {done}{refused} (ADR-044).")
+    notes.append(f"Step 1: network policies in {namespace}, {done}{refused} (ADR-048).")
     return [], notes
 
 

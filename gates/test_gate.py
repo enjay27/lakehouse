@@ -66,7 +66,7 @@ class Pins(unittest.TestCase):
                 self.assertTrue(pin["source"])
 
     def test_the_network_policy_schema_is_the_gates_kubernetes_version_at_a_commit(self):
-        # ADR-044 §4: kubeconform validates the policies against it in the static gate.
+        # ADR-048 §4: kubeconform validates the policies against it in the static gate.
         pins = gate.load_pins(os.path.join(HERE, "pins.json"))
         pin = pins["kubernetes_schemas"]["networkpolicy"]
         version = pins["node_image"]["image"].split(":")[1].split("@")[0]
@@ -246,7 +246,7 @@ class Commands(unittest.TestCase):
 class Install(unittest.TestCase):
     ROOT = os.path.dirname(HERE)
     THIS = ["python3", os.path.join(os.path.dirname(HERE), "install", "release.py")]
-    # ADR-044 §5: the gate-only allow policies, just before this commit's release.
+    # ADR-048 §5: the gate-only allow policies, just before this commit's release.
     GATE_POLICIES = ["python3", os.path.join(HERE, "gate.py"), "gate-policies"]
 
     def test_with_a_release_installs_it_from_its_tag_then_this_commit(self):
@@ -377,7 +377,7 @@ class GateEnv(unittest.TestCase):
         self.assertEqual(env["POLARIS_DB_HOST"], "recorder.si.svc.cluster.local")
 
     def test_each_caller_class_gets_the_gates_namespace_label(self):
-        # ADR-044 §6: check-network gives these labels to its source namespaces.
+        # ADR-048 §6: check-network gives these labels to its source namespaces.
         env = gate.init_env.parse(gate.gate_env(TEMPLATE, gen=lambda name: "x"))
         self.assertEqual({var: env[var] for var in gate.release.CALLER_VARS.values()}, {
             "POLARIS_GATEWAY_NAMESPACE_LABEL": "lakehouse-gate/caller=gateway",

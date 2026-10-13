@@ -1,7 +1,7 @@
 {{- $callers := .Values.callers }}
 # Polaris's API, 8181: the gateway, user namespaces, Datahub's namespace, and the ingress
 # controller while the console is enabled, since the console's browser calls the API through
-# it (ADR-044 §3). Datahub's namespace is always a source, so this rule always has one.
+# it (ADR-048 §3). Datahub's namespace is always a source, so this rule always has one.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

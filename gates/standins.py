@@ -24,7 +24,7 @@ never part of a release. Built here as one v1 List that `gate.py standins` appli
 
 Ingress to NS_STANDINS is denied by default; the recorder takes connections from Polaris's
 namespace, SeaweedFS, OPA and Prometheus from the gate's check pods, SeaweedFS and OPA also
-from the recorder (ADR-044 §3, ADR-046 §4).
+from the recorder (ADR-048 §3, ADR-046 §4).
 
 Images are pinned by digest in gates/pins.json (`standin_images`). Everything lives in
 `NS_STANDINS` but Prometheus's Role and RoleBinding, in Polaris's namespace; credentials reach
@@ -42,7 +42,7 @@ FILER_PORT = 8888
 PG_PORT = 5432
 PROMETHEUS_PORT = 9090
 # The label every pod the gate starts to check things carries: in Polaris's namespace, those
-# pods may reach the stand-ins directly (ADR-034, ADR-044 §3).
+# pods may reach the stand-ins directly (ADR-034, ADR-048 §3).
 CHECK_LABEL = "lakehouse-gate/check"
 
 
@@ -92,7 +92,7 @@ def _policy(name, namespace, pod_selector, ingress=None):
 
 
 def network_policies(env):
-    """NS_STANDINS's rows of ADR-044 §3 (from ADR-034, ADR-046 §4): default deny; the recorder
+    """NS_STANDINS's rows of ADR-048 §3 (from ADR-034, ADR-046 §4): default deny; the recorder
     from Polaris's namespace; SeaweedFS and OPA from the recorder and the gate's check pods;
     Prometheus from the gate's check pods."""
     ns, polaris = env["NS_STANDINS"], env["NS_CATALOG_POLARIS"]
