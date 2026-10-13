@@ -170,6 +170,47 @@ class Manifests(unittest.TestCase):
             self.assertRegex(f.read(), r"(?m)^package polaris\.authz$")
 
 
+class NetworkPolicies(unittest.TestCase):
+    """ADR-044 §3, NS_STANDINS's rows restated from ADR-034."""
+
+    def setUp(self):
+        self.policies = {name: o["spec"] for (kind, name), o in objects().items()
+                         if kind == "NetworkPolicy"}
+
+    def test_every_pod_is_denied_ingress_by_default(self):
+        self.assertEqual(self.policies["default-deny-ingress"],
+                         {"podSelector": {}, "policyTypes": ["Ingress"]})
+
+    def test_the_recorder_from_polaris_namespace_on_its_three_ports(self):
+        spec = self.policies["recorder"]
+        self.assertEqual(spec["podSelector"],
+                         {"matchLabels": {"app.kubernetes.io/name": "recorder"}})
+        self.assertEqual(spec["ingress"], [{
+            "ports": [{"protocol": "TCP", "port": p} for p in (8181, 8333, 5432)],
+            "from": [{"namespaceSelector": {"matchLabels": {
+                "kubernetes.io/metadata.name": "catalog-polaris"}}}]}])
+
+    def test_seaweedfs_and_opa_from_the_recorder_and_the_gates_check_pods(self):
+        for name, port in (("seaweedfs", 8333), ("opa", 8181)):
+            with self.subTest(name=name):
+                spec = self.policies[name]
+                self.assertEqual(spec["podSelector"],
+                                 {"matchLabels": {"app.kubernetes.io/name": name}})
+                self.assertEqual(spec["ingress"], [{
+                    "ports": [{"protocol": "TCP", "port": port}],
+                    "from": [
+                        {"podSelector": {"matchLabels": {"app.kubernetes.io/name": "recorder"}}},
+                        {"namespaceSelector": {"matchLabels": {
+                            "kubernetes.io/metadata.name": "catalog-polaris"}},
+                         "podSelector": {"matchLabels": {"lakehouse-gate/check": "true"}}}]}])
+
+    def test_every_policy_restricts_ingress_only(self):
+        self.assertEqual(sorted(self.policies),
+                         ["default-deny-ingress", "opa", "recorder", "seaweedfs"])
+        for name, spec in self.policies.items():
+            self.assertEqual(spec["policyTypes"], ["Ingress"], name)
+
+
 class Cases(unittest.TestCase):
     def test_each_case_has_a_name_a_decision_and_polaris_input(self):
         cases = standins.load_cases(os.path.join(HERE, "opa", "cases.json"))
