@@ -168,6 +168,23 @@ class GateWorkflows(unittest.TestCase):
                                          "write")
 
 
+class SmokeFresh(unittest.TestCase):
+    """smoke-fresh is smoke.yml on a push to gate/smoke-fresh/<task>, with `fresh` (ADR-050 §2)."""
+
+    def setUp(self):
+        self.workflow = read_workflow(os.path.join(WORKFLOWS, "smoke.yml"))
+
+    def test_a_push_to_either_smoke_branch_runs_it(self):
+        self.assertLessEqual({"gate/smoke/**", "gate/smoke-fresh/**"},
+                             set(push_branches(self.workflow)))
+
+    def test_fresh_comes_from_the_input_or_the_ref(self):
+        steps = self.workflow["jobs"]["smoke"]["steps"]
+        (install,) = [s for s in steps if "gate.py install" in s.get("run", "")]
+        self.assertEqual(install["env"]["FRESH"], "${{ inputs.fresh || "
+                         "startsWith(github.ref, 'refs/heads/gate/smoke-fresh/') }}")
+
+
 class DeleteWorkflow(unittest.TestCase):
     def setUp(self):
         self.workflow = read_workflow(os.path.join(WORKFLOWS, DELETE))

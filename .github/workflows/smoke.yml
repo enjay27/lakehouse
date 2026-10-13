@@ -1,5 +1,6 @@
-# The smoke gate (ADR-038): runs on a push to gate/smoke/<task> and nightly on main. A PR that
-# changes platform files merges only when a passing run covers its head (ADR-039). kind with
+# The smoke gate (ADR-050): runs on a push to gate/smoke/<task> and nightly on main, and on a
+# push to gate/smoke-fresh/<task> with `fresh`. A PR that changes platform files merges only
+# when a passing run on gate/smoke/<task> covers its head (ADR-039). kind with
 # three nodes and the pinned CNPG operator (ADR-017, ADR-029), cert-manager and the Barman Cloud
 # Plugin (ADR-043), the gate's Secrets (ADR-006), the
 # stand-ins for other teams' services (ADR-031), the latest release tag installed from its
@@ -23,7 +24,7 @@ name: Smoke
 
 on:
   push:
-    branches: ["gate/smoke/**"]
+    branches: ["gate/smoke/**", "gate/smoke-fresh/**"]
   schedule:
     - cron: "17 3 * * *"
   workflow_call:
@@ -82,7 +83,7 @@ jobs:
 
       - name: Install the last release, then this commit over it (ADR-021)
         env:
-          FRESH: ${{ inputs.fresh }}
+          FRESH: ${{ inputs.fresh || startsWith(github.ref, 'refs/heads/gate/smoke-fresh/') }}
         run: |
           set -euo pipefail
           if [ "$FRESH" = true ]; then
@@ -106,7 +107,7 @@ jobs:
           set -euo pipefail
           python3 gates/gate.py check-polaris | tee -a "$GITHUB_STEP_SUMMARY"
 
-      - name: Each caller reaches only what its rule allows; every other connection is refused (ADR-044)
+      - name: Each caller reaches only what its rule allows; every other connection is refused (ADR-048)
         run: |
           set -euo pipefail
           python3 gates/gate.py check-network | tee -a "$GITHUB_STEP_SUMMARY"

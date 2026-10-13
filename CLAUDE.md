@@ -48,11 +48,11 @@ storage, observability, SSO and the catalog gateway are other teams' services, r
 | `CLAUDE.md`, `.claude/` | `python3 scripts/claude_md_check.py` |
 | `init_env.py --apply-secrets` | Needs a Linux test cluster: label the issue `cmd:verify-needs-linux` |
 
-CI runs all of these as the **static** gate on every push to `claude/**` and every PR (ADR-050).
-**gate-check** runs on every PR into `main` (ADR-039): a PR changing `charts/`, `images/`,
-`install/`, `gates/` or the gate workflows needs a passing dry-run and smoke covering its head; one
-changing batch or fixture spec files, a log-batch (ADR-040 §5). gate-check does not wait: push each
-head to `gate/<dry-run|smoke|log-batch>/<task>` as needed, then open the PR or push it once all passed.
+CI runs these as the **static** gate on every push to `claude/**` and every PR (ADR-050). **gate-check**
+(ADR-039, every PR into `main`): `charts/`, `images/`, `install/`, `gates/` or the gate workflows need
+passing dry-run and smoke runs on the head; batch or fixture spec files, a log-batch (ADR-040 §5).
+`install/`, `scripts/init_env.py` or a file added to or removed from `charts/` also need smoke-fresh,
+unread by gate-check (ADR-050 §3). Push each head to `gate/<level>/<task>`; open the PR once all passed.
 
 ## Environments and clusters (ADR-004, ADR-005)
 
