@@ -10,6 +10,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
 import gate  # noqa: E402
+import metrics  # noqa: E402
 import network  # noqa: E402
 
 ENV = {"NS_CATALOG_POLARIS": "catalog-polaris", "NS_STANDINS": "standins",
@@ -69,6 +70,7 @@ class CheckPods(unittest.TestCase):
             "check_console": gate.check_console_command(env, PYTHON, "n"),
             "logs_traffic": gate.logs_traffic_command(env, PYTHON, "n", "p", 1, ["pod-a"]),
             "logs_listing": gate.logs_listing_command(env, PYTHON, "n"),
+            "check_metrics": metrics.query_command(env, PYTHON, "n", 5),
         }
         for name, argv in commands.items():
             with self.subTest(command=name):
@@ -84,11 +86,11 @@ class Cases(unittest.TestCase):
         for source, target in (("gateway", "polaris-api"), ("query", "polaris-api"),
                                ("datahub", "polaris-api"), ("ingress", "polaris-api"),
                                ("metrics", "polaris-management"), ("ingress", "console"),
-                               ("polaris", "recorder")):
+                               ("polaris", "recorder"), ("metrics", "polaris-pg-metrics")):
             with self.subTest(source=source, target=target):
                 self.assertIs(expected[(source, target)], True)
         for target in ("polaris-api", "polaris-management", "console", "polaris-pg",
-                       "recorder", "seaweedfs", "opa"):
+                       "polaris-pg-metrics", "recorder", "seaweedfs", "opa"):
             with self.subTest(source="none", target=target):
                 self.assertIs(expected[("none", target)], False)
 
@@ -97,6 +99,7 @@ class Cases(unittest.TestCase):
         self.assertIs(expected[("gateway", "polaris-management")], False)
         self.assertIs(expected[("metrics", "polaris-api")], False)
         self.assertIs(expected[("query", "console")], False)
+        self.assertIs(expected[("gateway", "polaris-pg-metrics")], False)
 
     def test_an_unlabelled_pod_in_polaris_namespace_reaches_only_the_recorder(self):
         expected = {c.target: c.allowed for c in network.CASES if c.source == "polaris"}
@@ -112,6 +115,9 @@ class Cases(unittest.TestCase):
                          "polaris-console.catalog-polaris.svc.cluster.local:8080")
         self.assertEqual(addresses["polaris-pg"],
                          "polaris-pg-rw.catalog-polaris.svc.cluster.local:5432")
+        # ADR-046 §4: polaris-pg's Services expose 5432 only; the gate adds one for 9187.
+        self.assertEqual(addresses["polaris-pg-metrics"],
+                         "gate-polaris-pg-metrics.catalog-polaris.svc.cluster.local:9187")
         self.assertEqual(addresses["recorder"], "recorder.standins.svc.cluster.local:8333")
         self.assertEqual(addresses["seaweedfs"], "seaweedfs.standins.svc.cluster.local:8333")
         self.assertEqual(addresses["opa"], "opa.standins.svc.cluster.local:8181")
@@ -139,6 +145,16 @@ class Sources(unittest.TestCase):
                     for n in manifest["items"]}
         self.assertEqual(labelled["gate-net-metrics"], {"lakehouse-gate/caller": "metrics"})
         self.assertEqual(labelled["gate-net-none"], {})
+
+    def test_a_gate_service_for_the_instances_exporter(self):
+        svc = network.metrics_service(ENV)
+        self.assertEqual(svc["kind"], "Service")
+        self.assertEqual(svc["metadata"]["name"], "gate-polaris-pg-metrics")
+        self.assertEqual(svc["metadata"]["namespace"], "catalog-polaris")
+        self.assertEqual(svc["spec"]["selector"],
+                         {"cnpg.io/cluster": "polaris-pg", "cnpg.io/podRole": "instance"})
+        self.assertEqual(svc["spec"]["ports"], [{"name": "metrics", "port": 9187,
+                                                 "targetPort": 9187, "protocol": "TCP"}])
 
     def test_the_gates_env_labels_are_the_ones_the_namespaces_get(self):
         for var, value in network.GATE_CALLER_LABELS.items():

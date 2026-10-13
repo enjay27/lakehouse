@@ -901,7 +901,7 @@ class Standins(unittest.TestCase):
         self.assertIn("--server-side", apply)
         self.assertEqual(apply[-2:], ["-f", "-"])
         self.assertEqual(wait[:5], ["kubectl", "--context", gate.CONTEXT, "-n", "standins"])
-        for name in ("seaweedfs", "opa", "recorder"):
+        for name in ("seaweedfs", "opa", "recorder", "prometheus"):
             self.assertIn(f"deployment/{name}", wait)
 
     def test_then_the_backup_bucket_is_created_in_seaweedfs_and_checked(self):

@@ -52,7 +52,7 @@ def chart_version():
         return yaml.safe_load(f)["appVersion"]
 
 
-def render(env=GATE_ENV, *sets):
+def render(env=GATE_ENV, *sets, api_versions=()):
     with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
         json.dump(release.polaris_values(env), f)
     try:
@@ -60,6 +60,8 @@ def render(env=GATE_ENV, *sets):
                 "--namespace", NAMESPACE, "-f", release.POLARIS_VALUES, "-f", f.name]
         for s in sets:
             argv += ["--set", s]
+        for api in api_versions:
+            argv += ["--api-versions", api]
         result = subprocess.run(argv, capture_output=True, text=True, check=False)
     finally:
         os.unlink(f.name)
@@ -262,6 +264,18 @@ class Rendered(unittest.TestCase):
         self.assertEqual(self.props["quarkus.management.port"], "8182")
         mgmt = one(self.docs, "Service", "polaris-mgmt")["spec"]["ports"]
         self.assertEqual([p["port"] for p in mgmt], [8182])
+
+    def test_metrics_stay_on_as_the_chart_defaults(self):
+        # ADR-046 §1: /q/metrics on the management port, with no extra tags.
+        self.assertIs(self.defaults["metrics"]["enabled"], True)
+        self.assertNotIn("quarkus.micrometer.enabled", self.props)
+        self.assertFalse([k for k in self.props if k.startswith("polaris.metrics.")])
+
+    def test_no_service_monitor_even_where_the_prometheus_operator_runs(self):
+        # ADR-046 §2: the chart renders one wherever monitoring.coreos.com/v1 is served.
+        self.assertIs(self.defaults["serviceMonitor"]["enabled"], True)
+        docs = render(GATE_ENV, api_versions=["monitoring.coreos.com/v1"])
+        self.assertNotIn("ServiceMonitor", [d["kind"] for d in docs])
 
 
 class ValuesSchema(unittest.TestCase):

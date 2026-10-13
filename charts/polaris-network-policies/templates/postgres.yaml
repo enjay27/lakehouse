@@ -43,3 +43,24 @@ spec:
           port: 8000
       from:
         {{- include "polaris-network-policies.namespaceNamed" .Values.namespaces.operator | nindent 8 }}
+{{- with .Values.callers.metrics }}
+---
+# CNPG's exporter on each instance, 9187: the metrics scraper's namespace only (ADR-046 §4).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: polaris-pg-metrics
+  labels:
+    {{- include "polaris-network-policies.labels" $ | nindent 4 }}
+spec:
+  podSelector:
+    {{- include "polaris-network-policies.instances" $ | nindent 4 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 9187
+      from:
+        {{- include "polaris-network-policies.namespace" . | nindent 8 }}
+{{- end }}

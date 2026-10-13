@@ -22,7 +22,8 @@
                   gates/opa/policy.rego) in NS_STANDINS and waits for them (ADR-031), then
                   creates the backup bucket in SeaweedFS and checks it (ADR-043). Never
                   part of a release; the install's endpoint check needs them on the gate.
-                  With them the recorder (ADR-034), with a TLS certificate made here.
+                  With them the recorder (ADR-034), with a TLS certificate made here, and
+                  Prometheus loading docs/contracts/polaris-prometheus-scrape.yaml (ADR-046).
   check-standins  runs gates/check_standins.sh in a short-lived curl pod in Polaris's namespace:
                   an S3 round trip with Polaris's credentials, and every case of
                   gates/opa/cases.json against the policy endpoint (ADR-026, ADR-031); then
@@ -94,11 +95,17 @@
                   unlabelled pod in Polaris's namespace, connects to each target of
                   gates/network.py's CASES: each allowed one must connect, each refused one
                   must time out or be reset (ADR-044 §6). One that should be refused and
-                  connects means the cluster does not enforce NetworkPolicy.
+                  connects means the cluster does not enforce NetworkPolicy. polaris-pg's
+                  exporter on 9187 is reached through a Service the gate adds (ADR-046 §4).
+  check-metrics   asks the Prometheus stand-in, from a check pod, until every target is up:
+                  `up` 1 for every running Polaris pod and polaris-pg instance, Polaris's
+                  http_server_requests_seconds_count above 0, cnpg_collector_up 1 on every
+                  instance (gates/metrics.py, ADR-046 §5). On a problem, every target with
+                  its last error.
 Every kubectl and helm call names the gate's context, and a namespace where the object has
 one. Nothing here reaches any cluster but the kind cluster it creates (ADR-017).
 
-Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | check-polaris-pg | check-polaris | console-image | batch-image | check-logs | check-console | check-iceberg | check-restore | gate-policies | check-network
+Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | check-polaris-pg | check-polaris | console-image | batch-image | check-logs | check-console | check-iceberg | check-restore | gate-policies | check-network | check-metrics
 """
 
 import copy
@@ -121,6 +128,7 @@ sys.path.insert(0, os.path.join(ROOT, "install"))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 import contract  # noqa: E402
 import init_env  # noqa: E402
+import metrics  # noqa: E402
 import network  # noqa: E402
 import release  # noqa: E402
 import release_tag  # noqa: E402
@@ -337,7 +345,7 @@ def write_gate_env(path, template_text):
 
 
 def standins_commands(env, manifest):
-    """(argv, stdin) in order: apply the stand-ins' List `manifest`, wait until all three are
+    """(argv, stdin) in order: apply the stand-ins' List `manifest`, wait until all four are
     ready, then create the backup bucket with SeaweedFS's shell (`weed mini -bucket` makes only
     the warehouse's) and check that its filer lists it (ADR-043)."""
     ns = ["kubectl", "--context", CONTEXT, "-n", env["NS_STANDINS"]]
@@ -346,7 +354,7 @@ def standins_commands(env, manifest):
         (["kubectl", "--context", CONTEXT, "apply", "--server-side", "--field-manager=gate",
           "-f", "-"], manifest),
         (ns + ["rollout", "status", "deployment/seaweedfs", "deployment/opa",
-               "deployment/recorder", "--timeout=5m"], None),
+               "deployment/recorder", "deployment/prometheus", "--timeout=5m"], None),
         (ns + ["exec", "-i", "deployment/seaweedfs", "--", "weed", "shell"],
          f"s3.bucket.create -name {bucket}\n"),
         (ns + ["exec", "deployment/seaweedfs", "--", "curl", "-sf", "-o", "/dev/null",
@@ -720,7 +728,9 @@ def check_restore_command(env, image, database, name):
 def check_network(env, pins):
     """ADR-044 §6: the source namespaces, then from a pod in each a connection to each target
     of network.CASES. Returns (problems, lines)."""
-    manifest = json.dumps(network.namespaces_manifest(env))
+    objects = network.namespaces_manifest(env)
+    objects["items"].append(network.metrics_service(env))
+    manifest = json.dumps(objects)
     apply = ["kubectl", "--context", CONTEXT, "apply", "--server-side", "--field-manager=gate",
              "-f", "-"]
     subprocess.run(apply, input=manifest, text=True, check=True, capture_output=True)
@@ -735,6 +745,23 @@ def check_network(env, pins):
         by_address = network.parse_probe(out.stdout)
         results[source] = {t: by_address.get(addresses[t]) for t in wanted}
     return network.report(network.CASES, results)
+
+
+def check_metrics(env, pins):
+    """ADR-046 §5: every running pod of each job of the contract, then the stand-in asked from
+    a check pod until they are all up. Returns (problems, notes)."""
+    kubectl = ["kubectl", "--context", CONTEXT, "-n", env["NS_CATALOG_POLARIS"]]
+    pods = {job: [p["metadata"]["name"] for p in
+                  _running(json.loads(output(kubectl + ["get", "pods", "-l", selector,
+                                                        "-o", "json"])))]
+            for job, selector in metrics.JOBS.items()}
+    command = metrics.query_command(env, smoke_python_image(pins),
+                                    f"check-metrics-{os.getpid()}",
+                                    sum(len(names) for names in pods.values()))
+    out = subprocess.run(command, input=metrics.QUERY, capture_output=True, text=True,
+                         check=False)
+    print(out.stderr, end="", flush=True)
+    return metrics.problems(metrics.parse_answer(out.stdout), pods)
 
 
 def check_restore(env):
@@ -1271,8 +1298,10 @@ def main(argv):
         with open(os.path.join(HERE, "opa", "policy.rego"), encoding="utf-8") as f, \
                 open(os.path.join(HERE, "recorder", "proxy.py"), encoding="utf-8") as code, \
                 tempfile.TemporaryDirectory() as d:
+            with open(metrics.CONTRACT, encoding="utf-8") as scrape:
+                config = metrics.prometheus_config(scrape.read(), env)
             manifest = json.dumps(standins.manifests(env, pins, f.read(), code.read(),
-                                                     recorder_certificate(env, d)))
+                                                     recorder_certificate(env, d), config))
         (apply, _), *rest = standins_commands(env, manifest)
         print("+ " + " ".join(apply) + "  (the stand-ins' List on stdin)", flush=True)
         subprocess.run(apply, input=manifest, text=True, check=True)
@@ -1394,6 +1423,11 @@ def main(argv):
     if argv[1:] == ["check-network"]:
         problems, lines = check_network(release.load_env(ROOT, os.environ), pins)
         for line in lines + problems:
+            print(line, flush=True)
+        return 1 if problems else 0
+    if argv[1:] == ["check-metrics"]:
+        problems, notes = check_metrics(release.load_env(ROOT, os.environ), pins)
+        for line in notes + problems:
             print(line, flush=True)
         return 1 if problems else 0
     if argv[1:] == ["check-restore"]:
