@@ -1,6 +1,6 @@
 # ADR-050: Gates run from throwaway `gate/*` branches before the PR opens; `smoke-fresh` installs a commit from nothing
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-13
 - **Related:** ADR-000, ADR-016, ADR-017, ADR-021, ADR-032, ADR-033, ADR-038, ADR-039, ADR-040, ADR-048, ADR-049
 
