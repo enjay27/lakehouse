@@ -183,6 +183,23 @@ def switchover_patch(target, timestamp):
                        "phaseReason": f"Switching over to {target}"}}
 
 
+def _ready(pod):
+    return any(c["type"] == "Ready" and c["status"] == "True"
+               for c in pod.get("status", {}).get("conditions", []))
+
+
+def switchover_target(pods, primary):
+    """Before S3: None when the primary already runs on a worker; else a ready standby on a
+    worker to switch over to."""
+    placed = {p["metadata"]["name"]: p for p in pods["items"]}
+    if placed[primary]["spec"].get("nodeName") != CONTROL_PLANE:
+        return None
+    for name, pod in sorted(placed.items()):
+        if name != primary and pod["spec"].get("nodeName") != CONTROL_PLANE and _ready(pod):
+            return name
+    raise ValueError(f"no ready standby on a worker to take over from {primary}")
+
+
 def rows_query(run_id):
     if not RUN_ID.match(run_id):
         raise ValueError(f"{run_id}: a run's name is letters, digits and dashes")

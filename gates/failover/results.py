@@ -61,6 +61,19 @@ def outage(records, mode, t0):
             "first_good": first_good}
 
 
+def done(records, t0, settle_ms):
+    """Whether the run can end: every mode recovered from its outage and has written well for
+    `settle_ms` since."""
+    for mode in MODES:
+        out = outage(records, mode, t0)
+        if not out["recovered"]:
+            return False
+        last = max(r["done"] for r in _of(records, mode) if r["ok"])
+        if last - out["first_good"] < settle_ms:
+            return False
+    return True
+
+
 def failed(records, mode, t0):
     return sum(1 for r in _of(records, mode) if not r["ok"] and r["sent"] >= t0)
 

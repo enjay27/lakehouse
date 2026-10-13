@@ -159,6 +159,27 @@ class Events(unittest.TestCase):
         self.assertIsNone(results.log_detected("", T0))
 
 
+class Done(unittest.TestCase):
+    def test_done_once_both_modes_write_again_for_the_settle_time(self):
+        records = []
+        for mode in results.MODES:
+            records += steady(mode, T0 - 1000, T0) + steady(mode, T0 + 4000, T0 + 9500,
+                                                            first_seq=10)
+        self.assertTrue(results.done(records, T0, settle_ms=5000))
+        self.assertFalse(results.done(records, T0, settle_ms=6000))
+
+    def test_not_done_while_one_mode_is_still_failing(self):
+        records = steady("pooled", T0 - 1000, T0) + steady("pooled", T0 + 1000, T0 + 9000,
+                                                           first_seq=10)
+        records += steady("per_write", T0 - 1000, T0) + steady("per_write", T0, T0 + 9000,
+                                                               ok=False, first_seq=10)
+        self.assertFalse(results.done(records, T0, settle_ms=5000))
+
+    def test_not_done_before_the_failure(self):
+        records = [r for mode in results.MODES for r in steady(mode, T0 - 9000, T0)]
+        self.assertFalse(results.done(records, T0, settle_ms=5000))
+
+
 def run_record(setup="C0", scenario="S1", outage_ms=3000, lost_seq=None):
     probe = []
     for mode in results.MODES:

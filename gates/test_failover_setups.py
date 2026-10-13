@@ -192,6 +192,31 @@ class Commands(unittest.TestCase):
             "endpoints": ["polaris-pg-2"]})
 
 
+class Switchover(unittest.TestCase):
+    @staticmethod
+    def pods(*placed):
+        return {"items": [{"metadata": {"name": name}, "spec": {"nodeName": node},
+                           "status": {"conditions": [{"type": "Ready", "status": ready}]}}
+                          for name, node, ready in placed]}
+
+    def test_a_ready_standby_on_a_worker(self):
+        pods = self.pods(("polaris-pg-1", setups.CONTROL_PLANE, "True"),
+                         ("polaris-pg-2", "lakehouse-gate-worker", "False"),
+                         ("polaris-pg-3", "lakehouse-gate-worker2", "True"))
+        self.assertEqual(setups.switchover_target(pods, "polaris-pg-1"), "polaris-pg-3")
+
+    def test_none_when_the_primary_is_already_on_a_worker(self):
+        pods = self.pods(("polaris-pg-1", "lakehouse-gate-worker", "True"),
+                         ("polaris-pg-2", setups.CONTROL_PLANE, "True"))
+        self.assertIsNone(setups.switchover_target(pods, "polaris-pg-1"))
+
+    def test_no_standby_to_take_it_is_an_error(self):
+        pods = self.pods(("polaris-pg-1", setups.CONTROL_PLANE, "True"),
+                         ("polaris-pg-2", "lakehouse-gate-worker", "False"))
+        with self.assertRaises(ValueError):
+            setups.switchover_target(pods, "polaris-pg-1")
+
+
 class ProbeImage(unittest.TestCase):
     def test_the_dockerfile_builds_on_the_pinned_jdk(self):
         pins = gate.load_pins()["failover"]
