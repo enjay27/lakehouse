@@ -106,6 +106,11 @@ jobs:
           set -euo pipefail
           python3 gates/gate.py check-polaris | tee -a "$GITHUB_STEP_SUMMARY"
 
+      - name: Each caller reaches only what its rule allows; every other connection is refused (ADR-044)
+        run: |
+          set -euo pipefail
+          python3 gates/gate.py check-network | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: PyIceberg as an ordinary principal writes and reads a table on S3; the policy refuses the rest (ADR-026, ADR-031)
         run: |
           set -euo pipefail
@@ -168,6 +173,7 @@ jobs:
           kubectl --context "$KUBE_CONTEXT" get pods -A -o wide || true
           kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_POLARIS" get cluster,pods,pvc -o wide || true
           kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_POLARIS" get events --sort-by=.lastTimestamp || true
+          kubectl --context "$KUBE_CONTEXT" get networkpolicies -A || true
           kubectl --context "$KUBE_CONTEXT" -n "$NS_STANDINS" get pods -o wide || true
           kubectl --context "$KUBE_CONTEXT" -n "$NS_STANDINS" get events --sort-by=.lastTimestamp || true
           kubectl --context "$KUBE_CONTEXT" -n "$NS_STANDINS" logs deployment/seaweedfs --tail=60 || true

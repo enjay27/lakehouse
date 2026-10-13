@@ -65,6 +65,18 @@ class Pins(unittest.TestCase):
                 self.assertTrue(pin["url"].endswith(".yaml"))
                 self.assertTrue(pin["source"])
 
+    def test_the_network_policy_schema_is_the_gates_kubernetes_version_at_a_commit(self):
+        # ADR-044 §4: kubeconform validates the policies against it in the static gate.
+        pins = gate.load_pins(os.path.join(HERE, "pins.json"))
+        pin = pins["kubernetes_schemas"]["networkpolicy"]
+        version = pins["node_image"]["image"].split(":")[1].split("@")[0]
+        self.assertRegex(pin["sha256"], r"^[0-9a-f]{64}$")
+        self.assertRegex(pin["url"], r"^https://raw\.githubusercontent\.com/yannh/"
+                         r"kubernetes-json-schema/[0-9a-f]{40}/")
+        self.assertTrue(pin["url"].endswith(
+            f"/{version}-standalone-strict/networkpolicy-networking-v1.json"))
+        self.assertTrue(pin["source"])
+
     def test_the_operator_pin_is_supported_by_the_install_script(self):
         pins = gate.load_pins(os.path.join(HERE, "pins.json"))
         with open(os.path.join(HERE, "..", "install", "supported.json"), encoding="utf-8") as f:
@@ -234,6 +246,8 @@ class Commands(unittest.TestCase):
 class Install(unittest.TestCase):
     ROOT = os.path.dirname(HERE)
     THIS = ["python3", os.path.join(os.path.dirname(HERE), "install", "release.py")]
+    # ADR-044 §5: the gate-only allow policies, just before this commit's release.
+    GATE_POLICIES = ["python3", os.path.join(HERE, "gate.py"), "gate-policies"]
 
     def test_with_a_release_installs_it_from_its_tag_then_this_commit(self):
         commands, summary = gate.install_plan("platform-2026.10.10", "/tmp/prev", fresh=False)
@@ -242,6 +256,7 @@ class Install(unittest.TestCase):
              "platform-2026.10.10"],
             ["cp", "-p", os.path.join(self.ROOT, ".env"), "/tmp/prev/.env"],
             ["python3", "/tmp/prev/install/release.py"],
+            self.GATE_POLICIES,
             self.THIS,
         ])
         self.assertIn("platform-2026.10.10", summary)
@@ -258,19 +273,20 @@ class Install(unittest.TestCase):
 
     def test_without_a_release_installs_this_commit_and_says_so(self):
         commands, summary = gate.install_plan(None, "/tmp/prev", fresh=False)
-        self.assertEqual(commands, [self.THIS])
+        self.assertEqual(commands, [self.GATE_POLICIES, self.THIS])
         self.assertEqual(summary, "No release to upgrade from: fresh install (ADR-021).")
 
     def test_fresh_ignores_the_release(self):
         commands, summary = gate.install_plan("platform-2026.10.10", "/tmp/prev", fresh=True)
-        self.assertEqual(commands, [self.THIS])
+        self.assertEqual(commands, [self.GATE_POLICIES, self.THIS])
         self.assertIn("Fresh install", summary)
 
     def test_dry_run_installs_the_release_then_dry_runs_this_commit_over_it(self):
         commands, summary = gate.install_plan("platform-2026.10.10", "/tmp/prev", fresh=False,
                                               dry_run=True)
         self.assertEqual(commands[2], ["python3", "/tmp/prev/install/release.py"])
-        self.assertEqual(commands[3], self.THIS + ["--dry-run"])
+        # A dry-run changes nothing, the gate's policies included.
+        self.assertEqual(commands[3:], [self.THIS + ["--dry-run"]])
         self.assertIn("server-side dry-run", summary)
 
     def test_dry_run_without_a_release_dry_runs_this_commit(self):
@@ -291,6 +307,10 @@ S3_REGION=
 POLARIS_WAREHOUSE_BUCKET=
 POLARIS_OPA_URL=
 POLARIS_DB_HOST=
+POLARIS_GATEWAY_NAMESPACE_LABEL=
+POLARIS_QUERY_NAMESPACE_LABEL=
+METRICS_NAMESPACE_LABEL=
+INGRESS_NAMESPACE_LABEL=
 POLARIS_CONSOLE_ENABLED=false
 POLARIS_CONSOLE_ORIGIN=
 POLARIS_CONSOLE_API_URL=
@@ -355,6 +375,15 @@ class GateEnv(unittest.TestCase):
         self.assertEqual(env["POLARIS_OPA_URL"],
                          "http://recorder.si.svc.cluster.local:8181/v1/data/polaris/authz")
         self.assertEqual(env["POLARIS_DB_HOST"], "recorder.si.svc.cluster.local")
+
+    def test_each_caller_class_gets_the_gates_namespace_label(self):
+        # ADR-044 §6: check-network gives these labels to its source namespaces.
+        env = gate.init_env.parse(gate.gate_env(TEMPLATE, gen=lambda name: "x"))
+        self.assertEqual({var: env[var] for var in gate.release.CALLER_VARS.values()}, {
+            "POLARIS_GATEWAY_NAMESPACE_LABEL": "lakehouse-gate/caller=gateway",
+            "POLARIS_QUERY_NAMESPACE_LABEL": "lakehouse-gate/caller=query",
+            "METRICS_NAMESPACE_LABEL": "lakehouse-gate/caller=metrics",
+            "INGRESS_NAMESPACE_LABEL": "lakehouse-gate/caller=ingress"})
 
     def test_the_console_is_enabled_at_its_service_and_reaches_polaris_at_its_service(self):
         env = gate.init_env.parse(gate.gate_env(TEMPLATE, gen=lambda name: "x"))

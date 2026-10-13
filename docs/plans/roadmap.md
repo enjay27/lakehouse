@@ -216,8 +216,13 @@ source does not matter for operation. What follows is the list they cover.
   installs cert-manager and the plugin from pinned manifests, and the smoke gate's
   `check-restore` backs polaris-pg up, restores it into `polaris-pg-restore` and reads the
   root principal and the smoke tests' catalog from it.
-- Before Datahub (Kade, 2026-10-12): ADR-044's network policies next; metrics (P5) and
-  failover (#31) follow.
+- Network policies (2026-10-13, ADR-044, ADR-045, #93). `charts/polaris-network-policies`
+  denies ingress to Polaris's namespace by default and allows each rule of ADR-044 by
+  namespace label from `.env`; step 1 installs it first, after labelling Polaris's running
+  pods as polaris-pg's clients. The stand-ins' namespace denies by default too. The smoke
+  gate's `check-network` makes one allowed and one refused connection per rule. The target
+  clusters' labels are a question for the operator team (#9).
+- Before Datahub (Kade, 2026-10-12): metrics (P5) and failover (#31) next.
 - **Gate:** dry-run and smoke. **Linux:** the release installed on a test cluster.
 
 ### P3: Datahub

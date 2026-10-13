@@ -17,6 +17,9 @@ never part of a release. Built here as one v1 List that `gate.py standins` appli
   polaris-pg (ADR-035). On the gate, `.env` names the recorder, so every exchange with these
   three goes through it.
 
+Ingress to NS_STANDINS is denied by default; the recorder takes connections from Polaris's
+namespace, SeaweedFS and OPA from the recorder and the gate's check pods (ADR-044 §3).
+
 Images are pinned by digest in gates/pins.json (`standin_images`). Everything lives in
 `NS_STANDINS`; credentials reach the cluster only inside the Secret, on stdin.
 """
@@ -30,6 +33,9 @@ OPA_PACKAGE_PATH = "/v1/data/polaris/authz"
 RECORDER_READY_FILE = "/tmp/recorder-ready"
 FILER_PORT = 8888
 PG_PORT = 5432
+# The label every pod the gate starts to check things carries: in Polaris's namespace, those
+# pods may reach the stand-ins directly (ADR-034, ADR-044 §3).
+CHECK_LABEL = "lakehouse-gate/check"
 
 
 def b64(value):
@@ -59,6 +65,39 @@ def _service(name, namespace, port):
     return {"apiVersion": "v1", "kind": "Service", "metadata": _meta(name, namespace),
             "spec": {"selector": {"app.kubernetes.io/name": name},
                      "ports": [{"name": "http", "port": port, "targetPort": port}]}}
+
+
+def _named(namespace):
+    return {"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": namespace}}}
+
+
+def _app(name):
+    return {"podSelector": {"matchLabels": {"app.kubernetes.io/name": name}}}
+
+
+def _policy(name, namespace, pod_selector, ingress=None):
+    spec = {"podSelector": pod_selector, "policyTypes": ["Ingress"]}
+    if ingress is not None:
+        spec["ingress"] = ingress
+    return {"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
+            "metadata": _meta(name, namespace), "spec": spec}
+
+
+def network_policies(env):
+    """NS_STANDINS's rows of ADR-044 §3 (from ADR-034): default deny; the recorder from
+    Polaris's namespace; SeaweedFS and OPA from the recorder and the gate's check pods."""
+    ns, polaris = env["NS_STANDINS"], env["NS_CATALOG_POLARIS"]
+    tcp = [{"protocol": "TCP", "port": p} for p in (OPA_PORT, S3_PORT, PG_PORT)]
+    checks = {**_named(polaris),
+              "podSelector": {"matchLabels": {CHECK_LABEL: "true"}}}
+    policies = [_policy("default-deny-ingress", ns, {}),
+                _policy("recorder", ns, _app("recorder")["podSelector"],
+                        [{"ports": tcp, "from": [_named(polaris)]}])]
+    for name, port in (("seaweedfs", S3_PORT), ("opa", OPA_PORT)):
+        policies.append(_policy(name, ns, _app(name)["podSelector"], [{
+            "ports": [{"protocol": "TCP", "port": port}],
+            "from": [_app("recorder"), checks]}]))
+    return policies
 
 
 def manifests(env, pins, policy_text, recorder_code, tls):
@@ -150,4 +189,5 @@ def manifests(env, pins, policy_text, recorder_code, tls):
             {"name": "code", "configMap": {"name": "recorder-code"}},
             {"name": "tls", "secret": {"secretName": "recorder-tls"}}]),
         recorder_service,
+        *network_policies(env),
     ]}

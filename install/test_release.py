@@ -176,6 +176,7 @@ class Preconditions(unittest.TestCase):
 
 
 POLARIS_ENV = {**ENV, "NS_CATALOG_POLARIS": "catalog-polaris",
+               "NS_CATALOG_DATAHUB": "catalog-datahub",
                "S3_ENDPOINT": "http://s3.example.invalid:8333",
                "POLARIS_BACKUP_BUCKET": "polaris-backup"}
 
@@ -183,8 +184,10 @@ POLARIS_ENV = {**ENV, "NS_CATALOG_POLARIS": "catalog-polaris",
 class FakeCalls:
     """Answers step 1's kubectl and helm calls; records every call."""
 
-    def __init__(self, secret=True, helm=(0, ""), wait=(0, ""), clusters=None):
+    def __init__(self, secret=True, helm=(0, ""), wait=(0, ""), clusters=None, pods=(0, ""),
+                 label=(0, "")):
         self.secret, self.helm, self.wait, self.calls = secret, helm, wait, []
+        self.pods, self.label = pods, label
         self.values = []
         # The Cluster as each `get` reads it; the last answer repeats.
         self.clusters = list(clusters or [cluster_status()])
@@ -202,6 +205,10 @@ class FakeCalls:
             return (0, "secret/polaris-db") if self.secret else (1, "NotFound")
         if "wait" in argv:
             return self.wait
+        if argv[5:7] == ["get", "pods"]:
+            return self.pods
+        if "label" in argv:
+            return self.label
         if f"cluster/{release.POLARIS_PG}" in argv and "get" in argv:
             answer = self.clusters.pop(0) if len(self.clusters) > 1 else self.clusters[0]
             return (0, json.dumps(answer)) if isinstance(answer, dict) else answer
@@ -340,6 +347,128 @@ class PolarisPostgres(unittest.TestCase):
                 self.assertEqual(calls.calls, [])
 
 
+NETPOL_ENV = {**POLARIS_ENV,
+              "POLARIS_GATEWAY_NAMESPACE_LABEL": "example.org/caller=gateway",
+              "POLARIS_QUERY_NAMESPACE_LABEL": "example.org/caller=query",
+              "METRICS_NAMESPACE_LABEL": "example.org/caller=metrics",
+              "INGRESS_NAMESPACE_LABEL": "example.org/caller=ingress"}
+
+
+class NetworkPolicies(unittest.TestCase):
+    """ADR-044, first in step 1 (ADR-045)."""
+
+    def step(self, calls, env=NETPOL_ENV, dry_run=False):
+        return release.network_policies(env, calls, dry_run=dry_run)
+
+    def helm(self, calls):
+        (helm,) = [c for c in calls.calls if c[0] == "helm"]
+        return helm
+
+    def test_installs_this_repositorys_chart_in_polaris_namespace(self):
+        calls = FakeCalls()
+        problems, notes = self.step(calls)
+        self.assertEqual(problems, [])
+        helm = self.helm(calls)
+        self.assertEqual(helm[:3], ["helm", "--kube-context", "kind-lakehouse-gate"])
+        self.assertEqual(helm[helm.index("-n") + 1], "catalog-polaris")
+        self.assertEqual(helm[helm.index("upgrade"):helm.index("upgrade") + 4],
+                         ["upgrade", "--install", release.POLARIS_NETPOL_RELEASE,
+                          release.POLARIS_NETPOL_CHART])
+        self.assertTrue(os.path.isfile(os.path.join(release.POLARIS_NETPOL_CHART, "Chart.yaml")))
+        self.assertNotIn("--dry-run=server", helm)
+        self.assertIn("network policies", "\n".join(notes))
+
+    def test_every_call_names_the_context_and_the_namespace(self):
+        calls = FakeCalls(pods=(0, "pod/polaris-a\npod/polaris-b\n"))
+        self.step(calls)
+        self.assertEqual(len(calls.calls), 3)
+        for argv in calls.calls:
+            flag = "--kube-context" if argv[0] == "helm" else "--context"
+            self.assertEqual(argv[1:3], [flag, "kind-lakehouse-gate"])
+            self.assertEqual(argv[argv.index("-n") + 1], "catalog-polaris")
+
+    def test_the_values_come_from_env(self):
+        calls = FakeCalls()
+        self.step(calls)
+        self.assertEqual(calls.values, [{
+            "callers": {"gateway": {"key": "example.org/caller", "value": "gateway"},
+                        "query": {"key": "example.org/caller", "value": "query"},
+                        "metrics": {"key": "example.org/caller", "value": "metrics"},
+                        "ingress": {"key": "example.org/caller", "value": "ingress"}},
+            "namespaces": {"datahub": "catalog-datahub", "operator": "cnpg-system"},
+            "console": {"enabled": False}}])
+
+    def test_the_console_enabled_opens_its_rules(self):
+        calls = FakeCalls()
+        self.step(calls, env={**NETPOL_ENV, **CONSOLE_ENV})
+        self.assertEqual(calls.values[0]["console"], {"enabled": True})
+
+    def test_an_empty_caller_class_is_left_out_and_named(self):
+        calls = FakeCalls()
+        env = {**NETPOL_ENV, "POLARIS_QUERY_NAMESPACE_LABEL": "", "METRICS_NAMESPACE_LABEL": ""}
+        problems, notes = self.step(calls, env=env)
+        self.assertEqual(problems, [])
+        self.assertEqual(sorted(calls.values[0]["callers"]), ["gateway", "ingress"])
+        text = "\n".join(notes)
+        self.assertIn("POLARIS_QUERY_NAMESPACE_LABEL", text)
+        self.assertIn("METRICS_NAMESPACE_LABEL", text)
+
+    def test_a_label_without_a_value_stops_before_any_call(self):
+        calls = FakeCalls()
+        problems, _ = self.step(calls, env={**NETPOL_ENV, "METRICS_NAMESPACE_LABEL": "team"})
+        self.assertIn("METRICS_NAMESPACE_LABEL", "\n".join(problems))
+        self.assertEqual(calls.calls, [])
+
+    def test_an_empty_namespace_stops_before_any_call(self):
+        for var in ("NS_CATALOG_POLARIS", "NS_CATALOG_DATAHUB", "NS_CNPG_SYSTEM"):
+            with self.subTest(var=var):
+                calls = FakeCalls()
+                problems, _ = self.step(calls, env={**NETPOL_ENV, var: ""})
+                self.assertIn(var, "\n".join(problems))
+                self.assertEqual(calls.calls, [])
+
+    def test_running_polaris_pods_get_the_client_label_before_the_policies(self):
+        # The first upgrade to a release with policies: Polaris's pods from the release before
+        # keep reaching polaris-pg until their rollout (Kade, 2026-10-13, option a).
+        calls = FakeCalls(pods=(0, "pod/polaris-a\npod/polaris-b\n"))
+        problems, notes = self.step(calls)
+        self.assertEqual(problems, [])
+        get, label, helm = calls.calls
+        self.assertEqual(get[5:], ["get", "pods", "-l", release.POLARIS_POD_SELECTOR,
+                                   "-o", "name"])
+        self.assertEqual(release.POLARIS_POD_SELECTOR,
+                         "app.kubernetes.io/name=polaris,app.kubernetes.io/instance=polaris")
+        self.assertEqual(label[5:], ["label", "--overwrite", "pod/polaris-a", "pod/polaris-b",
+                                     f"{release.PG_CLIENT_LABEL}=true"])
+        self.assertEqual(helm[0], "helm")
+        self.assertIn("2 running Polaris pods", "\n".join(notes))
+
+    def test_no_running_polaris_pod_labels_nothing(self):
+        calls = FakeCalls()
+        self.step(calls)
+        self.assertFalse(any("label" in c for c in calls.calls))
+
+    def test_a_failed_label_or_listing_stops_before_helm(self):
+        for fake in (FakeCalls(pods=(1, "forbidden")),
+                     FakeCalls(pods=(0, "pod/polaris-a"), label=(1, "forbidden"))):
+            with self.subTest(fake=fake.pods):
+                problems, _ = self.step(fake)
+                self.assertIn("forbidden", "\n".join(problems))
+                self.assertFalse(any(c[0] == "helm" for c in fake.calls))
+
+    def test_dry_run_is_server_side_and_labels_nothing(self):
+        calls = FakeCalls(pods=(0, "pod/polaris-a"))
+        problems, notes = self.step(calls, dry_run=True)
+        self.assertEqual(problems, [])
+        self.assertEqual([c[0] for c in calls.calls], ["helm"])
+        self.assertIn("--dry-run=server", calls.calls[0])
+        self.assertIn("dry-run", "\n".join(notes))
+
+    def test_a_failed_helm_stops_with_its_error(self):
+        problems, _ = self.step(FakeCalls(helm=(1, "values don't meet the schema")))
+        self.assertIn("values don't meet the schema", "\n".join(problems))
+
+
 class Settle(unittest.TestCase):
     """settle reads the Cluster it is given, polaris-pg unless told otherwise."""
 
@@ -413,15 +542,33 @@ class Steps(unittest.TestCase):
                                           dry_run=False)
         self.assertEqual(problems, [])
         self.assertEqual([n.split(":")[0] for n in notes],
-                         ["Step 0"] * 2 + ["Step 1"] * 5 + ["Step 2"] * 2)
+                         ["Step 0"] * 2 + ["Step 1"] * 6 + ["Step 2"] * 2)
         self.assertIn("Barman Cloud Plugin", notes[1])
-        self.assertIn("polaris-pg", notes[2])
-        self.assertIn("answer", notes[3])
-        self.assertIn("bootstrapped", notes[4])
-        self.assertIn("polaris-logs", notes[5])
-        self.assertIn("deployment/polaris", notes[6])
-        self.assertIn("cronjob/polaris-log-batch", notes[7])
-        self.assertIn("console is not enabled", notes[8])
+        self.assertIn("network policies", notes[2])
+        self.assertIn("polaris-pg", notes[3])
+        self.assertIn("answer", notes[4])
+        self.assertIn("bootstrapped", notes[5])
+        self.assertIn("polaris-logs", notes[6])
+        self.assertIn("deployment/polaris", notes[7])
+        self.assertIn("cronjob/polaris-log-batch", notes[8])
+        self.assertIn("console is not enabled", notes[9])
+        # ADR-045 §2: the policies first in step 1, before polaris-pg.
+        helms = [c for c in pg.calls if c[0] == "helm"]
+        self.assertEqual([h[h.index("--install") + 1] for h in helms],
+                         [release.POLARIS_NETPOL_RELEASE, release.POLARIS_PG_RELEASE])
+
+    def test_failed_network_policies_stop_before_polaris_pg(self):
+        step0, pg = FakeKubectl(), FakeCalls(helm=(1, "values don't meet the schema"))
+
+        def run(argv, stdin=None):
+            if "crd" in argv or "cnpg-system" in argv:
+                return step0(argv)
+            return pg(argv)
+        problems, _ = release.install(BOOTSTRAP_ENV, run, ["1.30"], dry_run=False)
+        self.assertIn("schema", "\n".join(problems))
+        helms = [c for c in pg.calls if c[0] == "helm"]
+        self.assertEqual(len(helms), 1)
+        self.assertIn(release.POLARIS_NETPOL_CHART, helms[0])
 
     def test_a_failed_batch_stops_the_install_before_the_console(self):
         step0, pg, endpoints = FakeKubectl(), FakeCalls(), FakeRun()
@@ -740,6 +887,12 @@ class Bootstrap(unittest.TestCase):
                          {"name": "polaris-root", "key": "clientId"})
         self.assertEqual(env["POLARIS_ROOT_CLIENT_SECRET"]["valueFrom"]["secretKeyRef"],
                          {"name": "polaris-root", "key": "clientSecret"})
+
+    def test_the_pod_carries_the_label_polaris_pgs_policy_allows(self):
+        # ADR-044 §3: only pods labelled as its clients reach polaris-pg.
+        calls = FakeBootstrap()
+        self.step(calls)
+        self.assertIn(f"--labels={release.PG_CLIENT_LABEL}=true", self.run_call(calls))
 
     def test_it_reaches_the_database_as_polaris_does(self):
         calls = FakeBootstrap()

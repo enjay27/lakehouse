@@ -85,10 +85,20 @@
                   gate_catalog.
                   polaris-pg-restore is deleted whatever happened.
 
+  gate-policies   applies the gate's own allow policies in Polaris's namespace (gates/network.py,
+                  ADR-044 §5): the check pods, labelled lakehouse-gate/check, reach every pod;
+                  the PostgreSQL recorder reaches the CNPG instances on 5432. `install` runs
+                  it right before this commit's release.
+  check-network   creates a namespace per caller class with the gate's label, one without any
+                  label and Datahub's, then from a short-lived pod in each, and from an
+                  unlabelled pod in Polaris's namespace, connects to each target of
+                  gates/network.py's CASES: each allowed one must connect, each refused one
+                  must time out or be reset (ADR-044 §6). One that should be refused and
+                  connects means the cluster does not enforce NetworkPolicy.
 Every kubectl and helm call names the gate's context, and a namespace where the object has
 one. Nothing here reaches any cluster but the kind cluster it creates (ADR-017).
 
-Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | check-polaris-pg | check-polaris | console-image | batch-image | check-logs | check-console | check-iceberg | check-restore
+Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | check-polaris-pg | check-polaris | console-image | batch-image | check-logs | check-console | check-iceberg | check-restore | gate-policies | check-network
 """
 
 import copy
@@ -111,6 +121,7 @@ sys.path.insert(0, os.path.join(ROOT, "install"))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 import contract  # noqa: E402
 import init_env  # noqa: E402
+import network  # noqa: E402
 import release  # noqa: E402
 import release_tag  # noqa: E402
 import standins  # noqa: E402
@@ -141,6 +152,9 @@ POLARIS_S3_ENV = {"AWS_ACCESS_KEY_ID": "accessKeyId", "AWS_SECRET_ACCESS_KEY": "
 # Polaris's pods and ports, as charts/polaris renders them.
 POLARIS_POD_LABELS = "app.kubernetes.io/name=polaris,app.kubernetes.io/instance=polaris"
 POLARIS_API_PORT, POLARIS_MGMT_PORT = 8181, 8182
+# Every pod the gate starts in Polaris's namespace to check it carries this label, which the
+# gate's own allow policy lets reach every pod there (ADR-044 §5).
+CHECK_POD_LABEL = f"--labels={network.CHECK_LABEL}=true"
 # The catalog the smoke tests create and the gate's policy names (gates/opa/policy.rego).
 ICEBERG_CATALOG = "gate_catalog"
 # ReadWriteMany on kind for the log claim (ADR-036): one runner directory mounted into every
@@ -298,12 +312,13 @@ def console_settings(ns):
 
 def gate_env(template_text, gen=init_env.generate):
     """`.env` for the gate: its context, the stand-ins' endpoints, the S3 stand-in's
-    credentials, the console's settings and the log claim's shared class; init_env fills the
-    rest."""
+    credentials, the console's settings, the log claim's shared class and a namespace label
+    per caller class (ADR-044 §6); init_env fills the rest."""
     template = init_env.parse(template_text)
     fixed = {"KUBE_CONTEXT": CONTEXT, **standin_endpoints(template["NS_STANDINS"]),
              **console_settings(template["NS_CATALOG_POLARIS"]),
-             "POLARIS_LOGS_STORAGE_CLASS": SHARED_CLASS, "POLARIS_LOGS_SIZE": GATE_LOGS_SIZE}
+             "POLARIS_LOGS_STORAGE_CLASS": SHARED_CLASS, "POLARIS_LOGS_SIZE": GATE_LOGS_SIZE,
+             **network.GATE_CALLER_LABELS}
     lines = []
     for line in template_text.splitlines():
         name = line.split("=", 1)[0]
@@ -368,7 +383,7 @@ def check_db_command(env, image, database, name):
     overrides = {"spec": {"containers": [{"name": name, "image": image, "env": creds,
                                           "stdin": True, "stdinOnce": True}]}}
     return ["kubectl", "--context", CONTEXT, "-n", env["NS_CATALOG_POLARIS"], "run", name,
-            f"--image={image}", "--restart=Never", "--rm", "-i", "--quiet",
+            CHECK_POD_LABEL, f"--image={image}", "--restart=Never", "--rm", "-i", "--quiet",
             "--pod-running-timeout=3m", "--override-type=strategic",
             "--overrides", json.dumps(overrides),
             "--command", "--", "sh", "-s", "--", env["POLARIS_DB_HOST"], database]
@@ -382,7 +397,7 @@ def check_standins_command(env, cases, image, name):
     overrides = {"spec": {"containers": [{"name": name, "image": image, "env": creds,
                                           "stdin": True, "stdinOnce": True}]}}
     argv = ["kubectl", "--context", CONTEXT, "-n", env["NS_CATALOG_POLARIS"], "run", name,
-            f"--image={image}", "--restart=Never", "--rm", "-i", "--quiet",
+            CHECK_POD_LABEL, f"--image={image}", "--restart=Never", "--rm", "-i", "--quiet",
             "--pod-running-timeout=3m", "--override-type=strategic",
             "--overrides", json.dumps(overrides),
             "--command", "--", "sh", "-s", "--", env["S3_ENDPOINT"],
@@ -448,17 +463,21 @@ def install_plan(previous, previous_dir, fresh, dry_run=False):
     release before this one runs from a worktree of its tag, with the gate's `.env`."""
     this = ["python3", os.path.join(ROOT, "install", "release.py")] + (
         ["--dry-run"] if dry_run else [])
+    # The gate's own allow policies (ADR-044 §5), right before this commit's release applies
+    # Polaris's: never in a dry-run, which changes nothing.
+    this = [this] if dry_run else [["python3", os.path.join(HERE, "gate.py"),
+                                    "gate-policies"], this]
     then = " (server-side dry-run)" if dry_run else ""
     if fresh:
-        return [this], f"Fresh install of this commit{then}, as asked."
+        return this, f"Fresh install of this commit{then}, as asked."
     if not previous:
-        return [this], f"No release to upgrade from: fresh install{then} (ADR-021)."
+        return this, f"No release to upgrade from: fresh install{then} (ADR-021)."
     return [
         ["git", "-C", ROOT, "worktree", "add", "--detach", previous_dir, previous],
         # release.py reads .env from its own checkout, and a tag's worktree has none.
         ["cp", "-p", os.path.join(ROOT, ".env"), os.path.join(previous_dir, ".env")],
         ["python3", os.path.join(previous_dir, "install", "release.py")],
-        this,
+        *this,
     ], f"Upgrade: {previous} installed from its tag, then this commit over it{then} (ADR-021)."
 
 
@@ -586,7 +605,7 @@ def check_polaris_command(env, image, name, pod_urls):
     overrides = {"spec": {"containers": [{"name": name, "image": image, "env": creds,
                                           "stdin": True, "stdinOnce": True}]}}
     return ["kubectl", "--context", CONTEXT, "-n", env["NS_CATALOG_POLARIS"], "run", name,
-            f"--image={image}", "--restart=Never", "--rm", "-i", "--quiet",
+            CHECK_POD_LABEL, f"--image={image}", "--restart=Never", "--rm", "-i", "--quiet",
             "--pod-running-timeout=3m", "--override-type=strategic",
             "--overrides", json.dumps(overrides),
             "--command", "--", "sh", "-s", "--",
@@ -630,7 +649,8 @@ def check_iceberg_commands(env, image, name):
     return [
         ["kubectl", "--context", CONTEXT, "-n", ns, "apply", "--server-side",
          "--field-manager=gate", "-f", "-"],
-        ["kubectl", "--context", CONTEXT, "-n", ns, "run", name, f"--image={image}",
+        ["kubectl", "--context", CONTEXT, "-n", ns, "run", name, CHECK_POD_LABEL,
+         f"--image={image}",
          "--restart=Never", "--rm", "--attach", "--quiet", "--pod-running-timeout=3m",
          "--override-type=strategic", "--overrides", json.dumps(overrides),
          "--command", "--", "sh", "-c", install, "smoke",
@@ -690,11 +710,31 @@ def check_restore_command(env, image, database, name):
     overrides = {"spec": {"containers": [{"name": name, "image": image, "env": creds,
                                           "stdin": True, "stdinOnce": True}]}}
     return ["kubectl", "--context", CONTEXT, "-n", env["NS_CATALOG_POLARIS"], "run", name,
-            f"--image={image}", "--restart=Never", "--rm", "-i", "--quiet",
+            CHECK_POD_LABEL, f"--image={image}", "--restart=Never", "--rm", "-i", "--quiet",
             "--pod-running-timeout=3m", "--override-type=strategic",
             "--overrides", json.dumps(overrides),
             "--command", "--", "sh", "-s", "--", f"{RESTORE}-rw", database,
             release.POLARIS_REALM, ICEBERG_CATALOG]
+
+
+def check_network(env, pins):
+    """ADR-044 §6: the source namespaces, then from a pod in each a connection to each target
+    of network.CASES. Returns (problems, lines)."""
+    manifest = json.dumps(network.namespaces_manifest(env))
+    apply = ["kubectl", "--context", CONTEXT, "apply", "--server-side", "--field-manager=gate",
+             "-f", "-"]
+    subprocess.run(apply, input=manifest, text=True, check=True, capture_output=True)
+    addresses, results = network.targets(env), {}
+    for source, (namespace, _) in network.source_namespaces(env).items():
+        wanted = sorted({c.target for c in network.CASES if c.source == source})
+        command = network.probe_command(namespace, smoke_python_image(pins),
+                                        f"check-network-{source}-{os.getpid()}",
+                                        [addresses[t] for t in wanted])
+        out = subprocess.run(command, input=network.PROBE, capture_output=True, text=True,
+                             check=False)
+        by_address = network.parse_probe(out.stdout)
+        results[source] = {t: by_address.get(addresses[t]) for t in wanted}
+    return network.report(network.CASES, results)
 
 
 def check_restore(env):
@@ -782,7 +822,7 @@ def check_console_command(env, image, name):
     overrides = {"spec": {"containers": [{"name": name, "image": image, "env": creds,
                                           "stdin": True, "stdinOnce": True}]}}
     return ["kubectl", "--context", CONTEXT, "-n", env["NS_CATALOG_POLARIS"], "run", name,
-            f"--image={image}", "--restart=Never", "--rm", "-i", "--quiet",
+            CHECK_POD_LABEL, f"--image={image}", "--restart=Never", "--rm", "-i", "--quiet",
             "--pod-running-timeout=3m", "--override-type=strategic",
             "--overrides", json.dumps(overrides),
             "--command", "--", "python3", "-", env["POLARIS_CONSOLE_ORIGIN"],
@@ -839,7 +879,7 @@ def logs_traffic_command(env, image, name, prefix, count, pods, down=None):
     overrides = {"spec": {"containers": [{"name": name, "image": image, "env": creds,
                                           "stdin": True, "stdinOnce": True}]}}
     return ["kubectl", "--context", CONTEXT, "-n", env["NS_CATALOG_POLARIS"], "run", name,
-            f"--image={image}", "--restart=Never", "--rm", "-i", "--quiet",
+            CHECK_POD_LABEL, f"--image={image}", "--restart=Never", "--rm", "-i", "--quiet",
             "--pod-running-timeout=3m", "--override-type=strategic",
             "--overrides", json.dumps(overrides),
             "--command", "--", "sh", "-s", "--",
@@ -907,7 +947,7 @@ def logs_listing_command(env, image, name):
                                           "stdinOnce": True, "volumeMounts": [mount]}],
                           "volumes": [volume]}}
     return ["kubectl", "--context", CONTEXT, "-n", env["NS_CATALOG_POLARIS"], "run", name,
-            f"--image={image}", "--restart=Never", "--rm", "-i", "--quiet",
+            CHECK_POD_LABEL, f"--image={image}", "--restart=Never", "--rm", "-i", "--quiet",
             "--pod-running-timeout=3m", "--override-type=strategic",
             "--overrides", json.dumps(overrides), "--command", "--", "sh", "-s", "--",
             LOGS_MOUNT]
@@ -1343,6 +1383,19 @@ def main(argv):
         print("+ " + " ".join(apply) + "  (the ConfigMap iceberg-smoke on stdin)", flush=True)
         subprocess.run(apply, input=manifest, text=True, check=True)
         return subprocess.run(pod, check=False).returncode
+    if argv[1:] == ["gate-policies"]:
+        env = release.load_env(ROOT, os.environ)
+        manifest = json.dumps(network.gate_policies(env))
+        apply = ["kubectl", "--context", CONTEXT, "apply", "--server-side",
+                 "--field-manager=gate", "-f", "-"]
+        print("+ " + " ".join(apply) + "  (the gate's allow policies on stdin)", flush=True)
+        subprocess.run(apply, input=manifest, text=True, check=True)
+        return 0
+    if argv[1:] == ["check-network"]:
+        problems, lines = check_network(release.load_env(ROOT, os.environ), pins)
+        for line in lines + problems:
+            print(line, flush=True)
+        return 1 if problems else 0
     if argv[1:] == ["check-restore"]:
         problems, notes = check_restore(release.load_env(ROOT, os.environ))
         for line in notes + problems:

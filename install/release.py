@@ -71,6 +71,17 @@ OPERATOR_LABEL = "app.kubernetes.io/name=cloudnative-pg"
 PLUGIN_CRD = "objectstores.barmancloud.cnpg.io"
 PLUGIN_NAME = "barman-cloud.cloudnative-pg.io"
 PLUGIN_LABEL = f"cnpg.io/pluginName={PLUGIN_NAME}"
+# Polaris's network policies (ADR-044), and the label a pod needs to reach polaris-pg.
+POLARIS_NETPOL_RELEASE = "polaris-network-policies"
+POLARIS_NETPOL_CHART = os.path.join(ROOT, "charts", POLARIS_NETPOL_RELEASE)
+PG_CLIENT_LABEL = "lakehouse/polaris-pg-client"
+# Polaris's pods, by the labels upstream's chart sets with release name POLARIS.
+POLARIS_POD_SELECTOR = "app.kubernetes.io/name=polaris,app.kubernetes.io/instance=polaris"
+# One namespace label per caller class in other teams' namespaces (ADR-044 §2).
+CALLER_VARS = {"gateway": "POLARIS_GATEWAY_NAMESPACE_LABEL",
+               "query": "POLARIS_QUERY_NAMESPACE_LABEL",
+               "metrics": "METRICS_NAMESPACE_LABEL",
+               "ingress": "INGRESS_NAMESPACE_LABEL"}
 POLARIS_PG = "polaris-pg"
 POLARIS_PG_RELEASE = "polaris-postgres"
 POLARIS_PG_CHART = os.path.join(ROOT, "charts", "polaris-postgres")
@@ -238,6 +249,72 @@ def check_plugin(base, namespace, run):
                 f"Service {service['metadata']['name']} (ADR-043)"], []
     return [], [f"Step 0: Barman Cloud Plugin running in {namespace} "
                 f"(Service {service['metadata']['name']})."]
+
+
+def network_policy_values(env):
+    """charts/polaris-network-policies's values from `.env` (ADR-044 §2). Returns (values,
+    problems, empty): a caller class whose variable is empty is left out, and named in
+    `empty`; anything but `key=value` is a problem. The chart's schema checks the rest."""
+    callers, problems, empty = {}, [], []
+    for name, var in CALLER_VARS.items():
+        text = env.get(var, "").strip()
+        if not text:
+            empty.append(var)
+            continue
+        key, sep, value = text.partition("=")
+        if not sep or not key:
+            problems.append(f"{var} must be one namespace label, key=value (ADR-044)")
+            continue
+        callers[name] = {"key": key, "value": value}
+    problems += [f"{var} is empty: the network policies select that namespace by name "
+                 "(ADR-044)" for var in ("NS_CATALOG_DATAHUB", "NS_CNPG_SYSTEM")
+                 if not env.get(var)]
+    values = {"callers": callers,
+              "namespaces": {"datahub": env.get("NS_CATALOG_DATAHUB", ""),
+                             "operator": env.get("NS_CNPG_SYSTEM", "")},
+              "console": {"enabled": console_enabled(env)}}
+    return values, problems, empty
+
+
+def network_policies(env, run, dry_run=False):
+    """Step 1, first: Polaris's network policies (ADR-044, ADR-045). Polaris's running pods
+    get the client label before, so on the first upgrade to a release with policies they keep
+    reaching polaris-pg until their own rollout. Returns (problems, notes)."""
+    namespace = env.get("NS_CATALOG_POLARIS", "")
+    if not namespace:
+        return ["NS_CATALOG_POLARIS is empty: set Polaris's namespace in .env (ADR-007)"], []
+    values, problems, empty = network_policy_values(env)
+    if problems:
+        return problems, []
+    context, notes = env["KUBE_CONTEXT"], []
+    if not dry_run:
+        kubectl = ["kubectl", "--context", context, "-n", namespace]
+        code, out = run(kubectl + ["get", "pods", "-l", POLARIS_POD_SELECTOR, "-o", "name"])
+        if code != 0:
+            return [f"cannot list Polaris's pods in {namespace}: {out.strip()}"], []
+        pods = out.split()
+        if pods:
+            code, out = run(kubectl + ["label", "--overwrite", *pods, f"{PG_CLIENT_LABEL}=true"])
+            if code != 0:
+                return [f"cannot label Polaris's pods in {namespace}: {out.strip()}"], []
+            notes.append(f"Step 1: {len(pods)} running Polaris pods labelled "
+                         f"{PG_CLIENT_LABEL}=true before the network policies (ADR-044).")
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+        json.dump(values, f)
+    try:
+        helm = ["helm", "--kube-context", context, "-n", namespace, "upgrade", "--install",
+                POLARIS_NETPOL_RELEASE, POLARIS_NETPOL_CHART, "-f", f.name]
+        code, out = run(helm + (["--dry-run=server"] if dry_run else []))
+    finally:
+        os.unlink(f.name)
+    if code != 0:
+        return [f"helm upgrade {POLARIS_NETPOL_RELEASE} in {namespace} failed: "
+                f"{out.strip()}"], []
+    refused = (f"; no namespace label in {', '.join(empty)}, so those callers are refused"
+               if empty else "")
+    done = "server-side dry-run passed" if dry_run else "installed"
+    notes.append(f"Step 1: network policies in {namespace}, {done}{refused} (ADR-044).")
+    return [], notes
 
 
 def postgres_values(env):
@@ -426,6 +503,7 @@ def bootstrap(env, run, image=None, name=None, dry_run=False):
     credential = f"{POLARIS_REALM},$(POLARIS_ROOT_CLIENT_ID),$(POLARIS_ROOT_CLIENT_SECRET)"
     code, out = run(["kubectl", "--context", context, "-n", namespace, "run", name,
                      f"--image={image}", "--restart=Never", "--rm", "-i", "--quiet",
+                     f"--labels={PG_CLIENT_LABEL}=true",
                      "--pod-running-timeout=3m", "--override-type=strategic",
                      "--overrides=" + json.dumps({"spec": {"containers": [container]}}),
                      "--command", "--", "sh", "-c", BOOTSTRAP_WRAPPER, "admin-tool",
@@ -578,6 +656,7 @@ def install(env, run, supported, dry_run):
     problems are notes: it never fails a release (ADR-028); the batch's stop it (ADR-037)."""
     notes = []
     for step in (lambda: check_preconditions(env, run, supported),
+                 lambda: network_policies(env, run, dry_run),
                  lambda: polaris_postgres(env, run, dry_run),
                  lambda: endpoints_answer(env, run),
                  lambda: bootstrap(env, run, dry_run=dry_run),
