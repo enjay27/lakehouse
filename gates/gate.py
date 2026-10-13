@@ -1268,25 +1268,30 @@ def check_logs(env, pins):
                          listings[1], records)
 
 
+def up(pins):
+    """`up`: see the module's docstring."""
+    namespace = os.environ.get("NS_CNPG_SYSTEM") or "cnpg-system"
+    chart = pins["cnpg_chart"]
+    with tempfile.TemporaryDirectory() as d:
+        chart_path = os.path.join(d, os.path.basename(chart["url"]))
+        with open(chart_path, "wb") as f:
+            f.write(fetch(chart["url"], chart["sha256"]))
+        manifests = {name: fetch(pin["url"], pin["sha256"]).decode("utf-8")
+                     for name, pin in pins["manifests"].items()}
+        plugin_manifest(manifests["barman_cloud_plugin"], namespace)
+        os.makedirs(SHARED_HOST_DIR, exist_ok=True)
+        os.chmod(SHARED_HOST_DIR, 0o777)
+        for command, stdin in up_commands(pins, chart_path, namespace, manifests):
+            run(command, stdin)
+
+
 def main(argv):
     pins = load_pins()
     if len(argv) >= 3 and argv[1] == "tools":
         tools(pins, argv[2], argv[3:] or TOOLS)
         return 0
     if len(argv) == 2 and argv[1] == "up":
-        namespace = os.environ.get("NS_CNPG_SYSTEM") or "cnpg-system"
-        chart = pins["cnpg_chart"]
-        with tempfile.TemporaryDirectory() as d:
-            chart_path = os.path.join(d, os.path.basename(chart["url"]))
-            with open(chart_path, "wb") as f:
-                f.write(fetch(chart["url"], chart["sha256"]))
-            manifests = {name: fetch(pin["url"], pin["sha256"]).decode("utf-8")
-                         for name, pin in pins["manifests"].items()}
-            plugin_manifest(manifests["barman_cloud_plugin"], namespace)
-            os.makedirs(SHARED_HOST_DIR, exist_ok=True)
-            os.chmod(SHARED_HOST_DIR, 0o777)
-            for command, stdin in up_commands(pins, chart_path, namespace, manifests):
-                run(command, stdin)
+        up(pins)
         return 0
     if argv[1:] == ["secrets"]:
         with open(os.path.join(ROOT, ".env.template"), encoding="utf-8") as f:
