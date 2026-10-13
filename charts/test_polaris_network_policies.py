@@ -140,13 +140,15 @@ class Rendered(unittest.TestCase):
             "ports": [{"protocol": "TCP", "port": 8080}],
             "from": [namespace("example.org/caller", "ingress")]}])
 
-    def test_postgres_from_its_clients_and_the_other_instances(self):
+    def test_postgres_from_its_clients_the_other_instances_and_cnpgs_join_pods(self):
+        # ADR-048 §3: a join pod clones the primary to make a replica (#103).
         spec = self.policies["polaris-pg-clients"]["spec"]
         self.assertEqual(spec["podSelector"], {"matchLabels": INSTANCES})
         self.assertEqual(spec["ingress"], [{
             "ports": [{"protocol": "TCP", "port": 5432}],
             "from": [{"podSelector": {"matchLabels": {release.PG_CLIENT_LABEL: "true"}}},
-                     {"podSelector": {"matchLabels": INSTANCES}}]}])
+                     {"podSelector": {"matchLabels": INSTANCES}},
+                     {"podSelector": {"matchLabels": {"cnpg.io/jobRole": "join"}}}]}])
 
     def test_postgres_and_its_status_port_from_the_operators_namespace(self):
         spec = self.policies["polaris-pg-operator"]["spec"]

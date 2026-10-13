@@ -39,6 +39,11 @@
                   over it (ADR-051); with no tag, or with
                   --fresh, only this commit's release. With --dry-run, this commit's release is
                   a server-side dry-run over the installed one (ADR-038). Prints which it did.
+  rebuild-replica deletes one replica of polaris-pg, never the primary: its PVC without waiting,
+                  then its pod. CNPG makes a new instance through a join pod that clones the
+                  primary under the network policies; it passes once a new join Job ran and the
+                  Cluster is Ready with all its instances, within REBUILD_TIMEOUT s. On failure,
+                  the join pods' logs (ADR-048 §7). Gate only: it deletes a volume.
   check-polaris-pg
                   compares the running `Cluster` polaris-pg with the values its helm release
                   was installed with, and checks its instances run on different nodes
@@ -91,8 +96,9 @@
                   the PostgreSQL recorder reaches the CNPG instances on 5432. `install` runs
                   it right before this commit's release.
   check-network   creates a namespace per caller class with the gate's label, one without any
-                  label and Datahub's, then from a short-lived pod in each, and from an
-                  unlabelled pod in Polaris's namespace, connects to each target of
+                  label and Datahub's, then from a short-lived pod in each, from an
+                  unlabelled pod in Polaris's namespace, and from a pod with CNPG's join label
+                  in Polaris's namespace and in the unlabelled one, connects to each target of
                   gates/network.py's CASES: each allowed one must connect, each refused one
                   must time out or be reset (ADR-044 §6). One that should be refused and
                   connects means the cluster does not enforce NetworkPolicy. polaris-pg's
@@ -105,7 +111,7 @@
 Every kubectl and helm call names the gate's context, and a namespace where the object has
 one. Nothing here reaches any cluster but the kind cluster it creates (ADR-017).
 
-Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | check-polaris-pg | check-polaris | console-image | batch-image | check-logs | check-console | check-iceberg | check-restore | gate-policies | check-network | check-metrics
+Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | rebuild-replica | check-polaris-pg | check-polaris | console-image | batch-image | check-logs | check-console | check-iceberg | check-restore | gate-policies | check-network | check-metrics
 """
 
 import copy
@@ -547,6 +553,73 @@ def _running(pods):
     return [p for p in pods["items"] if p.get("status", {}).get("phase") == "Running"]
 
 
+# Seconds a rebuilt replica has to join and the Cluster to get Ready again, as release.py's
+# wait for the Cluster (ADR-048 §7).
+REBUILD_TIMEOUT = 900
+JOIN_SELECTOR = f"cnpg.io/cluster={release.POLARIS_PG},cnpg.io/jobRole=join"
+
+
+def rebuild_target(cluster, pods):
+    """The replica rebuild-replica deletes: the first instance by name that is not the primary;
+    None without one."""
+    primary = cluster.get("status", {}).get("currentPrimary")
+    names = sorted(p["metadata"]["name"] for p in pods["items"]
+                   if p["metadata"]["name"] != primary)
+    return names[0] if names else None
+
+
+def rebuild_commands(namespace, instance):
+    """The instance's PVC, without waiting (its pod still holds it), then its pod. CNPG names
+    both after the instance."""
+    kubectl = ["kubectl", "--context", CONTEXT, "-n", namespace, "delete"]
+    return [kubectl + ["pvc", instance, "--wait=false"], kubectl + ["pod", instance]]
+
+
+def join_jobs_command(namespace):
+    return ["kubectl", "--context", CONTEXT, "-n", namespace, "get", "jobs", "-l",
+            JOIN_SELECTOR, "-o", "json"]
+
+
+def rebuilt(cluster, joins):
+    """A new join Job ran and the Cluster is Ready with every instance."""
+    status = cluster.get("status", {})
+    ready = any(c.get("type") == "Ready" and c.get("status") == "True"
+                for c in status.get("conditions", []))
+    return bool(joins) and ready and status.get("readyInstances") == cluster["spec"]["instances"]
+
+
+def rebuild_replica(env):
+    """ADR-048 §7. Returns (problems, notes)."""
+    ns = env["NS_CATALOG_POLARIS"]
+    cluster_command, pods_command = polaris_pg_commands(ns)[1:]
+    instance = rebuild_target(json.loads(output(cluster_command)),
+                              json.loads(output(pods_command)))
+    if not instance:
+        return [f"Cluster {release.POLARIS_PG} has no replica to rebuild"], []
+    jobs_command = join_jobs_command(ns)
+    # By uid: a Job made again under an old instance's name is new all the same.
+    before = {j["metadata"]["uid"] for j in json.loads(output(jobs_command))["items"]}
+    for command in rebuild_commands(ns, instance):
+        run(command)
+    # A poll sees a join Job while it runs, even if CNPG removes it once done.
+    joins, end = set(), time.monotonic() + REBUILD_TIMEOUT
+    while True:
+        joins |= {j["metadata"]["name"] for j in json.loads(output(jobs_command))["items"]
+                  if j["metadata"]["uid"] not in before}
+        if rebuilt(json.loads(output(cluster_command)), joins):
+            return [], [f"Replica {instance} deleted with its PVC; {', '.join(sorted(joins))} "
+                        f"cloned the primary, and Cluster {release.POLARIS_PG} is Ready with "
+                        f"every instance."]
+        if time.monotonic() > end:
+            break
+        time.sleep(3)
+    subprocess.run(["kubectl", "--context", CONTEXT, "-n", ns, "logs", "-l", JOIN_SELECTOR,
+                    "--all-containers", "--prefix", "--tail=200"], check=False)
+    joined = ", ".join(sorted(joins)) or "no join Job"
+    return [f"Cluster {release.POLARIS_PG} not Ready with every instance {REBUILD_TIMEOUT} s "
+            f"after {instance} was deleted with its PVC ({joined})"], []
+
+
 def polaris_problems(values, deployment, pods, configmap, env):
     """The running Polaris against the values it was installed with (ADR-016), and those
     values against `.env`: the database host and the policy endpoint the gate names."""
@@ -739,7 +812,8 @@ def check_network(env, pins):
         wanted = sorted({c.target for c in network.CASES if c.source == source})
         command = network.probe_command(namespace, smoke_python_image(pins),
                                         f"check-network-{source}-{os.getpid()}",
-                                        [addresses[t] for t in wanted])
+                                        [addresses[t] for t in wanted],
+                                        labels=network.POD_LABELS.get(source))
         out = subprocess.run(command, input=network.PROBE, capture_output=True, text=True,
                              check=False)
         by_address = network.parse_probe(out.stdout)
@@ -1378,6 +1452,11 @@ def main(argv):
         command = check_console_command(env, smoke_python_image(pins),
                                         f"check-console-{os.getpid()}")
         return subprocess.run(command, input=script, text=True, check=False).returncode
+    if argv[1:] == ["rebuild-replica"]:
+        problems, notes = rebuild_replica(release.load_env(ROOT, os.environ))
+        for line in notes + problems:
+            print(line, flush=True)
+        return 1 if problems else 0
     if argv[1:] == ["check-polaris-pg"]:
         namespace = os.environ.get("NS_CATALOG_POLARIS") or "catalog-polaris"
         answers = [json.loads(subprocess.run(c, capture_output=True, text=True,

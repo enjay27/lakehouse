@@ -106,6 +106,12 @@ class Cases(unittest.TestCase):
         self.assertEqual(expected, {"polaris-api": False, "polaris-pg": False,
                                     "seaweedfs": False, "opa": False, "recorder": True})
 
+    def test_a_join_pod_reaches_polaris_pg_only_from_polaris_namespace(self):
+        # ADR-048 §6: CNPG's join pods clone the primary; the label admits no other namespace.
+        expected = {(c.source, c.target): c.allowed for c in network.CASES}
+        self.assertIs(expected[("polaris-join", "polaris-pg")], True)
+        self.assertIs(expected[("none-join", "polaris-pg")], False)
+
     def test_every_target_has_an_address(self):
         addresses = network.targets(ENV)
         self.assertEqual(addresses["polaris-api"], "polaris.catalog-polaris.svc.cluster.local:8181")
@@ -134,12 +140,19 @@ class Sources(unittest.TestCase):
             "ingress": ("gate-net-ingress", {"lakehouse-gate/caller": "ingress"}),
             "none": ("gate-net-none", {}),
             "datahub": ("catalog-datahub", {}),
-            "polaris": ("catalog-polaris", None)})
+            "polaris": ("catalog-polaris", None),
+            "polaris-join": ("catalog-polaris", None),
+            "none-join": ("gate-net-none", None)})
+
+    def test_the_join_sources_carry_cnpgs_join_label_and_no_other_does(self):
+        self.assertEqual(network.POD_LABELS, {"polaris-join": {"cnpg.io/jobRole": "join"},
+                                              "none-join": {"cnpg.io/jobRole": "join"}})
 
     def test_the_namespaces_manifest_leaves_polaris_alone(self):
         manifest = network.namespaces_manifest(ENV)
         names = [n["metadata"]["name"] for n in manifest["items"]]
         self.assertNotIn("catalog-polaris", names)
+        self.assertEqual(len(names), len(set(names)))
         self.assertIn("catalog-datahub", names)
         labelled = {n["metadata"]["name"]: n["metadata"].get("labels", {})
                     for n in manifest["items"]}
@@ -172,6 +185,32 @@ class Probe(unittest.TestCase):
             self.assertIn(flag, argv)
         self.assertFalse(any(a.startswith("--labels") for a in argv))
         self.assertEqual(argv[-1], "polaris.catalog-polaris.svc.cluster.local:8181")
+
+    def test_a_join_probe_carries_cnpgs_join_label_never_the_check_label(self):
+        # ADR-048 §6: §5's gate-checks policy would admit a pod with the check label.
+        argv = network.probe_command("catalog-polaris", PYTHON, "probe-1", ["a:5432"],
+                                     labels={"cnpg.io/jobRole": "join"})
+        self.assertEqual([a for a in argv if a.startswith("--labels")],
+                         ["--labels=cnpg.io/jobRole=join"])
+
+    def test_check_network_probes_each_join_source_with_its_label(self):
+        commands = []
+
+        def subprocess_run(argv, **kwargs):
+            commands.append(argv)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with mock.patch.object(gate.subprocess, "run", side_effect=subprocess_run):
+            gate.check_network(ENV, {"standin_images": {"recorder": {"image": PYTHON}}})
+        by_name = {argv[argv.index("run") + 1].split("-" + str(os.getpid()))[0]: argv
+                   for argv in commands if "run" in argv}
+        self.assertEqual([a for a in by_name["check-network-polaris-join"]
+                          if a.startswith("--labels")], ["--labels=cnpg.io/jobRole=join"])
+        self.assertEqual([a for a in by_name["check-network-none-join"]
+                          if a.startswith("--labels")], ["--labels=cnpg.io/jobRole=join"])
+        self.assertEqual(by_name["check-network-none-join"][4], "gate-net-none")
+        for name in ("check-network-polaris", "check-network-none"):
+            self.assertFalse(any(a.startswith("--labels") for a in by_name[name]), name)
 
     def test_the_script_reports_reached_and_refused_from_real_sockets(self):
         # A listening port and a closed one, on this machine.

@@ -7,7 +7,8 @@
 - **check-network (§6, ADR-046 §4):** one namespace per caller class, labelled as the gate's
   `.env` says (GATE_CALLER_LABELS), one without any label, and Datahub's namespace, empty. From a
   short-lived pod in each, and from an unlabelled pod in Polaris's namespace, PROBE tries a TCP
-  connection to each target of CASES. An allowed case must connect; a refused one must time
+  connection to each target of CASES. Two more pods carry CNPG's join label (POD_LABELS), one in
+  Polaris's namespace and one in the unlabelled one (ADR-048 §6). An allowed case must connect; a refused one must time
   out or be reset. A refused case that connects means the cluster does not enforce
   NetworkPolicy: ADR-044 says to stop there. polaris-pg's own Services expose 5432 only, so
   the gate adds one, METRICS_SERVICE, for the instances' exporter on 9187.
@@ -31,15 +32,20 @@ UNLABELLED = "none"
 # Seconds a refused connection waits before it counts as blocked.
 TIMEOUT = 5
 INSTANCES = {"cnpg.io/podRole": "instance"}
+# The label CNPG puts on the Job pod that clones the primary to make a replica (ADR-048 §3).
+JOIN = {"cnpg.io/jobRole": "join"}
+# The sources whose probe pod carries labels: CNPG's join label, never the check label.
+POD_LABELS = {"polaris-join": JOIN, "none-join": JOIN}
 # The gate's Service for CNPG's exporter on polaris-pg's instances (ADR-046 §4).
 METRICS_SERVICE = "gate-polaris-pg-metrics"
 PG_METRICS_PORT = 9187
 NAME = "kubernetes.io/metadata.name"
 
 Case = collections.namedtuple("Case", "source target allowed")
-# One allowed and one refused connection per rule of ADR-044 §3, by source: a caller class,
-# `none` (a namespace with no label), `datahub` (NS_CATALOG_DATAHUB) or `polaris` (a pod in
-# NS_CATALOG_POLARIS without the check label).
+# One allowed and one refused connection per rule of ADR-048 §3, by source: a caller class,
+# `none` (a namespace with no label), `datahub` (NS_CATALOG_DATAHUB), `polaris` (a pod in
+# NS_CATALOG_POLARIS without the check label), or `polaris-join` and `none-join` (a pod with
+# CNPG's join label in those two namespaces).
 CASES = [
     Case("gateway", "polaris-api", True),
     Case("gateway", "polaris-management", False),
@@ -68,6 +74,8 @@ CASES = [
     Case("polaris", "recorder", True),
     Case("polaris", "seaweedfs", False),
     Case("polaris", "opa", False),
+    Case("polaris-join", "polaris-pg", True),
+    Case("none-join", "polaris-pg", False),
 ]
 
 # Connects to each `host:port` argument at once and prints `host:port RESULT` for each:
@@ -116,8 +124,9 @@ def targets(env):
 
 
 def source_namespaces(env):
-    """{source: (namespace, labels)}; labels None for Polaris's namespace, which the gate
-    neither creates nor labels."""
+    """{source: (namespace, labels)}; labels None for a namespace the gate does not create for
+    that source: Polaris's, which it neither creates nor labels, and the join sources', which
+    other sources already name."""
     sources = {}
     for name, var in release.CALLER_VARS.items():
         key, _, value = env[var].partition("=")
@@ -125,6 +134,8 @@ def source_namespaces(env):
     sources[UNLABELLED] = (SOURCE_PREFIX + UNLABELLED, {})
     sources["datahub"] = (env["NS_CATALOG_DATAHUB"], {})
     sources["polaris"] = (env["NS_CATALOG_POLARIS"], None)
+    sources["polaris-join"] = (env["NS_CATALOG_POLARIS"], None)
+    sources["none-join"] = (SOURCE_PREFIX + UNLABELLED, None)
     return sources
 
 
@@ -173,10 +184,12 @@ def gate_policies(env):
     ]}
 
 
-def probe_command(namespace, image, name, addresses, timeout=TIMEOUT):
-    """A short-lived pod in `namespace`, without the check label, running PROBE (on stdin)."""
+def probe_command(namespace, image, name, addresses, timeout=TIMEOUT, labels=None):
+    """A short-lived pod in `namespace`, without the check label but with `labels` if given,
+    running PROBE (on stdin)."""
     import gate  # gate.py imports this module; its context is read when called.
-    return ["kubectl", "--context", gate.CONTEXT, "-n", namespace, "run", name,
+    flags = [f"--labels={','.join(f'{k}={v}' for k, v in labels.items())}"] if labels else []
+    return ["kubectl", "--context", gate.CONTEXT, "-n", namespace, "run", name, *flags,
             f"--image={image}", "--restart=Never", "--rm", "-i", "--quiet",
             "--pod-running-timeout=3m", "--command", "--", "python3", "-", str(timeout),
             *addresses]
