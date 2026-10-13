@@ -216,8 +216,8 @@ source does not matter for operation. What follows is the list they cover.
   installs cert-manager and the plugin from pinned manifests, and the smoke gate's
   `check-restore` backs polaris-pg up, restores it into `polaris-pg-restore` and reads the
   root principal and the smoke tests' catalog from it.
-- Network policies (2026-10-13, ADR-044, ADR-045, #93). `charts/polaris-network-policies`
-  denies ingress to Polaris's namespace by default and allows each rule of ADR-044 by
+- Network policies (2026-10-13, ADR-048, ADR-045, #93). `charts/polaris-network-policies`
+  denies ingress to Polaris's namespace by default and allows each rule of ADR-048 by
   namespace label from `.env`; step 1 installs it first, after labelling Polaris's running
   pods as polaris-pg's clients. The stand-ins' namespace denies by default too. The smoke
   gate's `check-network` makes one allowed and one refused connection per rule. The target
