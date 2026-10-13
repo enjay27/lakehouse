@@ -22,6 +22,8 @@
           instance is back. Each run's record goes to DIR/<run>.json; prints the table.
   report DIR
           the table of every record in DIR (results.py).
+  matrix [--setups C0,..] [--scenarios S1,..] [--grace-job true|false]
+          failover.yml's jobs as a matrix, from its inputs.
 
 Every kubectl call names the gate's context and a namespace. Nothing here reaches any cluster
 but the kind cluster gate.py creates (ADR-017).
@@ -373,6 +375,10 @@ def main(argv):
     p.add_argument("--node-down", type=int, default=120)
     p = sub.add_parser("report")
     p.add_argument("directory")
+    p = sub.add_parser("matrix")
+    p.add_argument("--setups", default="")
+    p.add_argument("--scenarios", default="")
+    p.add_argument("--grace-job", default="true")
     args = parser.parse_args(argv[1:])
     if args.command == "up":
         up(args.grace)
@@ -380,6 +386,9 @@ def main(argv):
         install(args.setup)
     elif args.command == "run":
         run(args.setup, args.scenarios.split(","), args.runs, args.node_down, args.out)
+    elif args.command == "matrix":
+        print(json.dumps({"include": setups.matrix(args.setups, args.scenarios,
+                                                   args.grace_job == "true")}))
     else:
         report(args.directory)
     return 0

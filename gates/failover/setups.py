@@ -39,6 +39,8 @@ POOLER = f"{release.POLARIS_PG}-pooler-rw"
 PGDATA = "/var/lib/postgresql/data/pgdata"
 SWITCHOVER_PHASE = "Switchover in progress"
 RUN_ID = re.compile(r"^[A-Za-z0-9-]+$")
+# The informational job's node grace period, against Kubernetes' 50 s (ADR-047 §3).
+GRACE_S = 20
 
 # C1, CNPG's side. failoverDelay is CNPG's default, written out. The readiness probe fails
 # within 3 s of PostgreSQL stopping to answer, instead of 30 s. A primary being shut down
@@ -64,6 +66,22 @@ def check(setup, scenario=None):
         raise ValueError(f"{setup}: not a setup of this harness ({', '.join(SETUPS)})")
     if scenario is not None and scenario not in SCENARIOS:
         raise ValueError(f"{scenario}: not a failure ({', '.join(SCENARIOS)})")
+
+
+def matrix(setups_csv, scenarios_csv, grace_job):
+    """failover.yml's jobs: one per setup, and C1 under S3 on a cluster with GRACE_S as the
+    node grace period (ADR-047 §3), each with its failures. Empty inputs mean all."""
+    chosen = setups_csv.split(",") if setups_csv else list(SETUPS)
+    failures = scenarios_csv.split(",") if scenarios_csv else list(SCENARIOS)
+    for setup in chosen:
+        for scenario in failures:
+            check(setup, scenario)
+    jobs = [{"name": s, "setup": s, "grace": "", "scenarios": ",".join(failures)}
+            for s in SETUPS if s in chosen]
+    if grace_job and "C1" in chosen and "S3" in failures:
+        jobs.append({"name": f"C1-grace{GRACE_S}", "setup": "C1", "grace": str(GRACE_S),
+                     "scenarios": "S3"})
+    return jobs
 
 
 def cluster_patch(setup):

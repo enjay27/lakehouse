@@ -217,6 +217,27 @@ class Switchover(unittest.TestCase):
             setups.switchover_target(pods, "polaris-pg-1")
 
 
+class Matrix(unittest.TestCase):
+    def test_every_setup_and_the_grace_job_by_default(self):
+        self.assertEqual(setups.matrix("", "", True), [
+            {"name": "C0", "setup": "C0", "grace": "", "scenarios": "S1,S2,S3"},
+            {"name": "C1", "setup": "C1", "grace": "", "scenarios": "S1,S2,S3"},
+            {"name": "C2", "setup": "C2", "grace": "", "scenarios": "S1,S2,S3"},
+            {"name": "C1-grace20", "setup": "C1", "grace": "20", "scenarios": "S3"}])
+
+    def test_inputs_narrow_it(self):
+        self.assertEqual(setups.matrix("C2", "S1,S3", False), [
+            {"name": "C2", "setup": "C2", "grace": "", "scenarios": "S1,S3"}])
+        self.assertEqual(setups.matrix("C0", "S1", True), [
+            {"name": "C0", "setup": "C0", "grace": "", "scenarios": "S1"}])
+
+    def test_unknown_inputs_are_refused(self):
+        with self.assertRaises(ValueError):
+            setups.matrix("C0,C3a", "", False)
+        with self.assertRaises(ValueError):
+            setups.matrix("", "S1,S9", False)
+
+
 class ProbeImage(unittest.TestCase):
     def test_the_dockerfile_builds_on_the_pinned_jdk(self):
         pins = gate.load_pins()["failover"]
