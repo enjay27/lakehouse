@@ -155,6 +155,14 @@ class Rendered(unittest.TestCase):
             "ports": [{"protocol": "TCP", "port": 5432}, {"protocol": "TCP", "port": 8000}],
             "from": [namespace(NAME, "cnpg-system")]}])
 
+    def test_postgres_metrics_from_the_metrics_scraper_only(self):
+        # ADR-046 §4: CNPG's exporter on each instance.
+        spec = self.policies["polaris-pg-metrics"]["spec"]
+        self.assertEqual(spec["podSelector"], {"matchLabels": INSTANCES})
+        self.assertEqual(spec["ingress"], [{
+            "ports": [{"protocol": "TCP", "port": 9187}],
+            "from": [namespace("example.org/caller", "metrics")]}])
+
     def test_kubeconform_accepts_every_policy(self):
         result = helm_template("console.enabled=true")
         checked = kubeconform(result.stdout)
@@ -190,6 +198,7 @@ class EmptyCallers(unittest.TestCase):
         self.assertEqual(docs["polaris-api"]["spec"]["ingress"][0]["from"],
                          [namespace(NAME, "catalog-datahub")])
         self.assertNotIn("polaris-management", docs)
+        self.assertNotIn("polaris-pg-metrics", docs)
 
     def test_the_console_disabled_has_no_policy_and_no_ingress_on_the_api(self):
         docs = by_name(render())
