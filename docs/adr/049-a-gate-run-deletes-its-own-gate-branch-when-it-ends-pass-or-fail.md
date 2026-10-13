@@ -40,8 +40,10 @@ a passing gate red, and gate-check would no longer find it.
 
 ### 1. Each gate run deletes its branch at the end
 
-- **Every gate workflow that runs on `gate/*`** (`dry-run.yml`, `smoke.yml`, `log-batch.yml`,
-  and ADR-047's `failover.yml` when it lands) ends with a job that deletes the run's branch.
+- **A gate workflow is any workflow that a push to `gate/**` triggers**, whatever its type.
+  Today that is `dry-run.yml`, `smoke.yml` and `log-batch.yml`; ADR-047's `failover.yml` when
+  it lands, and any later type, are gate workflows the same way.
+- **Every gate workflow ends with a job that deletes the run's branch.**
 - **It runs whatever the result:** after the gate's jobs, with `if: always()`, so after a
   pass, a failure or a cancellation.
 - **Only gate branches:** the job runs only when `github.ref` starts with `refs/heads/gate/`.
@@ -63,8 +65,10 @@ a passing gate red, and gate-check would no longer find it.
   Each gate workflow calls it as its last job.
 - **Permissions:** `permissions: {}` at the top. Only that job has `contents: write`, which
   the calling job grants. It needs no checkout.
-- **A test in `scripts/`** reads the gate workflows and fails if one lacks the call, its
-  `always()` and `refs/heads/gate/` guard, or its `contents: write`.
+- **A test in `scripts/`** reads every workflow in `.github/workflows/`. Each one whose
+  `on.push.branches` names a `gate/` pattern is a gate workflow (§1), and the test fails if one
+  lacks the call, its `always()` and `refs/heads/gate/` guard, or its `contents: write`. It
+  keeps no list of types, so a new gate workflow without the job fails the static gate.
 
 ### 4. The cleanup workflow stays (amends ADR-032)
 
@@ -72,9 +76,14 @@ a passing gate red, and gate-check would no longer find it.
   so a session can re-push them for the next commit" is replaced:
   - **a gate branch is deleted when its run ends** (§1);
   - **a session pushes it again** for the next commit, which creates it again.
-- **`branch-cleanup.yml` and `scripts/branch_cleanup.py` are unchanged.** They delete what a
-  run did not: a branch whose run never reached its last job (a lost runner), whose delete
-  failed, or that was pushed with no run.
+- **`branch-cleanup.yml` stays the backstop.** It deletes what a run did not: a branch whose
+  run never reached its last job (a lost runner), whose delete failed, or that was pushed with
+  no run.
+- **`scripts/branch_cleanup.py` covers every type:** any `gate/<type>/<task>` name follows
+  ADR-032's rule for `gate/dry-run/<task>` and `gate/smoke/<task>`, so a new type needs no
+  change there. Today it names three types and keeps every other `gate/` name, so a lost
+  `gate/failover/<task>` would stay for good. A `gate/` name without both segments is still
+  kept.
 - **ADR-038 is unchanged:** gate branches stay throwaway, and the cleanup workflow still
   deletes those that remain.
 
@@ -116,10 +125,12 @@ flowchart TD
 - **Pushing the same commit again starts a new run,** because the push creates the branch.
   Before, the same commit pushed to an existing branch started nothing.
 - **Each gate run takes one more short job,** about ten seconds of runner time.
-- **gate-check, `scripts/gate_check.py` and `scripts/branch_cleanup.py` are unchanged.**
+- **gate-check and `scripts/gate_check.py` are unchanged.** Which gates a PR needs stays
+  ADR-039's and ADR-040's decision.
 - **Amends ADR-032** (§4). Code follows once this ADR is Accepted:
   - `delete-gate-branch.yml`, and its call in `dry-run.yml`, `smoke.yml` and `log-batch.yml`;
   - the test in `scripts/`;
+  - `scripts/branch_cleanup.py` for every `gate/<type>/<task>`, with its tests;
   - `CLAUDE.md`'s workflows row.
 - **That PR changes `.github/workflows/`**, so it is a draft Kade merges (ADR-030). It changes
   `dry-run.yml` and `smoke.yml`, so gate-check needs passing dry-run and smoke on its head.
