@@ -93,9 +93,15 @@ class GateBranches(unittest.TestCase):
         self.assertEqual(delete(branches, [pr("claude/x"), pr("claude/y")]),
                          ["claude/x", "gate/dry-run/x", "gate/log-batch/x", "gate/smoke/x"])
 
-    def test_other_gate_names_are_kept(self):
-        for name in ("gate/other/x", "gate/dry-run", "gate/dry-run/", "gate/log-batch/",
-                     "gate"):
+    def test_every_gate_type_follows_the_same_rule(self):
+        # ADR-049 §4: any gate/<type>/<task>, so a new type needs no change here.
+        for name in ("gate/failover/x", "gate/smoke-fresh/x", "gate/other/x"):
+            with self.subTest(name=name):
+                self.assertEqual(delete([branch(name)], []), [name])
+                self.assertEqual(delete([branch("claude/x"), branch(name)], []), [])
+
+    def test_gate_names_without_a_type_and_a_task_are_kept(self):
+        for name in ("gate/dry-run", "gate/dry-run/", "gate/log-batch/", "gate//x", "gate"):
             with self.subTest(name=name):
                 self.assertEqual(delete([branch(name)], []), [])
 

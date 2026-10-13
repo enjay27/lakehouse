@@ -2,10 +2,11 @@
 
 1. `claude/<task>` goes when a merged PR of this repository has it as its head and the branch
    still points at that PR's head commit, and no open PR has it as its head.
-2. `gate/dry-run/<task>`, `gate/smoke/<task>` and `gate/log-batch/<task>` (ADR-040) go when no
-   other branch has the same task, counting the branches step 1 deletes as gone, and no open PR
-   has that task.
-3. Everything else stays: `main`, `rc`, Kade's branches, other `gate/` names.
+2. `gate/<type>/<task>`, of any type (ADR-049 §4), goes when no other branch has the same
+   task, counting the branches step 1 deletes as gone, and no open PR has that task. A gate
+   run deletes its own branch when it ends (ADR-049); this sweep deletes what a run left.
+3. Everything else stays: `main`, `rc`, Kade's branches, `gate/` names without a type and a
+   task.
 
 `<task>` is the branch without its first segment, as in gate-check (ADR-039).
 
@@ -18,16 +19,13 @@ Usage:
 import json
 import sys
 
-GATE_KINDS = ("dry-run", "smoke", "log-batch")
-
-
 def task(name):
     return name.split("/", 1)[1] if "/" in name else name
 
 
 def gate_task(name):
     parts = name.split("/", 2)
-    if len(parts) == 3 and parts[0] == "gate" and parts[1] in GATE_KINDS and parts[2]:
+    if len(parts) == 3 and parts[0] == "gate" and parts[1] and parts[2]:
         return parts[2]
     return None
 
