@@ -1,6 +1,6 @@
 # ADR-051: Gates upgrade from the last release over seeded data, and check every seeded object after the upgrade
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-13
 - **Related:** ADR-000, ADR-002, ADR-004, ADR-009, ADR-015, ADR-016, ADR-017, ADR-021, ADR-026, ADR-030, ADR-031, ADR-033, ADR-039, ADR-043, ADR-050
 

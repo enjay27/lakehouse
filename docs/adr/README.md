@@ -68,7 +68,7 @@ flowchart LR
 | [018](018-dry-run-and-smoke-gates-run-from-gate-branches.md) | Dry-run and smoke gates run from throwaway `gate/*` branches on the PR's exact commit | Superseded by ADR-038 |
 | [019](019-a-platform-pr-merges-only-when-a-dry-run-covers-its-head.md) | A platform PR merges only when a passing dry-run gate covers its head | Superseded by ADR-039 |
 | [020](020-a-release-tag-is-created-only-by-the-release-workflow.md) | A release tag is created only by the release workflow, after the full Linux gate | Superseded by ADR-033 |
-| [021](021-gates-upgrade-from-the-last-release-rebuilt-from-its-tag.md) | Gates upgrade from the last release, rebuilt from its tag; no machine snapshots | Amended by ADR-033 |
+| [021](021-gates-upgrade-from-the-last-release-rebuilt-from-its-tag.md) | Gates upgrade from the last release, rebuilt from its tag; no machine snapshots | Superseded by ADR-051 |
 | [022](022-claude-prs-merge-through-the-auto-merge-workflow.md) | Claude's PRs merge through an auto-merge workflow once every check on the head is green | Amended by ADR-030 |
 | **Scope and integration** | | |
 | [023](023-other-teams-services-are-interfaces-with-stand-ins-on-the-gate.md) | Other teams' services are interfaces in `.env`, with stand-ins only on the gate | Superseded by ADR-031 |
@@ -99,7 +99,7 @@ flowchart LR
 | [048](048-ingress-is-denied-by-default-allowed-per-caller-cnpgs-join-pods-included-and-smoke-rebuilds-a-replica.md) | Ingress is denied by default and allowed per caller, CNPG's join pods included; smoke rebuilds a replica under the policies | Accepted |
 | [049](049-a-gate-run-deletes-its-own-gate-branch-when-it-ends-pass-or-fail.md) | A gate run deletes its own gate branch when it ends, pass or fail | Accepted |
 | [050](050-gates-run-from-throwaway-gate-branches-before-the-pr-opens-and-smoke-fresh-installs-a-commit-from-nothing.md) | Gates run from throwaway `gate/*` branches before the PR opens; `smoke-fresh` installs a commit from nothing | Accepted |
-| [051](051-gates-upgrade-from-the-last-release-over-seeded-data-and-check-every-seeded-object-after-the-upgrade.md) | Gates upgrade from the last release over seeded data, and check every seeded object after the upgrade | Proposed |
+| [051](051-gates-upgrade-from-the-last-release-over-seeded-data-and-check-every-seeded-object-after-the-upgrade.md) | Gates upgrade from the last release over seeded data, and check every seeded object after the upgrade | Accepted |
 
 ## Not ADRs
 
