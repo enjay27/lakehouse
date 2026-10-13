@@ -36,7 +36,7 @@
   install [--fresh] [--dry-run]
                   installs the latest release HEAD contains (released_tags) from a checkout of
                   its tag, with the gate's `.env` copied into it, then this commit's release
-                  over it (ADR-021); with no tag, or with
+                  over it (ADR-051); with no tag, or with
                   --fresh, only this commit's release. With --dry-run, this commit's release is
                   a server-side dry-run over the installed one (ADR-038). Prints which it did.
   check-polaris-pg
@@ -479,14 +479,14 @@ def install_plan(previous, previous_dir, fresh, dry_run=False):
     if fresh:
         return this, f"Fresh install of this commit{then}, as asked."
     if not previous:
-        return this, f"No release to upgrade from: fresh install{then} (ADR-021)."
+        return this, f"No release to upgrade from: fresh install{then} (ADR-051)."
     return [
         ["git", "-C", ROOT, "worktree", "add", "--detach", previous_dir, previous],
         # release.py reads .env from its own checkout, and a tag's worktree has none.
         ["cp", "-p", os.path.join(ROOT, ".env"), os.path.join(previous_dir, ".env")],
         ["python3", os.path.join(previous_dir, "install", "release.py")],
         *this,
-    ], f"Upgrade: {previous} installed from its tag, then this commit over it{then} (ADR-021)."
+    ], f"Upgrade: {previous} installed from its tag, then this commit over it{then} (ADR-051)."
 
 
 def polaris_pg_commands(namespace):

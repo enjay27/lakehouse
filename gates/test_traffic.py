@@ -200,6 +200,35 @@ class BootstrapProbes(unittest.TestCase):
         self.assertTrue(self.failed(self.statement("INSERT INTO entities VALUES (1)", "23505")))
 
 
+class RestartAllowances(unittest.TestCase):
+    """standins.json lets polaris-pg's restart during the upgrade end a PostgreSQL connection
+    mid-negotiation, and only then: the nightly smoke 38385377721 failed on one such record."""
+
+    RESTART = ("2026-10-13T10:48:57+00:00", "2026-10-13T10:53:59.468954+00:00")
+
+    def failed(self, record, restart):
+        expectations = traffic.load(os.path.join(HERE, "expectations", "standins.json"))
+        must_nots = [e for e in expectations if e["must"] == "not_exist"]
+        problems, _ = traffic.check([record], must_nots, restart=restart)
+        return problems
+
+    def negotiation(self, time, listener="pg"):
+        return {"proto": "pg", "event": "negotiation_failed", "listener": listener,
+                "time": time}
+
+    def test_a_failed_negotiation_inside_the_restart_passes(self):
+        self.assertEqual(self.failed(self.negotiation("2026-10-13T10:52:51.037+00:00"),
+                                     self.RESTART), [])
+
+    def test_a_failed_negotiation_outside_the_restart_or_without_one_fails(self):
+        self.assertTrue(self.failed(self.negotiation("2026-10-13T10:54:00+00:00"), self.RESTART))
+        self.assertTrue(self.failed(self.negotiation("2026-10-13T10:52:51.037+00:00"), None))
+
+    def test_a_failed_negotiation_on_another_listener_fails_inside_the_restart(self):
+        self.assertTrue(self.failed(self.negotiation("2026-10-13T10:52:51.037+00:00", "other"),
+                                    self.RESTART))
+
+
 class VendedCredentials(unittest.TestCase):
     """iceberg.json's must-nots hold for Polaris's policy requests, not check-standins' curl."""
 
