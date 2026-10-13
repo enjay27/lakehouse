@@ -187,6 +187,8 @@
     {
       "name": "No PostgreSQL TLS negotiation failed",
       "must": "not_exist",
+      "_comment_restart": "A connection can end mid-negotiation while polaris-pg's primary restarts (nightly smoke 38385377721, 2026-10-13). Allowed only inside that restart, and only on the PostgreSQL listener (Kade, 2026-10-13).",
+      "allow_during_restart": {"listener": "pg"},
       "match": {
         "event": "negotiation_failed"
       }

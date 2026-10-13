@@ -986,14 +986,16 @@ class RestartWindow(unittest.TestCase):
         problems, _ = gate.check_traffic(log, [rule])
         self.assertEqual(len(problems), 1)
 
-    def test_only_the_two_rules_kade_named_carry_an_allowance(self):
+    def test_only_the_rules_kade_named_carry_an_allowance(self):
+        # Two on 2026-10-12; the TLS negotiation on 2026-10-13 (nightly smoke 38385377721).
         with open(os.path.join(HERE, "expectations", "standins.json"), encoding="utf-8") as f:
             rules = {e["name"]: e.get("allow_during_restart")
                      for e in json.load(f)["expectations"]}
         self.assertEqual({n: a for n, a in rules.items() if a}, {
             "No PostgreSQL statement failed, but for a table that did not exist yet":
                 {"error.sqlstate": "57P01", "error.severity": "FATAL"},
-            "No upstream the recorder could not reach": {"listener": "pg"}})
+            "No upstream the recorder could not reach": {"listener": "pg"},
+            "No PostgreSQL TLS negotiation failed": {"listener": "pg"}})
 
 
 class CheckStandins(unittest.TestCase):
