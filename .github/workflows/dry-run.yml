@@ -55,3 +55,11 @@ jobs:
         run: |
           set -euo pipefail  # the default `bash -e` would let tee hide a failed install
           python3 gates/gate.py install --dry-run | tee -a "$GITHUB_STEP_SUMMARY"
+
+  delete-gate-branch:
+    # The run's gate branch goes when the run ends, pass, fail or cancelled (ADR-049).
+    needs: [dry-run]
+    if: always() && startsWith(github.ref, 'refs/heads/gate/')
+    permissions:
+      contents: write
+    uses: ./.github/workflows/delete-gate-branch.yml

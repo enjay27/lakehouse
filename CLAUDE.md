@@ -34,7 +34,7 @@ storage, observability, SSO and the catalog gateway are other teams' services, r
 | `charts/`, `images/` | Local charts: `polaris-postgres` with its backups (ADR-010, ADR-043); `polaris-network-policies`, ingress to Polaris's namespace (ADR-048, ADR-046); `polaris`, upstream's 1.6.0, and `polaris-console`, polaris-tools at a pinned commit, each unchanged with our `values-lakehouse.yaml` (ADR-009, ADR-028); `images/polaris-console` builds the console on the gate from that commit with our lockfile; `polaris-log-batch` and `images/polaris-log-batch`, the log batch's CronJob and image, its contract in `docs/contracts/` (ADR-036); tests render each chart, check its values schema, run kubeconform on CNPG's CRD and the pinned NetworkPolicy schema (ADR-016) |
 | `install/` | `release.py` installs a release in ADR-045's order (step 0 the CNPG and plugin preconditions; step 1 Polaris's network policies, its PostgreSQL, the S3 and policy endpoints answering, the realm bootstrap, Polaris; step 2 the log batch, whose failure stops the install (ADR-037), then the console when enabled, never blocking); `release_tag.py` names tags, reads the release gate, writes notes (ADR-033) |
 | `scripts/init_env.py` | init-env: `.env` with credentials per clone; `--apply-secrets` (ADR-006) |
-| `.github/workflows/` | `static.yml`, `gate-check.yml` (ADR-039), `dry-run.yml`, `smoke.yml` (ADR-050), `log-batch.yml`, `create-fixtures.yml` (ADR-040), `auto-merge.yml` (ADR-022), `branch-cleanup.yml` (ADR-032), `release-gate.yml`, `release.yml` (ADR-033, ADR-042), `labels.yml` |
+| `.github/workflows/` | `static.yml`, `gate-check.yml` (ADR-039), `dry-run.yml`, `smoke.yml` (ADR-050), `log-batch.yml`, `create-fixtures.yml` (ADR-040), `auto-merge.yml` (ADR-022), `branch-cleanup.yml` (ADR-032), `delete-gate-branch.yml` (ADR-049), `release-gate.yml`, `release.yml` (ADR-033, ADR-042), `labels.yml` |
 | `.github/labels.json` | The state labels, synced by `labels.yml` (ADR-003) |
 | `.env.template` | Every per-environment variable, credentials empty (ADR-002) |
 
@@ -91,7 +91,7 @@ head to `gate/<dry-run|smoke|log-batch>/<task>` as needed, then open the PR or p
   It never merges a draft, nor a PR changing `.github/workflows/`, `scripts/auto_merge_gate.py`
   or `scripts/gate_check.py` (ADR-030): open those as drafts Kade merges by hand. It is read
   from `main`, so a change to it acts after its own merge. Kade's branches merge by hand.
-- `branch-cleanup.yml` deletes merged `claude/*` branches and their `gate/*` branches (ADR-032).
+- A gate run deletes its `gate/*` branch when it ends (ADR-049); `branch-cleanup.yml` deletes merged `claude/*` branches and any gate branch left over (ADR-032).
 - Releases (ADR-033): a PR from `main` into `rc`, gated by `release-gate.yml`, merged by Kade;
   `release.yml` on `rc` tags it. Sessions open such a PR or run a release only when asked.
 
