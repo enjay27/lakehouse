@@ -129,6 +129,18 @@ class Rendered(unittest.TestCase):
         self.assertIsNotNone(match)
         self.assertEqual(match.group(1), chart_version())
 
+    def test_the_pods_carry_the_label_polaris_pgs_policy_allows(self):
+        # ADR-044 §3; the chart sets no pod label by default.
+        self.assertEqual(self.defaults["podLabels"], {})
+        labels = self.deployment["spec"]["template"]["metadata"]["labels"]
+        self.assertEqual(labels[release.PG_CLIENT_LABEL], "true")
+
+    def test_the_pods_match_the_selector_the_install_relabels_them_by(self):
+        labels = self.deployment["spec"]["template"]["metadata"]["labels"]
+        for pair in release.POLARIS_POD_SELECTOR.split(","):
+            key, value = pair.split("=")
+            self.assertEqual(labels[key], value)
+
     def test_replicas_never_share_a_node(self):
         self.assertEqual(self.defaults["affinity"], {})
         (term,) = self.pod["affinity"]["podAntiAffinity"][
