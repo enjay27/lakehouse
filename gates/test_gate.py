@@ -260,7 +260,7 @@ class Install(unittest.TestCase):
             self.THIS,
         ])
         self.assertIn("platform-2026.10.10", summary)
-        self.assertIn("ADR-021", summary)
+        self.assertIn("ADR-051", summary)
 
     def test_the_release_reads_the_gates_env_in_its_worktree(self):
         # release.py reads .env from its own checkout; a tag's worktree has none, so a
@@ -274,7 +274,7 @@ class Install(unittest.TestCase):
     def test_without_a_release_installs_this_commit_and_says_so(self):
         commands, summary = gate.install_plan(None, "/tmp/prev", fresh=False)
         self.assertEqual(commands, [self.GATE_POLICIES, self.THIS])
-        self.assertEqual(summary, "No release to upgrade from: fresh install (ADR-021).")
+        self.assertEqual(summary, "No release to upgrade from: fresh install (ADR-051).")
 
     def test_fresh_ignores_the_release(self):
         commands, summary = gate.install_plan("platform-2026.10.10", "/tmp/prev", fresh=True)
