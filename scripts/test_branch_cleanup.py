@@ -93,9 +93,15 @@ class GateBranches(unittest.TestCase):
         self.assertEqual(delete(branches, [pr("claude/x"), pr("claude/y")]),
                          ["claude/x", "gate/dry-run/x", "gate/log-batch/x", "gate/smoke/x"])
 
+    def test_failover_measurement_branches_go_with_the_others(self):
+        branches = [branch("claude/x"), branch("gate/failover/x"), branch("gate/failover/y"),
+                    branch("claude/y", sha="b2")]
+        self.assertEqual(delete(branches, [pr("claude/x"), pr("claude/y")]),
+                         ["claude/x", "gate/failover/x"])
+
     def test_other_gate_names_are_kept(self):
         for name in ("gate/other/x", "gate/dry-run", "gate/dry-run/", "gate/log-batch/",
-                     "gate"):
+                     "gate/failover/", "gate"):
             with self.subTest(name=name):
                 self.assertEqual(delete([branch(name)], []), [])
 
