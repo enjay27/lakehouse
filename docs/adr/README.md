@@ -96,6 +96,7 @@ flowchart LR
 | [045](045-the-cnpg-operator-and-its-backup-plugin-are-the-operator-teams-and-a-release-installs-in-a-fixed-order.md) | The CNPG operator and its backup plugin are the operator team's; a release installs in a fixed order | Accepted |
 | [046](046-metrics-are-a-scrape-contract-for-the-observability-teams-prometheus-proven-by-a-stand-in-on-the-gate.md) | Metrics are a scrape contract for the observability team's Prometheus, proven by a stand-in on the gate | Accepted |
 | [047](047-failover-is-measured-on-the-gate-before-it-is-tuned-a-pgjdbc-probe-times-each-setup-under-three-failures.md) | Failover is measured on the gate before it is tuned: a pgjdbc probe times each setup under three failures | Accepted |
+| [048](048-ingress-is-denied-by-default-allowed-per-caller-cnpgs-join-pods-included-and-smoke-rebuilds-a-replica.md) | Ingress is denied by default and allowed per caller, CNPG's join pods included; smoke rebuilds a replica under the policies | Proposed |
 
 ## Not ADRs
 
