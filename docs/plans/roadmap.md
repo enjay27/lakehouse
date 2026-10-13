@@ -88,7 +88,7 @@ source does not matter for operation. What follows is the list they cover.
 ### P1: the gates and the foundation
 
 - The kind gate with dry-run and smoke workflows (ADR-017, ADR-050), gate-check (ADR-039),
-  and the release flow `main` → `rc` → tag (ADR-033, ADR-021). The first release has nothing
+  and the release flow `main` → `rc` → tag (ADR-033, ADR-051). The first release has nothing
   to upgrade from.
 - The CloudNativePG operator on the gate and test clusters only, at the pinned version; on
   the target clusters it is the operator team's, and a release only checks it is present
@@ -275,7 +275,7 @@ source does not matter for operation. What follows is the list they cover.
 
 - The first release with Polaris and Datahub, `main` → `rc` → `platform-YYYY.MM.DD`
   (ADR-033), with release notes and runbooks for installing and upgrading.
-- The Polaris 1.7.0 upgrade as its own PR (ADR-009), gated from the last release (ADR-021).
+- The Polaris 1.7.0 upgrade as its own PR (ADR-009), gated from the last release (ADR-051).
 
 ## Pinned versions
 
