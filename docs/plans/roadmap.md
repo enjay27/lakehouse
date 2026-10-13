@@ -222,7 +222,12 @@ source does not matter for operation. What follows is the list they cover.
   pods as polaris-pg's clients. The stand-ins' namespace denies by default too. The smoke
   gate's `check-network` makes one allowed and one refused connection per rule. The target
   clusters' labels are a question for the operator team (#9).
-- Before Datahub (Kade, 2026-10-12): metrics (P5) and failover (#31) next.
+- Polaris's metrics (2026-10-13, ADR-046, #98): P5's Polaris half, built ahead of Datahub.
+  Polaris on 8182 and polaris-pg's instances on 9187 are a scrape contract in
+  `docs/contracts/`; a release ships no `ServiceMonitor`. The smoke gate's Prometheus
+  stand-in loads the contract's scrape file and `check-metrics` requires every pod up and
+  the contract's series.
+- Before Datahub (Kade, 2026-10-12): failover (#31) next.
 - **Gate:** dry-run and smoke. **Linux:** the release installed on a test cluster.
 
 ### P3: Datahub
@@ -257,8 +262,8 @@ source does not matter for operation. What follows is the list they cover.
 
 ### P5: hooks for the observability team
 
-- Metrics endpoints for Polaris (management port 8182) and Datahub, and the scrape
-  configuration the other team's Prometheus needs.
+- Metrics endpoints and the scrape configuration the other team's Prometheus needs:
+  Polaris's done in P2 (ADR-046); Datahub's join the contract with its chart.
 - Log files and their format as P0 documents them. No dashboards of our own.
 
 ### P6: measurements
