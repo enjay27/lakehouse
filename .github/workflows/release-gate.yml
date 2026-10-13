@@ -8,6 +8,8 @@
 # costs no kind cluster. A skipped job counts as passed, so the ruleset requires it too.
 # The called gates test the PR's merge result. gate-check skips PRs into rc (ADR-033), and
 # auto-merge acts only on claude/* heads into main (ADR-022).
+# A called workflow's jobs get at most what the calling job grants. The gates' own jobs ask for
+# contents: read; only their delete job asks for write, and it skips a PR's ref (ADR-049).
 name: Release gate
 
 on:
@@ -41,7 +43,7 @@ jobs:
     needs: head-is-main
     uses: ./.github/workflows/dry-run.yml
     permissions:
-      contents: read
+      contents: write
 
   smoke-upgrade:
     name: smoke upgrade
@@ -50,7 +52,7 @@ jobs:
     with:
       fresh: false
     permissions:
-      contents: read
+      contents: write
 
   smoke-fresh:
     name: smoke fresh
@@ -59,4 +61,4 @@ jobs:
     with:
       fresh: true
     permissions:
-      contents: read
+      contents: write
