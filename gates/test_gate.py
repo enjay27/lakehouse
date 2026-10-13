@@ -65,6 +65,18 @@ class Pins(unittest.TestCase):
                 self.assertTrue(pin["url"].endswith(".yaml"))
                 self.assertTrue(pin["source"])
 
+    def test_the_network_policy_schema_is_the_gates_kubernetes_version_at_a_commit(self):
+        # ADR-044 §4: kubeconform validates the policies against it in the static gate.
+        pins = gate.load_pins(os.path.join(HERE, "pins.json"))
+        pin = pins["kubernetes_schemas"]["networkpolicy"]
+        version = pins["node_image"]["image"].split(":")[1].split("@")[0]
+        self.assertRegex(pin["sha256"], r"^[0-9a-f]{64}$")
+        self.assertRegex(pin["url"], r"^https://raw\.githubusercontent\.com/yannh/"
+                         r"kubernetes-json-schema/[0-9a-f]{40}/")
+        self.assertTrue(pin["url"].endswith(
+            f"/{version}-standalone-strict/networkpolicy-networking-v1.json"))
+        self.assertTrue(pin["source"])
+
     def test_the_operator_pin_is_supported_by_the_install_script(self):
         pins = gate.load_pins(os.path.join(HERE, "pins.json"))
         with open(os.path.join(HERE, "..", "install", "supported.json"), encoding="utf-8") as f:

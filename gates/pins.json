@@ -48,6 +48,13 @@
       "source": "sha256 of the release asset downloaded from GitHub, read 2026-10-12; no published checksum for it; released 2026-09-03, v0.15.1 under two weeks old (ADR-043)"
     }
   },
+  "kubernetes_schemas": {
+    "networkpolicy": {
+      "url": "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/817113f21a2643311cbc3e992bb44ffe1c416c54/v1.36.4-standalone-strict/networkpolicy-networking-v1.json",
+      "sha256": "f6324cc464f62228b0418f438d167208e4f86c7e3677ba30f608e79a8b26ba79",
+      "source": "kubeconform's schema for NetworkPolicy at the node image's Kubernetes version, from the repository's head commit read 2026-10-13; sha256 of the file downloaded (ADR-044)"
+    }
+  },
   "standin_images": {
     "seaweedfs": {
       "image": "chrislusf/seaweedfs:4.47@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882",

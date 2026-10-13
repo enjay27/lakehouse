@@ -71,6 +71,10 @@ OPERATOR_LABEL = "app.kubernetes.io/name=cloudnative-pg"
 PLUGIN_CRD = "objectstores.barmancloud.cnpg.io"
 PLUGIN_NAME = "barman-cloud.cloudnative-pg.io"
 PLUGIN_LABEL = f"cnpg.io/pluginName={PLUGIN_NAME}"
+# Polaris's network policies (ADR-044), and the label a pod needs to reach polaris-pg.
+POLARIS_NETPOL_RELEASE = "polaris-network-policies"
+POLARIS_NETPOL_CHART = os.path.join(ROOT, "charts", POLARIS_NETPOL_RELEASE)
+PG_CLIENT_LABEL = "lakehouse/polaris-pg-client"
 POLARIS_PG = "polaris-pg"
 POLARIS_PG_RELEASE = "polaris-postgres"
 POLARIS_PG_CHART = os.path.join(ROOT, "charts", "polaris-postgres")
