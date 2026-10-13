@@ -1,6 +1,6 @@
 # ADR-046: Metrics are a scrape contract for the observability team's Prometheus, proven by a stand-in on the gate
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-13
 - **Related:** ADR-002, ADR-009, ADR-010, ADR-016, ADR-017, ADR-028, ADR-031, ADR-036, ADR-040, ADR-044, ADR-045
 
