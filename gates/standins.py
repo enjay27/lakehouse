@@ -16,12 +16,19 @@ never part of a release. Built here as one v1 List that `gate.py standins` appli
   TLS with the certificate the gate generates (Secret `recorder-tls`) and talks plain TCP to
   polaris-pg (ADR-035). On the gate, `.env` names the recorder, so every exchange with these
   three goes through it.
+- **Metrics scraper: Prometheus** (ADR-046 §5), loading the scrape contract as
+  gates/metrics.py fills it in (ConfigMap `prometheus-config`). It discovers pods in Polaris's
+  namespace through a Role there that may only read pods. NS_STANDINS carries the label
+  METRICS_NAMESPACE_LABEL names, so the stand-in crosses the release's own policies as the
+  observability team's scraper would.
 
 Ingress to NS_STANDINS is denied by default; the recorder takes connections from Polaris's
-namespace, SeaweedFS and OPA from the recorder and the gate's check pods (ADR-044 §3).
+namespace, SeaweedFS, OPA and Prometheus from the gate's check pods, SeaweedFS and OPA also
+from the recorder (ADR-044 §3, ADR-046 §4).
 
 Images are pinned by digest in gates/pins.json (`standin_images`). Everything lives in
-`NS_STANDINS`; credentials reach the cluster only inside the Secret, on stdin.
+`NS_STANDINS` but Prometheus's Role and RoleBinding, in Polaris's namespace; credentials reach
+the cluster only inside the Secret, on stdin.
 """
 
 import base64
@@ -33,6 +40,7 @@ OPA_PACKAGE_PATH = "/v1/data/polaris/authz"
 RECORDER_READY_FILE = "/tmp/recorder-ready"
 FILER_PORT = 8888
 PG_PORT = 5432
+PROMETHEUS_PORT = 9090
 # The label every pod the gate starts to check things carries: in Polaris's namespace, those
 # pods may reach the stand-ins directly (ADR-034, ADR-044 §3).
 CHECK_LABEL = "lakehouse-gate/check"
@@ -84,8 +92,9 @@ def _policy(name, namespace, pod_selector, ingress=None):
 
 
 def network_policies(env):
-    """NS_STANDINS's rows of ADR-044 §3 (from ADR-034): default deny; the recorder from
-    Polaris's namespace; SeaweedFS and OPA from the recorder and the gate's check pods."""
+    """NS_STANDINS's rows of ADR-044 §3 (from ADR-034, ADR-046 §4): default deny; the recorder
+    from Polaris's namespace; SeaweedFS and OPA from the recorder and the gate's check pods;
+    Prometheus from the gate's check pods."""
     ns, polaris = env["NS_STANDINS"], env["NS_CATALOG_POLARIS"]
     tcp = [{"protocol": "TCP", "port": p} for p in (OPA_PORT, S3_PORT, PG_PORT)]
     checks = {**_named(polaris),
@@ -97,12 +106,61 @@ def network_policies(env):
         policies.append(_policy(name, ns, _app(name)["podSelector"], [{
             "ports": [{"protocol": "TCP", "port": port}],
             "from": [_app("recorder"), checks]}]))
+    policies.append(_policy("prometheus", ns, _app("prometheus")["podSelector"], [{
+        "ports": [{"protocol": "TCP", "port": PROMETHEUS_PORT}], "from": [checks]}]))
     return policies
 
 
-def manifests(env, pins, policy_text, recorder_code, tls):
+def _namespace(env):
+    """NS_STANDINS, with the metrics scraper's label from `.env` when there is one."""
+    metadata = {"name": env["NS_STANDINS"]}
+    key, _, value = env["METRICS_NAMESPACE_LABEL"].partition("=")
+    if key:
+        metadata["labels"] = {key: value}
+    return {"apiVersion": "v1", "kind": "Namespace", "metadata": metadata}
+
+
+def prometheus_objects(env, image, config):
+    """The Prometheus stand-in: its config, ServiceAccount, Role and RoleBinding in Polaris's
+    namespace (read pods only), Deployment and Service (ADR-046 §5)."""
+    ns, polaris = env["NS_STANDINS"], env["NS_CATALOG_POLARIS"]
+    rbac = "rbac.authorization.k8s.io"
+    prometheus = {
+        "image": image,
+        "args": ["--config.file=/etc/prometheus/prometheus.yml",
+                 "--storage.tsdb.path=/prometheus", "--storage.tsdb.retention.time=1d",
+                 f"--web.listen-address=:{PROMETHEUS_PORT}"],
+        "ports": [{"name": "http", "containerPort": PROMETHEUS_PORT}],
+        "readinessProbe": {"httpGet": {"path": "/-/ready", "port": PROMETHEUS_PORT},
+                           "periodSeconds": 5},
+        "volumeMounts": [{"name": "config", "mountPath": "/etc/prometheus", "readOnly": True},
+                         {"name": "data", "mountPath": "/prometheus"}],
+    }
+    deployment = _deployment("prometheus", ns, prometheus, [
+        {"name": "config", "configMap": {"name": "prometheus-config"}},
+        {"name": "data", "emptyDir": {}}])
+    deployment["spec"]["template"]["spec"]["serviceAccountName"] = "prometheus"
+    return [
+        {"apiVersion": "v1", "kind": "ConfigMap", "metadata": _meta("prometheus-config", ns),
+         "data": {"prometheus.yml": config}},
+        {"apiVersion": "v1", "kind": "ServiceAccount", "metadata": _meta("prometheus", ns)},
+        {"apiVersion": f"{rbac}/v1", "kind": "Role",
+         "metadata": _meta("prometheus-discovery", polaris),
+         "rules": [{"apiGroups": [""], "resources": ["pods"],
+                    "verbs": ["get", "list", "watch"]}]},
+        {"apiVersion": f"{rbac}/v1", "kind": "RoleBinding",
+         "metadata": _meta("prometheus-discovery", polaris),
+         "roleRef": {"apiGroup": rbac, "kind": "Role", "name": "prometheus-discovery"},
+         "subjects": [{"kind": "ServiceAccount", "name": "prometheus", "namespace": ns}]},
+        deployment,
+        _service("prometheus", ns, PROMETHEUS_PORT),
+    ]
+
+
+def manifests(env, pins, policy_text, recorder_code, tls, prometheus_config):
     """A v1 List: the Namespace, then the Secrets, ConfigMaps, Deployments and Services.
-    `tls` is the recorder's (certificate, key), PEM."""
+    `tls` is the recorder's (certificate, key), PEM; `prometheus_config` the stand-in's
+    prometheus.yml (gates/metrics.py)."""
     ns = env["NS_STANDINS"]
     svc = f"{ns}.svc.cluster.local"
     bucket = env["POLARIS_WAREHOUSE_BUCKET"]
@@ -167,7 +225,7 @@ def manifests(env, pins, policy_text, recorder_code, tls):
         {"name": name, "port": port, "targetPort": port}
         for name, port in (("opa", OPA_PORT), ("s3", S3_PORT), ("pg", PG_PORT))]
     return {"apiVersion": "v1", "kind": "List", "items": [
-        {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": ns}},
+        _namespace(env),
         {"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
          "metadata": _meta("seaweedfs-s3", ns),
          "data": {"s3.json": b64(json.dumps(s3_config))}},
@@ -189,5 +247,6 @@ def manifests(env, pins, policy_text, recorder_code, tls):
             {"name": "code", "configMap": {"name": "recorder-code"}},
             {"name": "tls", "secret": {"secretName": "recorder-tls"}}]),
         recorder_service,
+        *prometheus_objects(env, images["prometheus"]["image"], prometheus_config),
         *network_policies(env),
     ]}

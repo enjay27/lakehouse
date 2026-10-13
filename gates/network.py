@@ -4,12 +4,13 @@
   NS_CATALOG_POLARIS that `gate.py gate-policies` applies just before this commit's release:
   the gate's check pods (label CHECK_LABEL) reach every port of every pod, and the PostgreSQL
   recorder in NS_STANDINS reaches the CNPG instances on 5432 (ADR-034).
-- **check-network (§6):** one namespace per caller class, labelled as the gate's `.env` says
-  (GATE_CALLER_LABELS), one without any label, and Datahub's namespace, empty. From a
+- **check-network (§6, ADR-046 §4):** one namespace per caller class, labelled as the gate's
+  `.env` says (GATE_CALLER_LABELS), one without any label, and Datahub's namespace, empty. From a
   short-lived pod in each, and from an unlabelled pod in Polaris's namespace, PROBE tries a TCP
   connection to each target of CASES. An allowed case must connect; a refused one must time
   out or be reset. A refused case that connects means the cluster does not enforce
-  NetworkPolicy: ADR-044 says to stop there.
+  NetworkPolicy: ADR-044 says to stop there. polaris-pg's own Services expose 5432 only, so
+  the gate adds one, METRICS_SERVICE, for the instances' exporter on 9187.
 """
 
 import collections
@@ -30,6 +31,9 @@ UNLABELLED = "none"
 # Seconds a refused connection waits before it counts as blocked.
 TIMEOUT = 5
 INSTANCES = {"cnpg.io/podRole": "instance"}
+# The gate's Service for CNPG's exporter on polaris-pg's instances (ADR-046 §4).
+METRICS_SERVICE = "gate-polaris-pg-metrics"
+PG_METRICS_PORT = 9187
 NAME = "kubernetes.io/metadata.name"
 
 Case = collections.namedtuple("Case", "source target allowed")
@@ -44,6 +48,8 @@ CASES = [
     Case("query", "console", False),
     Case("metrics", "polaris-management", True),
     Case("metrics", "polaris-api", False),
+    Case("metrics", "polaris-pg-metrics", True),
+    Case("gateway", "polaris-pg-metrics", False),
     Case("ingress", "polaris-api", True),
     Case("ingress", "console", True),
     Case("ingress", "polaris-management", False),
@@ -53,6 +59,7 @@ CASES = [
     Case(UNLABELLED, "polaris-management", False),
     Case(UNLABELLED, "console", False),
     Case(UNLABELLED, "polaris-pg", False),
+    Case(UNLABELLED, "polaris-pg-metrics", False),
     Case(UNLABELLED, "recorder", False),
     Case(UNLABELLED, "seaweedfs", False),
     Case(UNLABELLED, "opa", False),
@@ -101,6 +108,7 @@ def targets(env):
         "polaris-management": _svc(f"{release.POLARIS}-mgmt", pol, 8182),
         "console": _svc(release.CONSOLE, pol, 8080),
         "polaris-pg": _svc(release.POLARIS_PG_SERVICE, pol, standins.PG_PORT),
+        "polaris-pg-metrics": _svc(METRICS_SERVICE, pol, PG_METRICS_PORT),
         "recorder": _svc("recorder", si, standins.S3_PORT),
         "seaweedfs": _svc("seaweedfs", si, standins.S3_PORT),
         "opa": _svc("opa", si, standins.OPA_PORT),
@@ -131,6 +139,16 @@ def namespaces_manifest(env):
             metadata["labels"] = labels
         items.append({"apiVersion": "v1", "kind": "Namespace", "metadata": metadata})
     return {"apiVersion": "v1", "kind": "List", "items": items}
+
+
+def metrics_service(env):
+    """The gate's Service in Polaris's namespace for polaris-pg's instances on 9187."""
+    return {"apiVersion": "v1", "kind": "Service",
+            "metadata": {"name": METRICS_SERVICE, "namespace": env["NS_CATALOG_POLARIS"],
+                         "labels": {"app.kubernetes.io/part-of": "gate"}},
+            "spec": {"selector": {"cnpg.io/cluster": release.POLARIS_PG, **INSTANCES},
+                     "ports": [{"name": "metrics", "port": PG_METRICS_PORT,
+                                "targetPort": PG_METRICS_PORT, "protocol": "TCP"}]}}
 
 
 def _policy(name, namespace, pod_selector, ingress):
