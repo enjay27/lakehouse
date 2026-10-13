@@ -1,6 +1,6 @@
 # ADR-049: A gate run deletes its own gate branch when it ends, pass or fail
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-13
 - **Related:** ADR-030, ADR-032, ADR-038, ADR-039, ADR-040, ADR-047
 
