@@ -1,7 +1,8 @@
 # The dry-run gate (ADR-038): runs on a push to gate/dry-run/<task>, the same commit a session
 # opens its PR from. gate-check (ADR-039) looks for a successful run of this workflow, by its
 # path, on that branch. kind with three nodes and the pinned CNPG operator (ADR-017, ADR-029),
-# then the gate's Secrets (gates/gate.py secrets, ADR-006), the stand-ins for other teams'
+# then the gate's Secrets (gates/gate.py secrets, ADR-006), the console's image built while kind
+# starts so the last release's console can roll out (ADR-028), the stand-ins for other teams'
 # services (gates/gate.py standins, ADR-031), the latest release the commit
 # contains (gates/gate.py released_tags), installed from a checkout of its tag, and a
 # server-side dry-run of this commit's release over it (ADR-051); with no tag, this commit's
@@ -42,11 +43,38 @@ jobs:
           python3 gates/gate.py tools "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
+      # The console's image, as in smoke: without it the last release's install waits out the
+      # console's 300 s rollout timeout (#125). It builds while kind starts.
+      - name: The Polaris console's image starts building in the background (ADR-028)
+        continue-on-error: true
+        run: |
+          nohup bash -c 'python3 gates/gate.py console-image --build; echo $? > "$RUNNER_TEMP/console-image.status"; mv "$RUNNER_TEMP/console-image.status" "$RUNNER_TEMP/console-image.exit"' \
+            > "$RUNNER_TEMP/console-image.log" 2>&1 < /dev/null &
+
       - name: kind cluster and the CNPG operator (gate only, ADR-029)
         run: python3 gates/gate.py up
 
       - name: The gate's Secrets (ADR-006)
         run: python3 gates/gate.py secrets
+
+      # The console is a maintainer tool: its failure is reported, never blocking (ADR-028).
+      - name: The Polaris console's image, built from its pinned commit and loaded into kind (ADR-028)
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          exit_file="$RUNNER_TEMP/console-image.exit"
+          if ! timeout 900 bash -c "until [ -f '$exit_file' ]; do sleep 2; done"; then
+            cat "$RUNNER_TEMP/console-image.log"
+            echo "::error::The console's image build did not end within 900 s"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/console-image.log"
+          status="$(cat "$exit_file")"
+          if [ "$status" != 0 ]; then
+            echo "::error::The console's image build exited $status"
+            exit 1
+          fi
+          python3 gates/gate.py console-image --load
 
       - name: The stand-ins, SeaweedFS and OPA (gate only, ADR-031)
         run: python3 gates/gate.py standins
