@@ -45,7 +45,8 @@
                   timeline read back from Helm and the cluster: each Helm revision (a step of
                   release.py starts there), Job, rolled-out Deployment and Ready CNPG Cluster
                   since it started, with each of its own commands and the events of Jobs and
-                  CNPG Clusters, which outlive the initdb and join Jobs CNPG deletes (#125). A
+                  CNPG Clusters, which outlive the initdb and join Jobs CNPG deletes, and of
+                  release.py's endpoint-check and bootstrap pods and log claim (#125). A
                   measurement that fails says so and never fails it.
   rebuild-replica deletes one replica of polaris-pg, never the primary: its PVC without waiting,
                   then its pod. CNPG makes a new instance through a join pod that clones the
@@ -635,18 +636,31 @@ def command_label(command):
 # The kinds whose events go on the timeline: CNPG deletes its initdb and join Jobs once they
 # end, so their events are what is left of them; the Cluster's say what CNPG is doing.
 TIMELINE_EVENT_KINDS = ("Job", "Cluster")
+# And between polaris-pg's Ready and Polaris's revision: release.py's endpoint check and
+# bootstrap run in pods it names with these prefixes and deletes (--rm), then it makes the
+# log claim (install/release.py, the last release's too).
+TIMELINE_POD_PREFIXES = ("endpoint-check-", "polaris-bootstrap-")
+TIMELINE_CLAIMS = ("polaris-logs",)
+
+
+def timeline_event(obj):
+    """Whether an event about `obj` (its involvedObject) goes on the timeline."""
+    kind, name = obj.get("kind"), obj.get("name") or ""
+    return (kind in TIMELINE_EVENT_KINDS
+            or kind == "Pod" and name.startswith(TIMELINE_POD_PREFIXES)
+            or kind == "PersistentVolumeClaim" and name in TIMELINE_CLAIMS)
 
 
 def timeline_entries(since, histories, jobs, deployments, clusters, commands, events=None):
     """[(time, what happened)] at or after `since`, in order: each Helm revision (release.py
     runs Helm without --wait, so a step starts at its revision), each Job's start and end,
     each Deployment's finished rollout, each CNPG Cluster's Ready, the gate's own commands
-    (start, end, label), and the events of TIMELINE_EVENT_KINDS."""
+    (start, end, label), and the events timeline_event keeps."""
     entries = []
     for e in (events or {}).get("items", []):
         obj = e.get("involvedObject", {})
         at = e.get("lastTimestamp") or e.get("eventTime") or e.get("firstTimestamp")
-        if obj.get("kind") in TIMELINE_EVENT_KINDS and at:
+        if timeline_event(obj) and at:
             entries.append((at, f"{obj['kind'].lower()} {obj.get('namespace')}/{obj.get('name')}"
                                 f": {e.get('reason')} ({e.get('message', '').strip()[:100]})"))
     for (namespace, name), revisions in histories.items():
