@@ -14,16 +14,21 @@
                   (ADR-043). Before CNPG, kind's local-path-provisioner gets the class
                   `shared` on a runner directory every node mounts: ReadWriteMany for the
                   log claim (ADR-036).
-  secrets         writes `.env` for the gate (its context, the stand-ins' endpoints and
+  secrets [--direct]
+                  writes `.env` for the gate (its context, the stand-ins' endpoints and
                   the S3 stand-in's three keys, Polaris's, the smoke tests' and the backups',
                   which are the gate's own, ADR-031, ADR-043), then runs
                   scripts/init_env.py --apply-secrets (ADR-006). Refuses an existing `.env`.
+                  With --direct, for a stress install (ADR-053 §4), the endpoints name
+                  SeaweedFS, OPA and polaris-pg's read-write service, never the recorder.
   standins        applies the stand-ins (gates/standins.py: SeaweedFS for S3, OPA with
                   gates/opa/policy.rego) in NS_STANDINS and waits for them (ADR-031), then
                   creates the backup bucket in SeaweedFS and checks it (ADR-043). Never
                   part of a release; the install's endpoint check needs them on the gate.
                   With them the recorder (ADR-034), with a TLS certificate made here, and
                   Prometheus loading docs/contracts/polaris-prometheus-scrape.yaml (ADR-046).
+                  `standins --direct`: SeaweedFS and OPA also take connections from Polaris's
+                  namespace and run under the CPU limits in gates/stress/config.json (ADR-053).
   check-standins  runs gates/check_standins.sh in a short-lived curl pod in Polaris's namespace:
                   an S3 round trip with Polaris's credentials, and every case of
                   gates/opa/cases.json against the policy endpoint (ADR-026, ADR-031); then
@@ -178,6 +183,8 @@ GATE_ENV_GENERATED = ("POLARIS_S3_ACCESS_KEY_ID", "POLARIS_S3_SECRET_ACCESS_KEY"
                       "POLARIS_BACKUP_S3_ACCESS_KEY_ID", "POLARIS_BACKUP_S3_SECRET_ACCESS_KEY")
 # On the gate, the endpoints of other teams' services are the stand-ins' (ADR-031).
 STANDIN_REGION = "us-east-1"
+# The stress scenario's tuning values (ADR-053, ADR-000 rule 11).
+STRESS_CONFIG = os.path.join(HERE, "stress", "config.json")
 STANDIN_BUCKET = "polaris-warehouse"
 STANDIN_BACKUP_BUCKET = "polaris-backup"
 # Polaris's own S3 key, as the AWS SDK reads it: catalogs without STS are read and written with
@@ -319,18 +326,29 @@ def up_commands(pins, chart_path, namespace, manifests):
     ]
 
 
-def standin_endpoints(ns):
+def standin_endpoints(ns, direct=False):
     """The `.env` values for the gate: every connection Polaris makes goes through the
-    recorder in namespace `ns`, which forwards it to the stand-in or to polaris-pg (ADR-034)."""
+    recorder in namespace `ns`, which forwards it to the stand-in or to polaris-pg (ADR-034).
+    With `direct` (a stress install, ADR-053 §4), Polaris reaches SeaweedFS, OPA and polaris-pg's
+    read-write service itself."""
     recorder = f"recorder.{ns}.svc.cluster.local"
+    s3, opa = ((f"seaweedfs.{ns}.svc.cluster.local", f"opa.{ns}.svc.cluster.local") if direct
+               else (recorder, recorder))
     return {
-        "S3_ENDPOINT": f"http://{recorder}:{standins.S3_PORT}",
+        "S3_ENDPOINT": f"http://{s3}:{standins.S3_PORT}",
         "S3_REGION": STANDIN_REGION,
         "POLARIS_WAREHOUSE_BUCKET": STANDIN_BUCKET,
         "POLARIS_BACKUP_BUCKET": STANDIN_BACKUP_BUCKET,
-        "POLARIS_OPA_URL": f"http://{recorder}:{standins.OPA_PORT}{standins.OPA_PACKAGE_PATH}",
-        "POLARIS_DB_HOST": recorder,
+        "POLARIS_OPA_URL": f"http://{opa}:{standins.OPA_PORT}{standins.OPA_PACKAGE_PATH}",
+        "POLARIS_DB_HOST": release.POLARIS_PG_SERVICE if direct else recorder,
     }
+
+
+def stress_standin_cpu(path=STRESS_CONFIG):
+    """The CPU limit of each stand-in a stress install reaches directly (ADR-053 §4)."""
+    with open(path, encoding="utf-8") as f:
+        limits = json.load(f)["standin_cpu"]
+    return {name: cpu for name, cpu in limits.items() if not name.startswith("_")}
 
 
 def console_settings(ns):
@@ -344,12 +362,12 @@ def console_settings(ns):
     }
 
 
-def gate_env(template_text, gen=init_env.generate):
-    """`.env` for the gate: its context, the stand-ins' endpoints, the S3 stand-in's
-    credentials, the console's settings, the log claim's shared class and a namespace label
-    per caller class (ADR-048 §6); init_env fills the rest."""
+def gate_env(template_text, gen=init_env.generate, direct=False):
+    """`.env` for the gate: its context, the stand-ins' endpoints (`direct`: see
+    standin_endpoints), the S3 stand-in's credentials, the console's settings, the log claim's
+    shared class and a namespace label per caller class (ADR-048 §6); init_env fills the rest."""
     template = init_env.parse(template_text)
-    fixed = {"KUBE_CONTEXT": CONTEXT, **standin_endpoints(template["NS_STANDINS"]),
+    fixed = {"KUBE_CONTEXT": CONTEXT, **standin_endpoints(template["NS_STANDINS"], direct),
              **console_settings(template["NS_CATALOG_POLARIS"]),
              "POLARIS_LOGS_STORAGE_CLASS": SHARED_CLASS, "POLARIS_LOGS_SIZE": GATE_LOGS_SIZE,
              **network.GATE_CALLER_LABELS}
@@ -364,10 +382,10 @@ def gate_env(template_text, gen=init_env.generate):
     return "\n".join(lines) + "\n"
 
 
-def write_gate_env(path, template_text):
+def write_gate_env(path, template_text, direct=False):
     if os.path.exists(path):
         sys.exit(f"{path} exists: the gate writes its own .env and never overwrites one")
-    init_env.write_env(path, gate_env(template_text))
+    init_env.write_env(path, gate_env(template_text, direct=direct))
 
 
 def standins_commands(env, manifest):
@@ -1756,20 +1774,22 @@ def main(argv):
             for command, stdin in up_commands(pins, chart_path, namespace, manifests):
                 run(command, stdin)
         return 0
-    if argv[1:] == ["secrets"]:
+    if argv[1:] in (["secrets"], ["secrets", "--direct"]):
         with open(os.path.join(ROOT, ".env.template"), encoding="utf-8") as f:
-            write_gate_env(os.path.join(ROOT, ".env"), f.read())
+            write_gate_env(os.path.join(ROOT, ".env"), f.read(), direct="--direct" in argv)
         run(["python3", os.path.join(ROOT, "scripts", "init_env.py"), "--apply-secrets"])
         return 0
-    if argv[1:] == ["standins"]:
+    if argv[1:] in (["standins"], ["standins", "--direct"]):
+        direct = "--direct" in argv
         env = release.load_env(ROOT, os.environ)
         with open(os.path.join(HERE, "opa", "policy.rego"), encoding="utf-8") as f, \
                 open(os.path.join(HERE, "recorder", "proxy.py"), encoding="utf-8") as code, \
                 tempfile.TemporaryDirectory() as d:
             with open(metrics.CONTRACT, encoding="utf-8") as scrape:
                 config = metrics.prometheus_config(scrape.read(), env)
-            manifest = json.dumps(standins.manifests(env, pins, f.read(), code.read(),
-                                                     recorder_certificate(env, d), config))
+            manifest = json.dumps(standins.manifests(
+                env, pins, f.read(), code.read(), recorder_certificate(env, d), config,
+                direct=direct, cpu_limits=stress_standin_cpu() if direct else None))
         (apply, _), *rest = standins_commands(env, manifest)
         print("+ " + " ".join(apply) + "  (the stand-ins' List on stdin)", flush=True)
         subprocess.run(apply, input=manifest, text=True, check=True)

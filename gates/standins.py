@@ -26,6 +26,11 @@ Ingress to NS_STANDINS is denied by default; the recorder takes connections from
 namespace, SeaweedFS, OPA and Prometheus from the gate's check pods, SeaweedFS and OPA also
 from the recorder (ADR-048 §3, ADR-046 §4).
 
+**Direct** (`manifests(..., direct=True)`, ADR-053 §4): for a stress install, which measures
+Polaris and not the recorder. SeaweedFS and OPA also take connections from Polaris's namespace,
+and each runs under the CPU limit given, so a stress run can tell when one of them is the limit.
+Everything else is the List smoke applies.
+
 Images are pinned by digest in gates/pins.json (`standin_images`). Everything lives in
 `NS_STANDINS` but Prometheus's Role and RoleBinding, in Polaris's namespace; credentials reach
 the cluster only inside the Secret, on stdin.
@@ -44,6 +49,13 @@ PROMETHEUS_PORT = 9090
 # The label every pod the gate starts to check things carries: in Polaris's namespace, those
 # pods may reach the stand-ins directly (ADR-034, ADR-048 §3).
 CHECK_LABEL = "lakehouse-gate/check"
+# What gates/opa/policy.rego lets gate_stress do inside gate_stress_catalog (ADR-053): the
+# actions Polaris 1.6.0's IcebergCatalogHandler asks about for the stress scenario's requests.
+# `GET /v1/config` asks about none.
+STRESS_ACTIONS = ("LIST_NAMESPACES", "CREATE_NAMESPACE", "LIST_TABLES", "CREATE_TABLE_DIRECT",
+                  "LOAD_TABLE", "TABLE_EXISTS", "ADD_TABLE_SNAPSHOT", "SET_TABLE_SNAPSHOT_REF")
+# The stand-ins a stress install points Polaris at directly, with their ports.
+DIRECT = (("seaweedfs", S3_PORT), ("opa", OPA_PORT))
 
 
 def b64(value):
@@ -91,10 +103,11 @@ def _policy(name, namespace, pod_selector, ingress=None):
             "metadata": _meta(name, namespace), "spec": spec}
 
 
-def network_policies(env):
+def network_policies(env, direct=False):
     """NS_STANDINS's rows of ADR-048 §3 (from ADR-034, ADR-046 §4): default deny; the recorder
-    from Polaris's namespace; SeaweedFS and OPA from the recorder and the gate's check pods;
-    Prometheus from the gate's check pods."""
+    from Polaris's namespace; SeaweedFS and OPA from the recorder and the gate's check pods, and
+    with `direct` from Polaris's namespace too (ADR-053 §4); Prometheus from the gate's check
+    pods."""
     ns, polaris = env["NS_STANDINS"], env["NS_CATALOG_POLARIS"]
     tcp = [{"protocol": "TCP", "port": p} for p in (OPA_PORT, S3_PORT, PG_PORT)]
     checks = {**_named(polaris),
@@ -102,10 +115,10 @@ def network_policies(env):
     policies = [_policy("default-deny-ingress", ns, {}),
                 _policy("recorder", ns, _app("recorder")["podSelector"],
                         [{"ports": tcp, "from": [_named(polaris)]}])]
-    for name, port in (("seaweedfs", S3_PORT), ("opa", OPA_PORT)):
+    for name, port in DIRECT:
+        sources = [_app("recorder"), checks] + ([_named(polaris)] if direct else [])
         policies.append(_policy(name, ns, _app(name)["podSelector"], [{
-            "ports": [{"protocol": "TCP", "port": port}],
-            "from": [_app("recorder"), checks]}]))
+            "ports": [{"protocol": "TCP", "port": port}], "from": sources}]))
     policies.append(_policy("prometheus", ns, _app("prometheus")["podSelector"], [{
         "ports": [{"protocol": "TCP", "port": PROMETHEUS_PORT}], "from": [checks]}]))
     return policies
@@ -157,10 +170,14 @@ def prometheus_objects(env, image, config):
     ]
 
 
-def manifests(env, pins, policy_text, recorder_code, tls, prometheus_config):
+def manifests(env, pins, policy_text, recorder_code, tls, prometheus_config, direct=False,
+              cpu_limits=None):
     """A v1 List: the Namespace, then the Secrets, ConfigMaps, Deployments and Services.
     `tls` is the recorder's (certificate, key), PEM; `prometheus_config` the stand-in's
-    prometheus.yml (gates/metrics.py)."""
+    prometheus.yml (gates/metrics.py). With `direct`, `cpu_limits` maps each name in DIRECT to
+    its CPU limit (ADR-053 §4)."""
+    if direct and set(cpu_limits or ()) != {name for name, _ in DIRECT}:
+        raise ValueError(f"direct needs a CPU limit for each of {[n for n, _ in DIRECT]}")
     ns = env["NS_STANDINS"]
     svc = f"{ns}.svc.cluster.local"
     bucket = env["POLARIS_WAREHOUSE_BUCKET"]
@@ -220,6 +237,9 @@ def manifests(env, pins, policy_text, recorder_code, tls, prometheus_config):
         "volumeMounts": [{"name": "code", "mountPath": "/recorder", "readOnly": True},
                          {"name": "tls", "mountPath": "/tls", "readOnly": True}],
     }
+    if direct:
+        for name, container in (("seaweedfs", seaweedfs), ("opa", opa)):
+            container["resources"] = {"limits": {"cpu": cpu_limits[name]}}
     recorder_service = _service("recorder", ns, OPA_PORT)
     recorder_service["spec"]["ports"] = [
         {"name": name, "port": port, "targetPort": port}
@@ -248,5 +268,5 @@ def manifests(env, pins, policy_text, recorder_code, tls, prometheus_config):
             {"name": "tls", "secret": {"secretName": "recorder-tls"}}]),
         recorder_service,
         *prometheus_objects(env, images["prometheus"]["image"], prometheus_config),
-        *network_policies(env),
+        *network_policies(env, direct),
     ]}

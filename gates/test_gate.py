@@ -705,6 +705,22 @@ class GateEnv(unittest.TestCase):
                          "http://recorder.si.svc.cluster.local:8181/v1/data/polaris/authz")
         self.assertEqual(env["POLARIS_DB_HOST"], "recorder.si.svc.cluster.local")
 
+    def test_direct_endpoints_name_the_stand_ins_and_polaris_pg_never_the_recorder(self):
+        # ADR-053 §4: a stress install measures Polaris, not the recorder.
+        template = TEMPLATE.replace("NS_STANDINS=standins", "NS_STANDINS=si")
+        env = gate.init_env.parse(gate.gate_env(template, gen=lambda name: "x", direct=True))
+        self.assertEqual(env["S3_ENDPOINT"], "http://seaweedfs.si.svc.cluster.local:8333")
+        self.assertEqual(env["POLARIS_OPA_URL"],
+                         "http://opa.si.svc.cluster.local:8181/v1/data/polaris/authz")
+        self.assertEqual(env["POLARIS_DB_HOST"], "polaris-pg-rw")
+        self.assertNotIn("recorder", "".join(env.values()))
+
+    def test_direct_changes_only_the_three_endpoints(self):
+        recorded = gate.init_env.parse(gate.gate_env(TEMPLATE, gen=lambda name: "x"))
+        direct = gate.init_env.parse(gate.gate_env(TEMPLATE, gen=lambda name: "x", direct=True))
+        self.assertEqual(sorted(k for k in recorded if recorded[k] != direct[k]),
+                         ["POLARIS_DB_HOST", "POLARIS_OPA_URL", "S3_ENDPOINT"])
+
     def test_each_caller_class_gets_the_gates_namespace_label(self):
         # ADR-048 §6: check-network gives these labels to its source namespaces.
         env = gate.init_env.parse(gate.gate_env(TEMPLATE, gen=lambda name: "x"))
@@ -752,6 +768,14 @@ class GateEnv(unittest.TestCase):
                 gate.write_gate_env(path, TEMPLATE)
             with open(path, encoding="utf-8") as f:
                 self.assertEqual(f.read(), "KUBE_CONTEXT=someone-elses\n")
+
+    def test_a_direct_env_file_names_the_stand_ins(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, ".env")
+            gate.write_gate_env(path, TEMPLATE, direct=True)
+            with open(path, encoding="utf-8") as f:
+                env = gate.init_env.parse(f.read())
+        self.assertEqual(env["S3_ENDPOINT"], "http://seaweedfs.standins.svc.cluster.local:8333")
 
     def test_the_env_file_is_written_for_its_owner_only(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1555,6 +1579,20 @@ class Standins(unittest.TestCase):
                                          "-o", "/dev/null",
                                          "http://127.0.0.1:8888/buckets/polaris-backup/"])
         self.assertIsNone(none)
+
+    def test_direct_stand_ins_take_their_cpu_limits_from_the_stress_config(self):
+        # ADR-053 §4: k6, OPA and SeaweedFS each run under a CPU limit; tuning values live in
+        # gates/stress/config.json (ADR-000 rule 11).
+        limits = gate.stress_standin_cpu()
+        self.assertEqual(sorted(limits), ["opa", "seaweedfs"])
+        for name, cpu in limits.items():
+            with self.subTest(name=name):
+                self.assertRegex(cpu, r"^[1-9][0-9]*m?$")
+
+    def test_the_stress_config_says_its_numbers_are_placeholders_until_calibration(self):
+        with open(gate.STRESS_CONFIG, encoding="utf-8") as f:
+            config = json.load(f)
+        self.assertIn("calibration", config["_comment"])
 
     def test_the_recorder_certificate_is_made_here_for_its_service_name(self):
         with tempfile.TemporaryDirectory() as d:

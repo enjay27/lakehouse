@@ -14,6 +14,11 @@
 # - gate_maintainer, the console's maintainer on the gate (ADR-028), may only read, in any
 #   catalog: list and load catalogs, namespaces, tables and views (Polaris 1.6.0's
 #   PolarisAuthorizableOperation). No write, no grant, no *_WITH_*_DELEGATION.
+# - gate_stress, the stress scenario's principal (ADR-053), may only do what that scenario needs,
+#   and only inside the catalog gate_stress_catalog: the actions Polaris 1.6.0's
+#   IcebergCatalogHandler asks about for its requests (gates/standins.py STRESS_ACTIONS). Seeding
+#   creates namespaces and tables and appends; the run lists, loads, checks a table exists and
+#   commits snapshots. No *_WITH_*_DELEGATION, no drop.
 # - Anything else is refused.
 package polaris.authz
 
@@ -30,6 +35,18 @@ allow if {
 	count(input.resource.targets) > 0
 	every target in input.resource.targets {
 		in_catalog(target, "gate_catalog")
+	}
+}
+
+allow if {
+	input.actor.principal == "gate_stress"
+	input.action in {
+		"LIST_NAMESPACES", "CREATE_NAMESPACE", "LIST_TABLES", "CREATE_TABLE_DIRECT",
+		"LOAD_TABLE", "TABLE_EXISTS", "ADD_TABLE_SNAPSHOT", "SET_TABLE_SNAPSHOT_REF",
+	}
+	count(input.resource.targets) > 0
+	every target in input.resource.targets {
+		in_catalog(target, "gate_stress_catalog")
 	}
 }
 

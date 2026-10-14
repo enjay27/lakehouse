@@ -1,0 +1,8 @@
+{
+  "_comment": "Tuning values for the stress scenario (ADR-053; ADR-000 rule 11). Every number is a placeholder until the calibration ADR-053 §5 runs before the job joins the release gate; each change names its evidence in the PR that makes it.",
+  "standin_cpu": {
+    "_comment": "The CPU limit of each stand-in Polaris reaches directly on a stress install (ADR-053 §4): a knee reached while one of them is throttled is that stand-in's, not Polaris's.",
+    "seaweedfs": "1",
+    "opa": "1"
+  }
+}
