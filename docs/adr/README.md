@@ -106,6 +106,6 @@ flowchart LR
 
 - **Measurements and their numbers:** `docs/measurements/`, with their evidence (ADR-003).
 - **What is next:** labelled issues (ADR-003).
-- **How to run something:** runbooks in `docs/runbooks/`, one per procedure, merged once
-  proven on a Linux test cluster.
+- **How to run something:** runbooks in `docs/runbooks/`, one per procedure, used on a target
+  cluster only once proven on a Linux test cluster.
 - **Tuning values** (window sizes, caps, replica counts): values files and their comments.
