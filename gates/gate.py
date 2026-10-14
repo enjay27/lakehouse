@@ -41,7 +41,11 @@
                   a server-side dry-run over the installed one (ADR-038). Prints which it did,
                   then the image pulls since it started, from the kubelet's Pulled events:
                   each image's pulls and nodes, and the busiest node's pull time against the
-                  install's (#125). A measurement that fails says so and never fails it.
+                  install's (#125). Then, unless a dry-run alone installed nothing, its
+                  timeline read back from Helm and the cluster: each Helm revision (a step of
+                  release.py starts there), Job, rolled-out Deployment and Ready CNPG Cluster
+                  since it started, with each of its own commands (#125). A measurement that
+                  fails says so and never fails it.
   rebuild-replica deletes one replica of polaris-pg, never the primary: its PVC without waiting,
                   then its pod. CNPG makes a new instance through a join pod that clones the
                   primary under the network policies; it passes once a new join Job ran and the
@@ -609,6 +613,97 @@ def measure_pulls(since, install_seconds):
         return pull_lines(*image_pulls(json.loads(done.stdout), since), install_seconds)
     except Exception as e:  # noqa: BLE001 - a measurement must never fail the install
         return [f"Image pulls: not measured ({e})"]
+
+
+def _moment(text):
+    """A Kubernetes or Helm time; Helm's carry nanoseconds, which Python does not read."""
+    return traffic.when(re.sub(r"(\.\d{6})\d+", r"\1", text))
+
+
+def command_label(command):
+    """What one of install_plan's commands installs, for the timeline."""
+    if command[1:2] and command[1].endswith(os.path.join("install", "release.py")):
+        mine = command[1] == os.path.join(ROOT, "install", "release.py")
+        label = f"release.py ({'this commit' if mine else 'the last release'})"
+        return " ".join([label, *command[2:]])
+    if command[1:2] and command[1].endswith("gate.py"):
+        return " ".join(["gate.py", *command[2:3]])
+    return " ".join([command[0], *command[3:5]] if command[1:2] == ["-C"] else command[:2])
+
+
+def timeline_entries(since, histories, jobs, deployments, clusters, commands):
+    """[(time, what happened)] at or after `since`, in order: each Helm revision (release.py
+    runs Helm without --wait, so a step starts at its revision), each Job's start and end,
+    each Deployment's finished rollout, each CNPG Cluster's Ready, and the gate's own
+    commands (start, end, label)."""
+    entries = []
+    for (namespace, name), revisions in histories.items():
+        for r in revisions:
+            entries.append((r["updated"], f"helm {namespace}/{name} revision {r['revision']} "
+                                          f"{r['status']}"))
+    for job in jobs.get("items", []):
+        where, status = "{namespace}/{name}".format(**job["metadata"]), job.get("status", {})
+        if status.get("startTime"):
+            entries.append((status["startTime"], f"job {where} started"))
+        if status.get("completionTime"):
+            entries.append((status["completionTime"], f"job {where} complete"))
+        for c in status.get("conditions", []):
+            if c.get("type") == "Failed" and c.get("status") == "True":
+                entries.append((c["lastTransitionTime"], f"job {where} failed"))
+    for d in deployments.get("items", []):
+        where = "{namespace}/{name}".format(**d["metadata"])
+        for c in d.get("status", {}).get("conditions", []):
+            if c.get("type") == "Progressing" and c.get("reason") == "NewReplicaSetAvailable":
+                entries.append((c["lastUpdateTime"], f"deployment {where} rolled out"))
+    for cluster in clusters.get("items", []):
+        where = "{namespace}/{name}".format(**cluster["metadata"])
+        for c in cluster.get("status", {}).get("conditions", []):
+            if c.get("type") == "Ready" and c.get("status") == "True":
+                entries.append((c["lastTransitionTime"], f"cluster {where} Ready"))
+    for start, end, label in commands:
+        entries += [(start, f"{label} started"), (end, f"{label} ended")]
+    start = _moment(since)
+    timed = [(_moment(at), text) for at, text in entries]
+    return sorted((e for e in timed if e[0] >= start), key=lambda e: e[0])
+
+
+def timeline_lines(entries, since):
+    """Each entry with whole seconds after `since` and since the entry before."""
+    if not entries:
+        return ["Install timeline: nothing recorded after the install started."]
+    lines, before, start = [
+        "Install timeline, seconds after the install started (and since the line before):"], 0, \
+        _moment(since)
+    for at, text in entries:
+        offset = int((at - start).total_seconds())
+        lines.append(f"- {offset:3d} s (+{offset - before:2d})  {text}")
+        before = offset
+    return lines
+
+
+def measure_timeline(since, commands):
+    """timeline_lines for the install that started at `since`, read from Helm and the cluster;
+    never stops the gate."""
+    def read(argv):
+        done = subprocess.run(argv, capture_output=True, text=True, check=False)
+        if done.returncode != 0:
+            raise RuntimeError(done.stderr.strip() or f"{argv[0]} exited {done.returncode}")
+        return json.loads(done.stdout)
+
+    try:
+        helm = ["helm", "--kube-context", CONTEXT]
+        histories = {
+            (r["namespace"], r["name"]): read(helm + ["-n", r["namespace"], "history",
+                                                      r["name"], "-o", "json"])
+            for r in read(helm + ["list", "--all-namespaces", "--all", "-o", "json"])}
+        kubectl = ["kubectl", "--context", CONTEXT, "get", "--all-namespaces", "-o", "json"]
+        jobs, deployments, clusters = (read(kubectl[:4] + [kind] + kubectl[4:])
+                                       for kind in ("jobs", "deployments",
+                                                    "clusters.postgresql.cnpg.io"))
+        return timeline_lines(timeline_entries(since, histories, jobs, deployments, clusters,
+                                               commands), since)
+    except Exception as e:  # noqa: BLE001 - a measurement must never fail the install
+        return [f"Install timeline: not measured ({e})"]
 
 
 def polaris_pg_commands(namespace):
@@ -1686,14 +1781,22 @@ def main(argv):
                                              os.path.join(d, "previous"),
                                              "--fresh" in argv, "--dry-run" in argv)
             print(summary, flush=True)
+            timed = []
             for command in commands:
+                began = dt.datetime.now(dt.timezone.utc).isoformat()
                 run(command)
+                timed.append((began, dt.datetime.now(dt.timezone.utc).isoformat(),
+                              command_label(command)))
         end = dt.datetime.now(dt.timezone.utc)
         if len(commands) > 1 and "--dry-run" not in argv:
             with open(INSTALL_RECORD, "w", encoding="utf-8") as f:
                 json.dump({"end": end.isoformat()}, f)
         for line in measure_pulls(start.isoformat(), (end - start).total_seconds()):
             print(line, flush=True)
+        # A dry-run alone installs nothing, so it has no timeline.
+        if len(commands) > 1 or "--dry-run" not in argv:
+            for line in measure_timeline(start.isoformat(), timed):
+                print(line, flush=True)
         return 0
     if argv[1:2] == ["console-image"] and argv[2:] in ([], ["--build"], ["--load"]):
         source = console_source()
