@@ -246,17 +246,18 @@ class Commands(unittest.TestCase):
 class Install(unittest.TestCase):
     ROOT = os.path.dirname(HERE)
     THIS = ["python3", os.path.join(os.path.dirname(HERE), "install", "release.py")]
-    # ADR-048 §5: the gate-only allow policies, just before this commit's release.
+    # ADR-048 §5: the gate-only allow policies, before the first release that installs for
+    # real: the last release has network policies of its own since platform-2026.10.14.
     GATE_POLICIES = ["python3", os.path.join(HERE, "gate.py"), "gate-policies"]
 
     def test_with_a_release_installs_it_from_its_tag_then_this_commit(self):
         commands, summary = gate.install_plan("platform-2026.10.10", "/tmp/prev", fresh=False)
         self.assertEqual(commands, [
+            self.GATE_POLICIES,
             ["git", "-C", self.ROOT, "worktree", "add", "--detach", "/tmp/prev",
              "platform-2026.10.10"],
             ["cp", "-p", os.path.join(self.ROOT, ".env"), "/tmp/prev/.env"],
             ["python3", "/tmp/prev/install/release.py"],
-            self.GATE_POLICIES,
             self.THIS,
         ])
         self.assertIn("platform-2026.10.10", summary)
@@ -266,7 +267,7 @@ class Install(unittest.TestCase):
         # release.py reads .env from its own checkout; a tag's worktree has none, so a
         # release that reads more than step 0 would find every endpoint empty.
         commands, _ = gate.install_plan("platform-2026.10.12", "/tmp/prev", fresh=False)
-        worktree, copy, previous = commands[0], commands[1], commands[2]
+        worktree, copy, previous = commands[1], commands[2], commands[3]
         self.assertEqual(worktree[3:5], ["worktree", "add"])
         self.assertEqual(copy, ["cp", "-p", os.path.join(self.ROOT, ".env"), "/tmp/prev/.env"])
         self.assertEqual(previous, ["python3", "/tmp/prev/install/release.py"])
@@ -284,9 +285,12 @@ class Install(unittest.TestCase):
     def test_dry_run_installs_the_release_then_dry_runs_this_commit_over_it(self):
         commands, summary = gate.install_plan("platform-2026.10.10", "/tmp/prev", fresh=False,
                                               dry_run=True)
-        self.assertEqual(commands[2], ["python3", "/tmp/prev/install/release.py"])
-        # A dry-run changes nothing, the gate's policies included.
-        self.assertEqual(commands[3:], [self.THIS + ["--dry-run"]])
+        # The last release installs for real, so the gate's policies come first; dry-run 38493145873
+        # failed without them: the recorder could not reach polaris-pg for the realm bootstrap.
+        self.assertEqual(commands[0], self.GATE_POLICIES)
+        self.assertEqual(commands[3], ["python3", "/tmp/prev/install/release.py"])
+        # The dry-run itself changes nothing.
+        self.assertEqual(commands[4:], [self.THIS + ["--dry-run"]])
         self.assertIn("server-side dry-run", summary)
 
     def test_dry_run_without_a_release_dry_runs_this_commit(self):
@@ -297,6 +301,119 @@ class Install(unittest.TestCase):
     def test_an_unknown_install_option_exits_2(self):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(gate.main(["gate.py", "install", "--upgrade"]), 2)
+
+
+def pulled(message, node="lakehouse-gate-worker", at="2026-10-14T01:10:00Z", reason="Pulled"):
+    return {"reason": reason, "message": message, "source": {"host": node},
+            "firstTimestamp": at, "lastTimestamp": at}
+
+
+class ImagePulls(unittest.TestCase):
+    """#125: how long the install spent pulling images, from the kubelet's Pulled events."""
+    SINCE = "2026-10-14T01:05:00+00:00"
+
+    def test_go_durations_in_seconds(self):
+        for text, seconds in (("3.162s", 3.162), ("1m2.5s", 62.5), ("512ms", 0.512),
+                              ("1h0m1s", 3601.0), ("850µs", 0.00085), ("0s", 0.0)):
+            self.assertAlmostEqual(gate.go_seconds(text), seconds, msg=text)
+        with self.assertRaises(ValueError):
+            gate.go_seconds("soon")
+
+    def test_the_events_are_read_in_every_namespace(self):
+        self.assertEqual(gate.pull_events_command(), [
+            "kubectl", "--context", gate.CONTEXT, "get", "events", "--all-namespaces",
+            "--field-selector", "reason=Pulled", "-o", "json"])
+
+    def test_pulls_and_images_already_present_since_the_install_started(self):
+        events = {"items": [
+            pulled('Successfully pulled image "apache/polaris:1.6.0" in 1m2.5s '
+                   '(1m10s including waiting). Image size: 250000000 bytes.'),
+            pulled('Successfully pulled image "apache/polaris:1.6.0" in 40s '
+                   '(40s including waiting). Image size: 250000000 bytes.',
+                   node="lakehouse-gate-worker2"),
+            # Kubelets before 1.30 print no size.
+            pulled('Successfully pulled image "curlimages/curl:8" in 2.1s '
+                   '(2.1s including waiting)'),
+            pulled('Container image "ghcr.io/cloudnative-pg/postgresql:17" already present '
+                   'on machine', node="lakehouse-gate-control-plane"),
+            # Before the install (the stand-ins' own), and another reason: not counted.
+            pulled('Successfully pulled image "openpolicyagent/opa:1" in 9s '
+                   '(9s including waiting)', at="2026-10-14T01:04:59Z"),
+            pulled('Pulling image "apache/polaris:1.6.0"', reason="Pulling"),
+            pulled("something new"),
+        ]}
+        pulls, present, unknown = gate.image_pulls(events, self.SINCE)
+        self.assertEqual(pulls, [
+            {"image": "apache/polaris:1.6.0", "node": "lakehouse-gate-worker",
+             "seconds": 62.5, "waiting": 70.0, "bytes": 250000000},
+            {"image": "apache/polaris:1.6.0", "node": "lakehouse-gate-worker2",
+             "seconds": 40.0, "waiting": 40.0, "bytes": 250000000},
+            {"image": "curlimages/curl:8", "node": "lakehouse-gate-worker",
+             "seconds": 2.1, "waiting": 2.1, "bytes": None},
+        ])
+        self.assertEqual(present, {("ghcr.io/cloudnative-pg/postgresql:17",
+                                    "lakehouse-gate-control-plane")})
+        self.assertEqual(unknown, 1)
+
+    def test_the_node_comes_from_the_reporting_instance_without_a_source(self):
+        event = pulled('Successfully pulled image "a:1" in 1s (1s including waiting)')
+        event["source"] = {}
+        event["reportingInstance"] = "lakehouse-gate-worker2"
+        pulls, _, _ = gate.image_pulls({"items": [event]}, self.SINCE)
+        self.assertEqual(pulls[0]["node"], "lakehouse-gate-worker2")
+
+    def test_lines_put_the_slowest_image_first_and_the_busiest_node_against_the_install(self):
+        pulls = [
+            {"image": "curlimages/curl:8", "node": "w1", "seconds": 2.1, "waiting": 2.1,
+             "bytes": None},
+            {"image": "apache/polaris:1.6.0", "node": "w1", "seconds": 62.5, "waiting": 70.0,
+             "bytes": 250000000},
+            {"image": "apache/polaris:1.6.0", "node": "w2", "seconds": 40.0, "waiting": 40.0,
+             "bytes": 250000000},
+        ]
+        present = {("postgresql:17", "cp"), ("postgresql:17", "w1"), ("curlimages/curl:8", "w2")}
+        lines = gate.pull_lines(pulls, present, 0, install_seconds=300)
+        self.assertEqual(lines, [
+            "Image pulls during the install: 3 pulls of 2 images; the busiest node, w1, "
+            "spent 64.6 s pulling, of the install's 300 s.",
+            "- apache/polaris:1.6.0: pulled on 2 nodes, longest 62.5 s (70.0 s with waiting), "
+            "250.0 MB",
+            "- curlimages/curl:8: pulled on 1 node, longest 2.1 s (2.1 s with waiting); "
+            "already present on 1 node",
+            "- postgresql:17: already present on 2 nodes",
+            "- per node: w1 64.6 s, w2 40.0 s",
+        ])
+
+    def test_lines_say_when_nothing_was_pulled_and_count_what_was_not_understood(self):
+        self.assertEqual(gate.pull_lines([], set(), 2, install_seconds=12), [
+            "Image pulls during the install: none; every image was already present.",
+            "- 2 Pulled events not understood",
+        ])
+
+    def test_install_measures_pulls_after_its_commands(self):
+        events = json.dumps({"items": [pulled(
+            'Successfully pulled image "a:1" in 1s (1s including waiting)',
+            at="2999-01-01T00:00:00Z")]})
+        done = subprocess.CompletedProcess([], 0, stdout=events, stderr="")
+        with mock.patch.object(gate, "released_tags", return_value=[]), \
+                mock.patch.object(gate, "run") as run, \
+                mock.patch.object(gate.subprocess, "run", return_value=done) as kubectl, \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(gate.main(["gate.py", "install", "--dry-run"]), 0)
+        run.assert_called_once()
+        kubectl.assert_called_once_with(gate.pull_events_command(), capture_output=True,
+                                        text=True, check=False)
+        self.assertIn("Image pulls during the install: 1 pull of 1 image;", out.getvalue())
+
+    def test_a_measurement_that_fails_never_fails_the_install(self):
+        refused = subprocess.CompletedProcess([], 1, stdout="", stderr="connection refused")
+        for done in (refused, subprocess.CompletedProcess([], 0, stdout="{", stderr="")):
+            with mock.patch.object(gate, "released_tags", return_value=[]), \
+                    mock.patch.object(gate, "run"), \
+                    mock.patch.object(gate.subprocess, "run", return_value=done), \
+                    contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(gate.main(["gate.py", "install", "--dry-run"]), 0)
+            self.assertIn("Image pulls: not measured (", out.getvalue())
 
 
 TEMPLATE = """KUBE_CONTEXT=
