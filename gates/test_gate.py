@@ -500,6 +500,31 @@ class InstallTimeline(unittest.TestCase):
             "job catalog-polaris/polaris-pg-1-initdb: Completed (Job completed)",
         ])
 
+    def test_the_endpoint_bootstrap_and_claim_events_split_the_step_before_polaris(self):
+        # release.py runs the endpoint check and the bootstrap in pods it deletes (--rm);
+        # their events stay, as do the log claim's. Other pods and claims are left out.
+        def event(kind, name, reason, at, message="m"):
+            return {"involvedObject": {"kind": kind, "namespace": "catalog-polaris",
+                                       "name": name},
+                    "reason": reason, "message": message, "lastTimestamp": at}
+
+        entries = gate.timeline_entries(self.SINCE, {}, {}, {}, {}, [], events={"items": [
+            event("Pod", "endpoint-check-1a2b3c4d", "Started", "2026-10-14T06:44:21Z"),
+            event("Pod", "polaris-bootstrap-5e6f7a8b", "Pulled", "2026-10-14T06:44:25Z",
+                  "Container image already present on machine"),
+            event("PersistentVolumeClaim", "polaris-logs", "ProvisioningSucceeded",
+                  "2026-10-14T06:44:40Z"),
+            event("Pod", "polaris-pg-1", "Started", "2026-10-14T06:44:22Z"),
+            event("PersistentVolumeClaim", "polaris-pg-1", "ProvisioningSucceeded",
+                  "2026-10-14T06:44:23Z"),
+            event("Pod", "polaris-bootstrap", "Started", "2026-10-14T06:44:24Z")]})
+        self.assertEqual([text for _, text in entries], [
+            "pod catalog-polaris/endpoint-check-1a2b3c4d: Started (m)",
+            "pod catalog-polaris/polaris-bootstrap-5e6f7a8b: Pulled "
+            "(Container image already present on machine)",
+            "persistentvolumeclaim catalog-polaris/polaris-logs: ProvisioningSucceeded (m)",
+        ])
+
     def test_events_that_cannot_be_read_leave_the_rest_of_the_timeline(self):
         def subprocess_run(argv, **kwargs):
             if "events" in argv:
