@@ -185,9 +185,12 @@ class FakeCalls:
     """Answers step 1's kubectl and helm calls; records every call."""
 
     def __init__(self, secret=True, helm=(0, ""), wait=(0, ""), clusters=None, pods=(0, ""),
-                 label=(0, "")):
+                 label=(0, ""), generations=((1, "NotFound"),)):
         self.secret, self.helm, self.wait, self.calls = secret, helm, wait, []
         self.pods, self.label = pods, label
+        # The Cluster's generation as each read gives it, before the helm upgrade and after
+        # Ready; the last answer repeats. By default there is no Cluster.
+        self.generations = list(generations)
         self.values = []
         # The Cluster as each `get` reads it; the last answer repeats.
         self.clusters = list(clusters or [cluster_status()])
@@ -209,6 +212,8 @@ class FakeCalls:
             return self.pods
         if "label" in argv:
             return self.label
+        if f"cluster/{release.POLARIS_PG}" in argv and "jsonpath={.metadata.generation}" in argv:
+            return self.generations.pop(0) if len(self.generations) > 1 else self.generations[0]
         if f"cluster/{release.POLARIS_PG}" in argv and "get" in argv:
             answer = self.clusters.pop(0) if len(self.clusters) > 1 else self.clusters[0]
             return (0, json.dumps(answer)) if isinstance(answer, dict) else answer
@@ -228,15 +233,15 @@ class PolarisPostgres(unittest.TestCase):
         calls = FakeCalls()
         problems, notes = self.step(calls)
         self.assertEqual(problems, [])
-        self.assertEqual([c[0] for c in calls.calls], ["kubectl", "helm", "kubectl"]
+        self.assertEqual([c[0] for c in calls.calls], ["kubectl", "kubectl", "helm", "kubectl"]
                          + ["kubectl"] * release.SETTLE_READS)
-        helm = calls.calls[1]
+        helm = calls.calls[2]
         self.assertEqual(helm[:3], ["helm", "--kube-context", "kind-lakehouse-gate"])
         self.assertEqual(helm[helm.index("-n") + 1], "catalog-polaris")
         self.assertEqual(helm[helm.index("upgrade"):helm.index("upgrade") + 4],
                          ["upgrade", "--install", "polaris-postgres", release.POLARIS_PG_CHART])
         self.assertNotIn("--dry-run=server", helm)
-        wait = calls.calls[2]
+        wait = calls.calls[3]
         self.assertIn("--for=condition=Ready", wait)
         self.assertIn("cluster/polaris-pg", wait)
         self.assertIn("polaris-pg", "\n".join(notes))
@@ -285,7 +290,7 @@ class PolarisPostgres(unittest.TestCase):
             cluster_status(), cluster_status(), cluster_status()])
         problems, notes = self.step(calls)
         self.assertEqual(problems, [])
-        reads = [c for c in calls.calls if f"cluster/{release.POLARIS_PG}" in c and "get" in c]
+        reads = self.reads(calls)
         self.assertEqual(len(reads), 6)
         for argv in reads:
             self.assertEqual(argv[:5], ["kubectl", "--context", "kind-lakehouse-gate", "-n",
@@ -297,8 +302,55 @@ class PolarisPostgres(unittest.TestCase):
         calls = FakeCalls(clusters=[cluster_status(ready=2)] * 2 + [cluster_status()])
         problems, _ = self.step(calls)
         self.assertEqual(problems, [])
-        reads = [c for c in calls.calls if f"cluster/{release.POLARIS_PG}" in c and "get" in c]
-        self.assertEqual(len(reads), 2 + release.SETTLE_READS)
+        self.assertEqual(len(self.reads(calls)), 2 + release.SETTLE_READS)
+
+    # #125: settle costs at least 20 s. An upgrade that leaves the Cluster's spec as it was
+    # (its generation unchanged) gives CNPG nothing to roll out, so one healthy read is enough.
+    def reads(self, calls):
+        return [c for c in calls.calls if f"cluster/{release.POLARIS_PG}" in c
+                and c[-2:] == ["-o", "json"]]
+
+    def test_the_generation_is_read_before_the_upgrade_and_after_ready(self):
+        calls = FakeCalls(generations=[(0, "4")])
+        self.step(calls)
+        reads = [i for i, c in enumerate(calls.calls) if "jsonpath={.metadata.generation}" in c]
+        helm = [i for i, c in enumerate(calls.calls) if c[0] == "helm"][0]
+        wait = [i for i, c in enumerate(calls.calls) if "wait" in c][0]
+        self.assertEqual(len(reads), 2)
+        self.assertLess(reads[0], helm)
+        self.assertGreater(reads[1], wait)
+        for i in reads:
+            self.assertEqual(calls.calls[i][:7], ["kubectl", "--context", "kind-lakehouse-gate",
+                                                  "-n", "catalog-polaris", "get",
+                                                  "cluster/polaris-pg"])
+
+    def test_an_unchanged_spec_needs_one_healthy_read(self):
+        calls = FakeCalls(generations=[(0, "4")])
+        problems, notes = self.step(calls)
+        self.assertEqual(problems, [])
+        self.assertEqual(len(self.reads(calls)), 1)
+        self.assertIn("unchanged", "\n".join(notes))
+
+    def test_an_unchanged_spec_still_waits_for_a_healthy_read(self):
+        calls = FakeCalls(generations=[(0, "4")], clusters=[
+            cluster_status("Waiting for the instances to become active", ready=2),
+            cluster_status()])
+        problems, _ = self.step(calls)
+        self.assertEqual(problems, [])
+        self.assertEqual(len(self.reads(calls)), 2)
+
+    def test_a_changed_spec_needs_every_read(self):
+        calls = FakeCalls(generations=[(0, "4"), (0, "5")])
+        problems, notes = self.step(calls)
+        self.assertEqual(problems, [])
+        self.assertEqual(len(self.reads(calls)), release.SETTLE_READS)
+        self.assertNotIn("unchanged", "\n".join(notes))
+
+    def test_a_new_cluster_needs_every_read(self):
+        calls = FakeCalls(generations=[(1, "NotFound"), (0, "1")])
+        problems, _ = self.step(calls)
+        self.assertEqual(problems, [])
+        self.assertEqual(len(self.reads(calls)), release.SETTLE_READS)
 
     def test_a_cluster_that_never_settles_stops_with_its_phase(self):
         with mock.patch.object(release, "SETTLE_TIMEOUT", 0):

@@ -11,7 +11,8 @@
    (ADR-038).
    a. Its PostgreSQL: the `Cluster` polaris-pg from charts/polaris-postgres (ADR-008,
       ADR-010), installed with helm and waited on until Ready, then until it reads healthy
-      several times in a row, since a change can restart its instances. Its backups go to
+      several times in a row, since a change can restart its instances; once, when the
+      upgrade left its spec unchanged (its generation the same). Its backups go to
       `POLARIS_BACKUP_BUCKET` on `S3_ENDPOINT` with the key in `polaris-backup-s3` (ADR-043).
    b. The S3 endpoint and the policy endpoint from `.env` must answer, asked from Polaris's
       namespace by one short-lived curl pod (install/images.json): any HTTP status is an
@@ -130,6 +131,8 @@ READY_TIMEOUT = "900s"
 # condition, so `kubectl wait` can pass before the operator acts on a new spec; on the smoke
 # gate it began restarting the instances 2 s after Ready (adding the plugin, ADR-043). The
 # Cluster must read healthy, every instance ready, this many times in a row, this far apart.
+# An upgrade that leaves its generation unchanged gives CNPG nothing to roll out, so one
+# healthy read is enough then (#125: the three reads cost at least 20 s).
 SETTLE_READS = 3
 SETTLE_INTERVAL = 10
 SETTLE_TIMEOUT = 900
@@ -335,11 +338,14 @@ def polaris_postgres(env, run, dry_run=False):
                 for var in empty], []
     context = env["KUBE_CONTEXT"]
     secrets_needed = (POLARIS_DB_SECRET, POLARIS_BACKUP_SECRET)
+    generation = None
     code, _ = run(["kubectl", "--context", context, "-n", namespace, "get", "secret",
                    *secrets_needed, "-o", "name"])
     if code != 0:
         return [f"Secrets {', '.join(secrets_needed)} must exist in {namespace}: run "
                 "scripts/init_env.py --apply-secrets first (ADR-006)"], []
+    if not dry_run:
+        generation = cluster_generation(run, context, namespace)
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
         json.dump(postgres_values(env), f)
     try:
@@ -357,16 +363,28 @@ def polaris_postgres(env, run, dry_run=False):
                      f"--timeout={READY_TIMEOUT}"])
     if code != 0:
         return [f"Cluster {POLARIS_PG} in {namespace} is not Ready: {out.strip()}"], []
-    problem = settle(run, context, namespace)
+    unchanged = generation is not None and \
+        cluster_generation(run, context, namespace) == generation
+    problem = settle(run, context, namespace, needed=1 if unchanged else SETTLE_READS)
     if problem:
         return [problem], []
+    if unchanged:
+        return [], [f"Step 1: Cluster {POLARIS_PG} in {namespace} is Ready, healthy on one "
+                    f"read; its spec is unchanged by the upgrade (generation {generation})."]
     return [], [f"Step 1: Cluster {POLARIS_PG} in {namespace} is Ready, healthy on "
                 f"{SETTLE_READS} reads {SETTLE_INTERVAL} s apart."]
 
 
-def settle(run, context, namespace, cluster=POLARIS_PG):
-    """None once `cluster` reads healthy with every instance ready SETTLE_READS times in a
-    row; a problem naming its last phase after SETTLE_TIMEOUT seconds."""
+def cluster_generation(run, context, namespace, cluster=POLARIS_PG):
+    """The Cluster's metadata.generation; None when there is none yet or it cannot be read."""
+    code, out = run(["kubectl", "--context", context, "-n", namespace, "get",
+                     f"cluster/{cluster}", "-o", "jsonpath={.metadata.generation}"])
+    return int(out) if code == 0 and out.strip().isdigit() else None
+
+
+def settle(run, context, namespace, cluster=POLARIS_PG, needed=SETTLE_READS):
+    """None once `cluster` reads healthy with every instance ready `needed` times in a row;
+    a problem naming its last phase after SETTLE_TIMEOUT seconds."""
     end, healthy, phase = time.monotonic() + SETTLE_TIMEOUT, 0, ""
     while True:
         code, out = run(["kubectl", "--context", context, "-n", namespace, "get",
@@ -379,11 +397,11 @@ def settle(run, context, namespace, cluster=POLARIS_PG):
         ok = (phase == HEALTHY_PHASE
               and status.get("readyInstances") == read["spec"]["instances"])
         healthy = healthy + 1 if ok else 0
-        if healthy >= SETTLE_READS:
+        if healthy >= needed:
             return None
         if time.monotonic() > end:
             return (f"Cluster {cluster} in {namespace} did not stay healthy for "
-                    f"{SETTLE_READS} reads in {SETTLE_TIMEOUT} s; last phase: {phase}")
+                    f"{needed} reads in {SETTLE_TIMEOUT} s; last phase: {phase}")
         time.sleep(SETTLE_INTERVAL)
 
 
