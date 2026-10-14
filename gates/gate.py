@@ -85,14 +85,16 @@
                   table into gate_catalog on the S3 endpoint and reads it back, and the policy
                   endpoint refuses what the gate's policy does not grant (ADR-026, ADR-031).
   check-restore   proves a restore (ADR-043 §4): an on-demand `Backup` of polaris-pg through
-                  the Barman Cloud Plugin, waited for until completed; then the `Cluster`
+                  the Barman Cloud Plugin, waited for until completed; then a WAL switch on
+                  polaris-pg's primary, waited for until archived, since a backup from a
+                  standby is consistent only past it (#86); then the `Cluster`
                   polaris-pg-restore, one instance bootstrapped from the ObjectStore
                   polaris-backup, its base backup and archived WAL to the latest, waited for
                   until Ready, read with its full-recovery Job's pods every few seconds: each
                   failed pod's logs printed as soon as it fails, before CNPG deletes it, then
                   every pod seen, when it ran and how it ended (#86); then healthy on several
-                  reads in a row, past
-                  CNPG's restart after the recovery; then gates/check_restore.sh in a pod on
+                  reads in a row, past CNPG's restart after the recovery; then
+                  gates/check_restore.sh in a pod on
                   Polaris's PostgreSQL image reads from it, as Polaris, the realm's root
                   principal and gate_catalog.
                   polaris-pg-restore is deleted whatever happened.
@@ -858,6 +860,8 @@ BACKUP_TIMEOUT = 600
 RESTORE_TIMEOUT = 900
 # How often the wait for the restore reads it and its full-recovery pods (#86).
 RESTORE_POLL = 3
+# Seconds polaris-pg's primary has to archive the WAL segment it switched before the restore.
+ARCHIVE_TIMEOUT = 120
 
 
 def backup_manifest(env, name):
@@ -875,6 +879,44 @@ def backup_outcome(backup):
         return status["phase"], status.get("error", "")
     return None
 
+
+def _primary_psql(namespace, primary, sql):
+    return ["kubectl", "--context", CONTEXT, "-n", namespace, "exec", primary, "-c",
+            "postgres", "--", "psql", "-XAtq", "-c", sql]
+
+
+def wal_switch_command(namespace, primary):
+    """Closes the primary's current WAL segment and prints its name (#86)."""
+    return _primary_psql(namespace, primary, "SELECT pg_walfile_name(pg_switch_wal())")
+
+
+def archived_wal_command(namespace, primary):
+    return _primary_psql(namespace, primary,
+                         "SELECT coalesce(last_archived_wal, '') FROM pg_stat_archiver")
+
+
+def wal_archived(segment, last):
+    """Whether the archiver reached `segment`: WAL file names sort by timeline, then
+    position."""
+    return bool(last) and last >= segment
+
+
+def switch_wal(kubectl, namespace):
+    """(problem, note): switches WAL on polaris-pg's primary and waits until the segment it
+    closed is archived. A backup from a standby, CNPG's default target, is consistent only past
+    the WAL archived when it ended; without this the restore failed until the primary's
+    archive_timeout (#86, smoke 38515945485)."""
+    cluster = json.loads(output(kubectl + ["get", f"cluster/{release.POLARIS_PG}", "-o",
+                                           "json"]))
+    primary = cluster["status"]["currentPrimary"]
+    segment = output(wal_switch_command(namespace, primary)).strip()
+    for _ in range(ARCHIVE_TIMEOUT // RESTORE_POLL):
+        if wal_archived(segment, output(archived_wal_command(namespace, primary)).strip()):
+            return None, (f"WAL switched on {primary}: {segment} archived before the "
+                          "restore.")
+        time.sleep(RESTORE_POLL)
+    return (f"WAL segment {segment} from {primary} was not archived within "
+            f"{ARCHIVE_TIMEOUT} s"), None
 
 def restore_cluster(env, image):
     """polaris-pg-restore: one instance bootstrapped from polaris-pg's ObjectStore, with no
@@ -1065,6 +1107,10 @@ def check_restore(env):
     if phase != "completed":
         return [f"Backup {name} of {release.POLARIS_PG} failed: {error}"], []
     notes = [f"Backup {name} of {release.POLARIS_PG} completed through the plugin."]
+    problem, note = switch_wal(kubectl, ns)
+    if problem:
+        return [problem], notes
+    notes.append(note)
     try:
         run(apply, json.dumps(restore_cluster(env, pg["image"])))
         ready, lines = watch_restore(kubectl, ns)
