@@ -5,6 +5,7 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import unittest
 from unittest import mock
 
@@ -211,6 +212,27 @@ class Probe(unittest.TestCase):
         self.assertEqual(by_name["check-network-none-join"][4], "gate-net-none")
         for name in ("check-network-polaris", "check-network-none"):
             self.assertFalse(any(a.startswith("--labels") for a in by_name[name]), name)
+
+    def test_check_network_runs_every_probe_pod_at_once(self):
+        # Each probe waits until all of them have started: run one after another, the first
+        # one's wait breaks and its source has no results.
+        started = threading.Barrier(len(network.source_namespaces(ENV)), timeout=5)
+
+        def subprocess_run(argv, **kwargs):
+            if "run" not in argv:
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            try:
+                started.wait()
+            except threading.BrokenBarrierError:
+                return subprocess.CompletedProcess(argv, 1, "", "")
+            out = "".join(f"{a} blocked\n" for a in argv[argv.index("python3") + 3:])
+            return subprocess.CompletedProcess(argv, 0, out, "")
+
+        with mock.patch.object(gate.subprocess, "run", side_effect=subprocess_run):
+            problems, lines = gate.check_network(
+                ENV, {"standin_images": {"recorder": {"image": PYTHON}}})
+        self.assertEqual([p for p in problems if "no result" in p], [])
+        self.assertEqual(len(lines) + len(problems), len(network.CASES))
 
     def test_the_script_reports_reached_and_refused_from_real_sockets(self):
         # A listening port and a closed one, on this machine.
