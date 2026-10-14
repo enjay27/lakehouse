@@ -1,7 +1,7 @@
 """Polaris's network policies on the gate (ADR-048 §5, §6). Never part of a release.
 
 - **Gate-only callers (§5):** `gate_policies(env)` is a v1 List of two allow policies in
-  NS_CATALOG_POLARIS that `gate.py gate-policies` applies just before this commit's release:
+  NS_CATALOG_POLARIS that `gate.py gate-policies` applies before the first release installed:
   the gate's check pods (label CHECK_LABEL) reach every port of every pod, and the PostgreSQL
   recorder in NS_STANDINS reaches the CNPG instances on 5432 (ADR-034).
 - **check-network (§6, ADR-046 §4):** one namespace per caller class, labelled as the gate's
