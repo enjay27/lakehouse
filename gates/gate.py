@@ -88,8 +88,10 @@
                   the Barman Cloud Plugin, waited for until completed; then the `Cluster`
                   polaris-pg-restore, one instance bootstrapped from the ObjectStore
                   polaris-backup, its base backup and archived WAL to the latest, waited for
-                  until Ready; how many pods its full-recovery Job ran and how each ended, with
-                  each failed pod's logs (#86); then healthy on several reads in a row, past
+                  until Ready, read with its full-recovery Job's pods every few seconds: each
+                  failed pod's logs printed as soon as it fails, before CNPG deletes it, then
+                  every pod seen, when it ran and how it ended (#86); then healthy on several
+                  reads in a row, past
                   CNPG's restart after the recovery; then gates/check_restore.sh in a pod on
                   Polaris's PostgreSQL image reads from it, as Polaris, the realm's root
                   principal and gate_catalog.
@@ -853,7 +855,9 @@ def check_iceberg_commands(env, image, name):
 RESTORE = "polaris-pg-restore"
 RESTORE_SIZE = "1Gi"
 BACKUP_TIMEOUT = 600
-RESTORE_TIMEOUT = "900s"
+RESTORE_TIMEOUT = 900
+# How often the wait for the restore reads it and its full-recovery pods (#86).
+RESTORE_POLL = 3
 
 
 def backup_manifest(env, name):
@@ -963,34 +967,88 @@ def _container_end(status):
     return f"{status['name']}: {text}" + (f", {restarts} restarts" if restarts else "")
 
 
+def _clock(timestamp):
+    return timestamp[11:19] if timestamp else "?"
+
+
 def recovery_report(pods):
-    """(lines, failed pod names): how many pods the full-recovery Job ran and how each ended,
-    oldest first. #86: it ran six on the gate before one completed."""
+    """(lines, failed pod names): how many pods the full-recovery Job ran, when each ran and
+    how it ended, oldest first. #86: it ran six on the gate before one completed."""
     items = sorted(pods.get("items", []), key=lambda p: p["metadata"]["creationTimestamp"])
     failed = [p["metadata"]["name"] for p in items if p["status"].get("phase") == "Failed"]
     lines = [f"Full recovery of {RESTORE}: {len(items)} pods, {len(failed)} failed."]
     for pod in items:
         statuses = (pod["status"].get("initContainerStatuses", [])
                     + pod["status"].get("containerStatuses", []))
-        lines.append(f"  {pod['metadata']['name']}: {pod['status'].get('phase')}; "
+        ends = [c["state"]["terminated"].get("finishedAt") for c in statuses
+                if "terminated" in c.get("state", {})]
+        when = f"created {_clock(pod['metadata']['creationTimestamp'])}"
+        if any(ends):
+            when += f", ended {_clock(max(e for e in ends if e))}"
+        lines.append(f"  {pod['metadata']['name']}: {pod['status'].get('phase')}, {when}; "
                      + "; ".join(_container_end(c) for c in statuses))
     return lines, failed
 
 
-def report_recovery(kubectl, namespace):
-    """recovery_report's lines, after printing each failed pod's logs."""
-    listed = subprocess.run(recovery_pods_command(namespace), capture_output=True, text=True,
-                            check=False)
+def cluster_ready(cluster):
+    return any(c.get("type") == "Ready" and c.get("status") == "True"
+               for c in cluster.get("status", {}).get("conditions", []))
+
+
+def remember_pods(seen, pods):
+    """Keeps each pod's latest state in `seen`, by name, after it is gone too; returns the
+    pods that failed since the last read, oldest first, each named once."""
+    newly = []
+    for pod in sorted(pods.get("items", []), key=lambda p: p["metadata"]["creationTimestamp"]):
+        name = pod["metadata"]["name"]
+        before = seen.get(name, {}).get("status", {}).get("phase")
+        seen[name] = pod
+        if pod["status"].get("phase") == "Failed" and before != "Failed":
+            newly.append(name)
+    return newly
+
+
+def _read_json(argv):
+    """(the command's JSON, None) or (None, why it could not be read)."""
+    done = subprocess.run(argv, capture_output=True, text=True, check=False)
     try:
-        lines, failed = recovery_report(json.loads(listed.stdout))
-    except (ValueError, KeyError):
-        return [f"Full recovery of {RESTORE}: its pods could not be read "
-                f"({listed.stderr.strip() or 'no output'})."]
-    for name in failed:
-        print(f"--- logs of {name}", flush=True)
-        subprocess.run(kubectl + ["logs", name, "--all-containers", "--prefix", "--tail=60"],
-                       check=False)
-    return lines
+        if done.returncode != 0:
+            raise ValueError(done.stderr.strip() or f"exit {done.returncode}")
+        return json.loads(done.stdout), None
+    except ValueError as e:
+        return None, str(e)
+
+
+def watch_restore(kubectl, namespace):
+    """Waits up to RESTORE_TIMEOUT s for the restore to get Ready, reading it and its
+    full-recovery pods every RESTORE_POLL s. Each pod's logs are printed as soon as it is seen
+    failed, before CNPG deletes it (#86). A read that fails is counted and the wait goes on.
+    Returns (ready, recovery_report's lines for every pod seen)."""
+    seen, unread, end = {}, [], time.monotonic() + RESTORE_TIMEOUT
+    while True:
+        cluster, _ = _read_json(kubectl + ["get", f"cluster/{RESTORE}", "-o", "json"])
+        pods, why = _read_json(recovery_pods_command(namespace))
+        if pods is None:
+            unread.append(why)
+        else:
+            try:
+                failed = remember_pods(seen, pods)
+            except (KeyError, TypeError) as e:
+                unread.append(f"unexpected pod list: {e}")
+                failed = []
+            for name in failed:
+                print(f"--- logs of {name}, failed", flush=True)
+                subprocess.run(kubectl + ["logs", name, "--all-containers", "--prefix",
+                                          "--tail=100"], check=False)
+        ready = cluster is not None and cluster_ready(cluster)
+        if ready or time.monotonic() > end:
+            break
+        time.sleep(RESTORE_POLL)
+    lines, _ = recovery_report({"items": list(seen.values())})
+    if unread:
+        lines.append(f"  {len(unread)} read{'' if len(unread) == 1 else 's'} of the pods "
+                     f"failed: {unread[-1]}")
+    return ready, lines
 
 
 def check_restore(env):
@@ -1009,10 +1067,9 @@ def check_restore(env):
     notes = [f"Backup {name} of {release.POLARIS_PG} completed through the plugin."]
     try:
         run(apply, json.dumps(restore_cluster(env, pg["image"])))
-        ready = subprocess.run(kubectl + ["wait", "--for=condition=Ready", f"cluster/{RESTORE}",
-                                          f"--timeout={RESTORE_TIMEOUT}"], check=False)
-        notes += report_recovery(kubectl, ns)
-        if ready.returncode != 0:
+        ready, lines = watch_restore(kubectl, ns)
+        notes += lines
+        if not ready:
             return [f"Cluster {RESTORE} did not get Ready from "
                     f"{release.POLARIS_BACKUP_STORE}"], notes
         # CNPG restarts the restored instance once after the recovery: Ready, then refusing
