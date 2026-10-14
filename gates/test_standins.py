@@ -28,13 +28,13 @@ TLS = ("certificate-pem\n", "key-pem\n")
 PROMETHEUS_CONFIG = "global:\n  scrape_interval: 10s\nscrape_configs: []\n"
 
 
-def items(env=ENV):
+def items(env=ENV, **kwargs):
     return standins.manifests(env, PINS, "package polaris.authz\n", "# proxy.py\n", TLS,
-                              PROMETHEUS_CONFIG)["items"]
+                              PROMETHEUS_CONFIG, **kwargs)["items"]
 
 
-def objects(env=ENV):
-    return {(o["kind"], o["metadata"]["name"]): o for o in items(env)}
+def objects(env=ENV, **kwargs):
+    return {(o["kind"], o["metadata"]["name"]): o for o in items(env, **kwargs)}
 
 
 def container(deployment):
@@ -274,6 +274,57 @@ class Prometheus(unittest.TestCase):
         self.assertEqual(svc["selector"], {"app.kubernetes.io/name": "prometheus"})
 
 
+class Direct(unittest.TestCase):
+    """ADR-053 §4: a stress install points Polaris at SeaweedFS and OPA directly, never through
+    the recorder, and both run under a CPU limit so the run can tell when they are the limit."""
+
+    LIMITS = {"seaweedfs": "1", "opa": "500m"}
+
+    def test_the_default_list_is_the_one_smoke_has_always_applied(self):
+        self.assertEqual(items(), items(direct=False))
+        for name in ("seaweedfs", "opa"):
+            with self.subTest(name=name):
+                self.assertNotIn("resources", container(objects()[("Deployment", name)]))
+
+    def test_seaweedfs_and_opa_also_admit_polaris_namespace_on_their_own_port(self):
+        policies = {name: o["spec"] for (kind, name), o in
+                    objects(direct=True, cpu_limits=self.LIMITS).items()
+                    if kind == "NetworkPolicy"}
+        default = {name: o["spec"] for (kind, name), o in objects().items()
+                   if kind == "NetworkPolicy"}
+        for name, port in (("seaweedfs", 8333), ("opa", 8181)):
+            with self.subTest(name=name):
+                (rule,) = policies[name]["ingress"]
+                self.assertEqual(rule["ports"], [{"protocol": "TCP", "port": port}])
+                self.assertEqual(rule["from"], default[name]["ingress"][0]["from"] + [
+                    {"namespaceSelector": {"matchLabels": {
+                        "kubernetes.io/metadata.name": "catalog-polaris"}}}])
+        for name in ("default-deny-ingress", "recorder", "prometheus"):
+            with self.subTest(name=name):
+                self.assertEqual(policies[name], default[name])
+
+    def test_seaweedfs_and_opa_run_under_the_cpu_limit_given(self):
+        found = objects(direct=True, cpu_limits=self.LIMITS)
+        for name, cpu in self.LIMITS.items():
+            with self.subTest(name=name):
+                self.assertEqual(container(found[("Deployment", name)])["resources"],
+                                 {"limits": {"cpu": cpu}})
+
+    def test_direct_needs_a_limit_for_both(self):
+        with self.assertRaises(ValueError):
+            items(direct=True, cpu_limits={"seaweedfs": "1"})
+        with self.assertRaises(ValueError):
+            items(direct=True)
+
+    def test_only_the_policies_and_the_two_containers_differ(self):
+        default = objects()
+        direct = objects(direct=True, cpu_limits=self.LIMITS)
+        self.assertEqual(sorted(default), sorted(direct))
+        changed = sorted(key for key in default if default[key] != direct[key])
+        self.assertEqual(changed, [("Deployment", "opa"), ("Deployment", "seaweedfs"),
+                                   ("NetworkPolicy", "opa"), ("NetworkPolicy", "seaweedfs")])
+
+
 class Cases(unittest.TestCase):
     def test_each_case_has_a_name_a_decision_and_polaris_input(self):
         cases = standins.load_cases(os.path.join(HERE, "opa", "cases.json"))
@@ -283,6 +334,28 @@ class Cases(unittest.TestCase):
             with self.subTest(case=c["name"]):
                 self.assertEqual(set(c["input"]), {"actor", "action", "resource", "context"})
                 self.assertIsInstance(c["allow"], bool)
+
+    def test_the_stress_principal_is_allowed_in_its_catalog_and_refused_outside_it(self):
+        # ADR-053: gate_stress may do what the stress scenario needs, in gate_stress_catalog only.
+        cases = [c for c in standins.load_cases(os.path.join(HERE, "opa", "cases.json"))
+                 if c["input"]["actor"]["principal"] == "gate_stress"]
+        allowed = {c["input"]["action"] for c in cases if c["allow"]}
+        self.assertEqual(allowed, set(standins.STRESS_ACTIONS))
+        refused = [c for c in cases if not c["allow"]]
+        self.assertTrue(any(c["input"]["action"] in standins.STRESS_ACTIONS for c in refused),
+                        "an action it may do, refused in another catalog")
+        self.assertTrue(any(c["input"]["action"] not in standins.STRESS_ACTIONS
+                            for c in refused), "an action it may not do, in its own catalog")
+
+    def test_the_policy_names_every_stress_action(self):
+        with open(os.path.join(HERE, "opa", "policy.rego"), encoding="utf-8") as f:
+            rego = f.read()
+        block = rego[rego.index('input.actor.principal == "gate_stress"'):]
+        block = block[:block.index("}\n}")]
+        for action in standins.STRESS_ACTIONS:
+            with self.subTest(action=action):
+                self.assertIn(f'"{action}"', block)
+        self.assertIn('in_catalog(target, "gate_stress_catalog")', block)
 
 
 if __name__ == "__main__":

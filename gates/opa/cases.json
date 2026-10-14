@@ -542,6 +542,457 @@
           "request_id": "00000000-0000-0000-0000-000000000000"
         }
       }
+    },
+    {
+      "name": "gate_stress lists the namespaces of gate_stress_catalog",
+      "allow": true,
+      "input": {
+        "actor": {
+          "principal": "gate_stress",
+          "roles": [
+            "gate_stress"
+          ]
+        },
+        "action": "LIST_NAMESPACES",
+        "resource": {
+          "targets": [
+            {
+              "type": "CATALOG",
+              "name": "gate_stress_catalog",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "gate_stress creates a namespace in gate_stress_catalog",
+      "allow": true,
+      "input": {
+        "actor": {
+          "principal": "gate_stress",
+          "roles": [
+            "gate_stress"
+          ]
+        },
+        "action": "CREATE_NAMESPACE",
+        "resource": {
+          "targets": [
+            {
+              "type": "CATALOG",
+              "name": "gate_stress_catalog",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "gate_stress lists the tables of a namespace in gate_stress_catalog",
+      "allow": true,
+      "input": {
+        "actor": {
+          "principal": "gate_stress",
+          "roles": [
+            "gate_stress"
+          ]
+        },
+        "action": "LIST_TABLES",
+        "resource": {
+          "targets": [
+            {
+              "type": "NAMESPACE",
+              "name": "ns1",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                },
+                {
+                  "type": "CATALOG",
+                  "name": "gate_stress_catalog",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "gate_stress creates a table in gate_stress_catalog",
+      "allow": true,
+      "input": {
+        "actor": {
+          "principal": "gate_stress",
+          "roles": [
+            "gate_stress"
+          ]
+        },
+        "action": "CREATE_TABLE_DIRECT",
+        "resource": {
+          "targets": [
+            {
+              "type": "TABLE_LIKE",
+              "name": "t1",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                },
+                {
+                  "type": "CATALOG",
+                  "name": "gate_stress_catalog",
+                  "parents": []
+                },
+                {
+                  "type": "NAMESPACE",
+                  "name": "ns1",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "gate_stress loads a table in gate_stress_catalog",
+      "allow": true,
+      "input": {
+        "actor": {
+          "principal": "gate_stress",
+          "roles": [
+            "gate_stress"
+          ]
+        },
+        "action": "LOAD_TABLE",
+        "resource": {
+          "targets": [
+            {
+              "type": "TABLE_LIKE",
+              "name": "t1",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                },
+                {
+                  "type": "CATALOG",
+                  "name": "gate_stress_catalog",
+                  "parents": []
+                },
+                {
+                  "type": "NAMESPACE",
+                  "name": "ns1",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "gate_stress checks a table exists in gate_stress_catalog",
+      "allow": true,
+      "input": {
+        "actor": {
+          "principal": "gate_stress",
+          "roles": [
+            "gate_stress"
+          ]
+        },
+        "action": "TABLE_EXISTS",
+        "resource": {
+          "targets": [
+            {
+              "type": "TABLE_LIKE",
+              "name": "t1",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                },
+                {
+                  "type": "CATALOG",
+                  "name": "gate_stress_catalog",
+                  "parents": []
+                },
+                {
+                  "type": "NAMESPACE",
+                  "name": "ns1",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "gate_stress adds a snapshot to a table in gate_stress_catalog",
+      "allow": true,
+      "input": {
+        "actor": {
+          "principal": "gate_stress",
+          "roles": [
+            "gate_stress"
+          ]
+        },
+        "action": "ADD_TABLE_SNAPSHOT",
+        "resource": {
+          "targets": [
+            {
+              "type": "TABLE_LIKE",
+              "name": "t1",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                },
+                {
+                  "type": "CATALOG",
+                  "name": "gate_stress_catalog",
+                  "parents": []
+                },
+                {
+                  "type": "NAMESPACE",
+                  "name": "ns1",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "gate_stress moves a table's snapshot ref in gate_stress_catalog",
+      "allow": true,
+      "input": {
+        "actor": {
+          "principal": "gate_stress",
+          "roles": [
+            "gate_stress"
+          ]
+        },
+        "action": "SET_TABLE_SNAPSHOT_REF",
+        "resource": {
+          "targets": [
+            {
+              "type": "TABLE_LIKE",
+              "name": "t1",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                },
+                {
+                  "type": "CATALOG",
+                  "name": "gate_stress_catalog",
+                  "parents": []
+                },
+                {
+                  "type": "NAMESPACE",
+                  "name": "ns1",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "gate_stress loads a table in another catalog",
+      "allow": false,
+      "input": {
+        "actor": {
+          "principal": "gate_stress",
+          "roles": [
+            "gate_stress"
+          ]
+        },
+        "action": "LOAD_TABLE",
+        "resource": {
+          "targets": [
+            {
+              "type": "TABLE_LIKE",
+              "name": "t1",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                },
+                {
+                  "type": "CATALOG",
+                  "name": "gate_catalog",
+                  "parents": []
+                },
+                {
+                  "type": "NAMESPACE",
+                  "name": "ns1",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "gate_stress drops a table in gate_stress_catalog",
+      "allow": false,
+      "input": {
+        "actor": {
+          "principal": "gate_stress",
+          "roles": [
+            "gate_stress"
+          ]
+        },
+        "action": "DROP_TABLE_WITHOUT_PURGE",
+        "resource": {
+          "targets": [
+            {
+              "type": "TABLE_LIKE",
+              "name": "t1",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                },
+                {
+                  "type": "CATALOG",
+                  "name": "gate_stress_catalog",
+                  "parents": []
+                },
+                {
+                  "type": "NAMESPACE",
+                  "name": "ns1",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "gate_stress loads a table asking for vended credentials",
+      "allow": false,
+      "input": {
+        "actor": {
+          "principal": "gate_stress",
+          "roles": [
+            "gate_stress"
+          ]
+        },
+        "action": "LOAD_TABLE_WITH_READ_DELEGATION",
+        "resource": {
+          "targets": [
+            {
+              "type": "TABLE_LIKE",
+              "name": "t1",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                },
+                {
+                  "type": "CATALOG",
+                  "name": "gate_stress_catalog",
+                  "parents": []
+                },
+                {
+                  "type": "NAMESPACE",
+                  "name": "ns1",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "gate_stress creates a catalog",
+      "allow": false,
+      "input": {
+        "actor": {
+          "principal": "gate_stress",
+          "roles": [
+            "gate_stress"
+          ]
+        },
+        "action": "CREATE_CATALOG",
+        "resource": {
+          "targets": [
+            {
+              "type": "ROOT",
+              "name": "root_container",
+              "parents": []
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
     }
   ]
 }
