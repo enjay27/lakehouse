@@ -470,6 +470,12 @@ class InstallTimeline(unittest.TestCase):
                          gate.dt.datetime(2026, 10, 14, 6, 44, 5, 811736,
                                           tzinfo=gate.dt.timezone.utc))
 
+    def test_a_revision_without_a_time_is_left_out(self):
+        # Helm 4 omits a zero `updated` from history's JSON.
+        entries = gate.timeline_entries(self.SINCE, {("catalog-polaris", "polaris"): [
+            {"revision": 1, "status": "pending-install"}]}, {}, {}, {}, [])
+        self.assertEqual(entries, [])
+
     def test_lines_give_seconds_from_the_start_and_since_the_line_before(self):
         lines = gate.timeline_lines(self.entries()[:3], self.SINCE)
         self.assertEqual(lines, [
@@ -518,6 +524,9 @@ class InstallTimeline(unittest.TestCase):
 
         with mock.patch.object(gate.subprocess, "run", side_effect=subprocess_run):
             lines = gate.measure_timeline(self.SINCE, self.COMMANDS)
+        # Helm 4, as pinned, lists every release without --all, and has no such flag.
+        self.assertEqual(calls[0], ["helm", "--kube-context", gate.CONTEXT, "list",
+                                    "--all-namespaces", "-o", "json"])
         self.assertIn(["helm", "--kube-context", gate.CONTEXT, "-n", "catalog-polaris",
                        "history", "polaris", "-o", "json"], calls)
         self.assertIn("helm catalog-polaris/polaris revision 1 deployed", "\n".join(lines))

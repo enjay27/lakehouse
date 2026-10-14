@@ -639,8 +639,9 @@ def timeline_entries(since, histories, jobs, deployments, clusters, commands):
     entries = []
     for (namespace, name), revisions in histories.items():
         for r in revisions:
-            entries.append((r["updated"], f"helm {namespace}/{name} revision {r['revision']} "
-                                          f"{r['status']}"))
+            if r.get("updated"):
+                entries.append((r["updated"], f"helm {namespace}/{name} revision "
+                                              f"{r['revision']} {r['status']}"))
     for job in jobs.get("items", []):
         where, status = "{namespace}/{name}".format(**job["metadata"]), job.get("status", {})
         if status.get("startTime"):
@@ -695,7 +696,7 @@ def measure_timeline(since, commands):
         histories = {
             (r["namespace"], r["name"]): read(helm + ["-n", r["namespace"], "history",
                                                       r["name"], "-o", "json"])
-            for r in read(helm + ["list", "--all-namespaces", "--all", "-o", "json"])}
+            for r in read(helm + ["list", "--all-namespaces", "-o", "json"])}
         kubectl = ["kubectl", "--context", CONTEXT, "get", "--all-namespaces", "-o", "json"]
         jobs, deployments, clusters = (read(kubectl[:4] + [kind] + kubectl[4:])
                                        for kind in ("jobs", "deployments",
