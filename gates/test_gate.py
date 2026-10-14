@@ -152,6 +152,13 @@ class Commands(unittest.TestCase):
         self.assertEqual(create[create.index("--image") + 1], self.PINS["node_image"]["image"])
         self.assertTrue(create[create.index("--config") + 1].endswith("gates/kind.yaml"))
 
+    def test_up_takes_another_kind_config_for_the_failover_measurement(self):
+        steps = gate.up_commands(self.PINS, "/tmp/chart.tgz", "cnpg-system", self.MANIFESTS,
+                                 kind_config="/tmp/failover-kind.yaml")
+        create = steps[0][0]
+        self.assertEqual(create[create.index("--config") + 1], "/tmp/failover-kind.yaml")
+        self.assertEqual(steps[1:], self.commands()[1:])
+
     def test_up_installs_cnpg_from_the_chart_archive_and_waits(self):
         steps = self.commands()
         helm, stdin = steps[self.helm_index(steps)]
