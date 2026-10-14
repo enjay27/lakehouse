@@ -42,10 +42,10 @@
       "source": "sha256 of the release asset downloaded from GitHub, read 2026-10-12; no published checksum for it; released 2026-09-11 (ADR-043)"
     },
     "barman_cloud_plugin": {
-      "version": "v0.15.0",
-      "url": "https://github.com/cloudnative-pg/plugin-barman-cloud/releases/download/v0.15.0/manifest.yaml",
-      "sha256": "1c483eae12a7424ad28ac66bdfee771b510ee8e234cb8756c3ade7254cef2fad",
-      "source": "sha256 of the release asset downloaded from GitHub, read 2026-10-12; no published checksum for it; released 2026-09-03, v0.15.1 under two weeks old (ADR-043)"
+      "version": "v0.15.1",
+      "url": "https://github.com/cloudnative-pg/plugin-barman-cloud/releases/download/v0.15.1/manifest.yaml",
+      "sha256": "8f377ff4a7d0d3f74fc64b0f7ac4f449fc38ca9e83a40107cca2f9315a9bd920",
+      "source": "sha256 of the release asset downloaded from GitHub, read 2026-10-14; no published checksum for it; released 2026-09-30 (ADR-043)"
     }
   },
   "kubernetes_schemas": {
