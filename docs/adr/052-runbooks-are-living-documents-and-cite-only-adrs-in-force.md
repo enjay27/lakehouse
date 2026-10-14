@@ -1,6 +1,6 @@
 # ADR-052: Runbooks are living documents and cite only ADRs in force
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-14
 - **Related:** ADR-000, ADR-043
 
