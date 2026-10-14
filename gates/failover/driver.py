@@ -121,11 +121,15 @@ def primary_of(env):
     return cluster["status"]["currentPrimary"]
 
 
-def psql(env, sql, database="postgres"):
+def psql_command(env, sql, database="postgres"):
     """`sql` on the primary, as postgres through its local socket."""
-    return must(kubectl(env["NS_CATALOG_POLARIS"], "exec", primary_of(env), "-c", "postgres",
-                        "--", "psql", "-v", "ON_ERROR_STOP=1", "-d", database, "-At", "-F",
-                        ",", "-c", sql))
+    return kubectl(env["NS_CATALOG_POLARIS"], "exec", primary_of(env), "-c", "postgres", "--",
+                   "psql", "-v", "ON_ERROR_STOP=1", "-d", database, "-At", "-F", ",", "-c",
+                   sql)
+
+
+def psql(env, sql, database="postgres"):
+    return must(psql_command(env, sql, database))
 
 
 def instances(env):
@@ -136,13 +140,15 @@ def instances(env):
 
 def c1_applied(env):
     """C1's settings on the running objects (ADR-016): every instance's readiness probe, and
-    the primary's synchronous standbys."""
+    the primary's synchronous standbys. The patch restarts the instances, so a primary that
+    does not answer yet is not applied yet."""
     want = setups.C1_CLUSTER["probes"]["readiness"]["periodSeconds"]
     for pod in instances(env)["items"]:
         probe = next(c for c in pod["spec"]["containers"] if c["name"] == "postgres")
         if probe.get("readinessProbe", {}).get("periodSeconds") != want:
             return False
-    return psql(env, "SHOW synchronous_standby_names").strip().startswith("ANY 1 ")
+    code, out = call(psql_command(env, "SHOW synchronous_standby_names"))
+    return code == 0 and out.strip().startswith("ANY 1 ")
 
 
 def settle(env):
