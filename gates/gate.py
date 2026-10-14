@@ -85,10 +85,11 @@
                   the Barman Cloud Plugin, waited for until completed; then the `Cluster`
                   polaris-pg-restore, one instance bootstrapped from the ObjectStore
                   polaris-backup, its base backup and archived WAL to the latest, waited for
-                  until Ready and then healthy on several reads in a row, past CNPG's restart
-                  after the recovery; then gates/check_restore.sh in a pod on Polaris's
-                  PostgreSQL image reads from it, as Polaris, the realm's root principal and
-                  gate_catalog.
+                  until Ready; how many pods its full-recovery Job ran and how each ended, with
+                  each failed pod's logs (#86); then healthy on several reads in a row, past
+                  CNPG's restart after the recovery; then gates/check_restore.sh in a pod on
+                  Polaris's PostgreSQL image reads from it, as Polaris, the realm's root
+                  principal and gate_catalog.
                   polaris-pg-restore is deleted whatever happened.
 
   gate-policies   applies the gate's own allow policies in Polaris's namespace (gates/network.py,
@@ -838,6 +839,53 @@ def check_metrics(env, pins):
     return metrics.problems(metrics.parse_answer(out.stdout), pods)
 
 
+def recovery_pods_command(namespace):
+    """The restore's full-recovery Job pods, failed ones included, as JSON (#86)."""
+    return ["kubectl", "--context", CONTEXT, "-n", namespace, "get", "pods", "-l",
+            f"cnpg.io/cluster={RESTORE},cnpg.io/jobRole=full-recovery", "-o", "json"]
+
+
+def _container_end(status):
+    state = status.get("state", {})
+    if "terminated" in state:
+        t = state["terminated"]
+        text = f"terminated {t.get('reason', '?')} (exit {t.get('exitCode', '?')})"
+    else:
+        text = next(iter(state), "unknown")
+    restarts = status.get("restartCount", 0)
+    return f"{status['name']}: {text}" + (f", {restarts} restarts" if restarts else "")
+
+
+def recovery_report(pods):
+    """(lines, failed pod names): how many pods the full-recovery Job ran and how each ended,
+    oldest first. #86: it ran six on the gate before one completed."""
+    items = sorted(pods.get("items", []), key=lambda p: p["metadata"]["creationTimestamp"])
+    failed = [p["metadata"]["name"] for p in items if p["status"].get("phase") == "Failed"]
+    lines = [f"Full recovery of {RESTORE}: {len(items)} pods, {len(failed)} failed."]
+    for pod in items:
+        statuses = (pod["status"].get("initContainerStatuses", [])
+                    + pod["status"].get("containerStatuses", []))
+        lines.append(f"  {pod['metadata']['name']}: {pod['status'].get('phase')}; "
+                     + "; ".join(_container_end(c) for c in statuses))
+    return lines, failed
+
+
+def report_recovery(kubectl, namespace):
+    """recovery_report's lines, after printing each failed pod's logs."""
+    listed = subprocess.run(recovery_pods_command(namespace), capture_output=True, text=True,
+                            check=False)
+    try:
+        lines, failed = recovery_report(json.loads(listed.stdout))
+    except (ValueError, KeyError):
+        return [f"Full recovery of {RESTORE}: its pods could not be read "
+                f"({listed.stderr.strip() or 'no output'})."]
+    for name in failed:
+        print(f"--- logs of {name}", flush=True)
+        subprocess.run(kubectl + ["logs", name, "--all-containers", "--prefix", "--tail=60"],
+                       check=False)
+    return lines
+
+
 def check_restore(env):
     """Backs up polaris-pg, restores it into polaris-pg-restore, reads it, deletes it.
     Returns (problems, notes)."""
@@ -856,6 +904,7 @@ def check_restore(env):
         run(apply, json.dumps(restore_cluster(env, pg["image"])))
         ready = subprocess.run(kubectl + ["wait", "--for=condition=Ready", f"cluster/{RESTORE}",
                                           f"--timeout={RESTORE_TIMEOUT}"], check=False)
+        notes += report_recovery(kubectl, ns)
         if ready.returncode != 0:
             return [f"Cluster {RESTORE} did not get Ready from "
                     f"{release.POLARIS_BACKUP_STORE}"], notes
