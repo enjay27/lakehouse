@@ -1,4 +1,4 @@
-"""Release tags (ADR-033, ADR-021): their names, the gate a release reads, and the notes.
+"""Release tags (ADR-033, ADR-051): their names, the gate a release reads, and the notes.
 
 A release is the tag `platform-YYYY.MM.DD`, `.N` appended (from 2) for a later release the
 same day. The release workflow tags an `rc` commit only when every check of the release gate

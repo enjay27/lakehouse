@@ -4,7 +4,7 @@
 # then the gate's Secrets (gates/gate.py secrets, ADR-006), the stand-ins for other teams'
 # services (gates/gate.py standins, ADR-031), the latest release the commit
 # contains (gates/gate.py released_tags), installed from a checkout of its tag, and a
-# server-side dry-run of this commit's release over it (ADR-021); with no tag, this commit's
+# server-side dry-run of this commit's release over it (ADR-051); with no tag, this commit's
 # alone. The release gate calls it on every PR into rc (ADR-033). Not a PR check
 # into main, so auto-merge.yml does not list it.
 name: Dry-run
@@ -51,7 +51,15 @@ jobs:
       - name: The stand-ins, SeaweedFS and OPA (gate only, ADR-031)
         run: python3 gates/gate.py standins
 
-      - name: Install the last release, then dry-run this commit over it (ADR-021)
+      - name: Install the last release, then dry-run this commit over it (ADR-051)
         run: |
           set -euo pipefail  # the default `bash -e` would let tee hide a failed install
           python3 gates/gate.py install --dry-run | tee -a "$GITHUB_STEP_SUMMARY"
+
+  delete-gate-branch:
+    # The run's gate branch goes when the run ends, pass, fail or cancelled (ADR-049).
+    needs: [dry-run]
+    if: always() && startsWith(github.ref, 'refs/heads/gate/')
+    permissions:
+      contents: write
+    uses: ./.github/workflows/delete-gate-branch.yml

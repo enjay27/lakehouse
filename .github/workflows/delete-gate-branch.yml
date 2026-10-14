@@ -1,0 +1,57 @@
+# Deletes the calling run's gate branch when that run ends, pass, fail or cancelled (ADR-049).
+# Every gate workflow, any workflow a push to gate/** triggers, calls it as its last job with
+# `if: always()` and the refs/heads/gate/ guard; scripts/test_gate_workflows.py checks that.
+# The branch is deleted only while it still points at the run's commit (a lease), so a run that
+# a newer push cancelled keeps the newer commit's branch. A failed delete is a warning and never
+# changes the run's conclusion, which gate-check reads (ADR-039); branch-cleanup.yml deletes
+# what is left (ADR-032). In a called workflow, github.ref and github.sha are the caller's.
+name: Delete gate branch
+
+on:
+  workflow_call: {}
+
+permissions: {}
+
+jobs:
+  delete:
+    name: delete gate branch
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Delete this run's gate branch while it still points at this run's commit
+        env:
+          TOKEN: ${{ github.token }}
+          SERVER: ${{ github.server_url }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -u
+          case "$REF" in
+            refs/heads/gate/*) ;;
+            *) echo "$REF is not a gate branch: nothing to delete."; exit 0 ;;
+          esac
+          remote="https://x-access-token:${TOKEN}@${SERVER#https://}/${REPO}.git"
+          if ! current=$(git ls-remote "$remote" "$REF"); then
+            echo "::warning::Could not read $REF; branch-cleanup.yml deletes it later (ADR-049)."
+            exit 0
+          fi
+          current=${current%%[[:space:]]*}
+          if [ -z "$current" ]; then
+            echo "$REF is already gone."
+            exit 0
+          fi
+          if [ "$current" != "$SHA" ]; then
+            echo "$REF now points at $current, a newer push: kept for that run."
+            exit 0
+          fi
+          git init -q "$RUNNER_TEMP/delete-gate-branch"
+          cd "$RUNNER_TEMP/delete-gate-branch"
+          if git push --force-with-lease="$REF:$SHA" "$remote" ":$REF"; then
+            echo "Deleted $REF at $SHA."
+          else
+            echo "::warning::Could not delete $REF; branch-cleanup.yml deletes it later (ADR-049)."
+          fi
+          exit 0

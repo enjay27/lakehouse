@@ -3,7 +3,7 @@
   "type": "object",
   "additionalProperties": false,
   "required": ["instances", "image", "podAntiAffinityType", "storage", "database", "owner",
-               "credentialsSecret"],
+               "credentialsSecret", "backup"],
   "properties": {
     "instances": {"type": "integer", "minimum": 1},
     "image": {"type": "string", "pattern": "^[^@\\s]+:[^@\\s]+@sha256:[0-9a-f]{64}$"},
@@ -19,6 +19,18 @@
     },
     "database": {"type": "string", "minLength": 1},
     "owner": {"type": "string", "minLength": 1},
-    "credentialsSecret": {"type": "string", "minLength": 1}
+    "credentialsSecret": {"type": "string", "minLength": 1},
+    "backup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["endpointURL", "bucket", "credentialsSecret", "retention", "schedule"],
+      "properties": {
+        "endpointURL": {"type": "string", "pattern": "^https?://[^\\s/]+(/\\S*)?$"},
+        "bucket": {"type": "string", "pattern": "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"},
+        "credentialsSecret": {"type": "string", "minLength": 1},
+        "retention": {"type": "string", "pattern": "^[1-9][0-9]*[dwm]$"},
+        "schedule": {"type": "string", "minLength": 1}
+      }
+    }
   }
 }

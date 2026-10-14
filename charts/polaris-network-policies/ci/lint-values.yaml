@@ -1,0 +1,11 @@
+# What install/release.py passes from .env, with example labels that name no real system
+# (ADR-002): read by helm lint in .github/workflows/static.yml and by the chart's tests, never
+# installed. The chart has no default for the namespaces, so it is linted with them.
+callers:
+  gateway: {key: example.org/caller, value: gateway}
+  query: {key: example.org/caller, value: query}
+  metrics: {key: example.org/caller, value: metrics}
+  ingress: {key: example.org/caller, value: ingress}
+namespaces:
+  datahub: catalog-datahub
+  operator: cnpg-system

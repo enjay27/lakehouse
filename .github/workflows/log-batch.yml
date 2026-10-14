@@ -124,3 +124,11 @@ jobs:
         run: |
           set -euo pipefail
           python3 gates/log_batch_gate.py run "$RUNNER_TEMP/fixtures" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  delete-gate-branch:
+    # The run's gate branch goes when the run ends, pass, fail or cancelled (ADR-049).
+    needs: [changes, fixtures, gate]
+    if: always() && startsWith(github.ref, 'refs/heads/gate/')
+    permissions:
+      contents: write
+    uses: ./.github/workflows/delete-gate-branch.yml

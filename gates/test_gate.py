@@ -11,6 +11,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
 import gate  # noqa: E402
@@ -50,6 +51,31 @@ class Pins(unittest.TestCase):
                 self.assertTrue(pins[tool]["url"].startswith("https://"))
         self.assertRegex(pins["node_image"]["image"],
                          r"^kindest/node:v1\.\d+\.\d+@sha256:[0-9a-f]{64}$")
+
+    def test_cert_manager_and_the_plugin_are_pinned_release_manifests(self):
+        # ADR-043 §3: the gate installs both, each pinned with its digest.
+        manifests = gate.load_pins(os.path.join(HERE, "pins.json"))["manifests"]
+        self.assertEqual(sorted(manifests), ["barman_cloud_plugin", "cert_manager"])
+        for name, pin in manifests.items():
+            with self.subTest(manifest=name):
+                self.assertRegex(pin["sha256"], r"^[0-9a-f]{64}$")
+                self.assertRegex(pin["version"], r"^v\d+\.\d+\.\d+$")
+                self.assertTrue(pin["url"].startswith("https://github.com/"))
+                self.assertIn(f"/download/{pin['version']}/", pin["url"])
+                self.assertTrue(pin["url"].endswith(".yaml"))
+                self.assertTrue(pin["source"])
+
+    def test_the_network_policy_schema_is_the_gates_kubernetes_version_at_a_commit(self):
+        # ADR-048 §4: kubeconform validates the policies against it in the static gate.
+        pins = gate.load_pins(os.path.join(HERE, "pins.json"))
+        pin = pins["kubernetes_schemas"]["networkpolicy"]
+        version = pins["node_image"]["image"].split(":")[1].split("@")[0]
+        self.assertRegex(pin["sha256"], r"^[0-9a-f]{64}$")
+        self.assertRegex(pin["url"], r"^https://raw\.githubusercontent\.com/yannh/"
+                         r"kubernetes-json-schema/[0-9a-f]{40}/")
+        self.assertTrue(pin["url"].endswith(
+            f"/{version}-standalone-strict/networkpolicy-networking-v1.json"))
+        self.assertTrue(pin["source"])
 
     def test_the_operator_pin_is_supported_by_the_install_script(self):
         pins = gate.load_pins(os.path.join(HERE, "pins.json"))
@@ -108,22 +134,52 @@ class Tools(unittest.TestCase):
 
 class Commands(unittest.TestCase):
     PINS = {"node_image": {"image": "kindest/node:v1.36.4@sha256:" + "a" * 64}}
+    MANIFESTS = {"cert_manager": "cert-manager manifest",
+                 "barman_cloud_plugin": "plugin manifest"}
 
     def commands(self):
-        return gate.up_commands(self.PINS, "/tmp/chart.tgz", "cnpg-system")
+        return gate.up_commands(self.PINS, "/tmp/chart.tgz", "cnpg-system", self.MANIFESTS)
 
-    def test_up_creates_the_three_node_cluster_first_and_installs_cnpg_last(self):
-        steps = self.commands()
-        (create, stdin), (helm, _) = steps[0], steps[-1]
+    def helm_index(self, steps):
+        return next(i for i, (argv, _) in enumerate(steps) if argv[0] == "helm")
+
+    def test_up_creates_the_three_node_cluster_first(self):
+        (create, stdin) = self.commands()[0]
         self.assertIsNone(stdin)
         self.assertEqual(create[:4], ["kind", "create", "cluster", "--name"])
         self.assertEqual(create[create.index("--name") + 1], gate.CLUSTER)
         self.assertEqual(create[create.index("--image") + 1], self.PINS["node_image"]["image"])
         self.assertTrue(create[create.index("--config") + 1].endswith("gates/kind.yaml"))
+
+    def test_up_installs_cnpg_from_the_chart_archive_and_waits(self):
+        steps = self.commands()
+        helm, stdin = steps[self.helm_index(steps)]
+        self.assertIsNone(stdin)
         self.assertEqual(helm[:3], ["helm", "--kube-context", gate.CONTEXT])
         self.assertIn("/tmp/chart.tgz", helm)
         self.assertEqual(helm[helm.index("--namespace") + 1], "cnpg-system")
         self.assertIn("--wait", helm)
+
+    def test_after_cnpg_cert_manager_then_the_plugin_are_applied_and_waited_for(self):
+        # ADR-043 §3: cert-manager in its own namespace, then the plugin's manifest, which
+        # needs cert-manager's webhook for its Issuer and Certificates, in the operator's.
+        steps = self.commands()
+        after = steps[self.helm_index(steps) + 1:]
+        self.assertEqual(len(after), 4)
+        (cm_apply, cm_text), (cm_wait, w1), (pl_apply, pl_text), (pl_wait, w2) = after
+        for apply in (cm_apply, pl_apply):
+            self.assertEqual(apply, ["kubectl", "--context", gate.CONTEXT, "apply",
+                                     "--server-side", "--field-manager=gate", "-f", "-"])
+        self.assertEqual((cm_text, pl_text), ("cert-manager manifest", "plugin manifest"))
+        self.assertEqual((w1, w2), (None, None))
+        self.assertEqual(cm_wait, ["kubectl", "--context", gate.CONTEXT, "-n",
+                                   gate.CERT_MANAGER_NAMESPACE, "rollout", "status",
+                                   "deployment/cert-manager",
+                                   "deployment/cert-manager-cainjector",
+                                   "deployment/cert-manager-webhook", "--timeout=5m"])
+        self.assertEqual(pl_wait, ["kubectl", "--context", gate.CONTEXT, "-n", "cnpg-system",
+                                   "rollout", "status", f"deployment/{gate.PLUGIN_DEPLOYMENT}",
+                                   "--timeout=5m"])
 
     def test_up_lets_the_control_plane_take_pods_before_cnpg(self):
         taint, _ = self.commands()[1]
@@ -148,7 +204,8 @@ class Commands(unittest.TestCase):
 
     def test_the_shared_class_is_applied_and_the_provisioner_restarted_before_cnpg(self):
         steps = self.commands()
-        (apply, stdin), = [c for c in steps if "apply" in c[0]]
+        helm = self.helm_index(steps)
+        (apply, stdin), = [c for c in steps[:helm] if "apply" in c[0]]
         storage_class = json.loads(stdin)
         self.assertEqual((storage_class["kind"], storage_class["metadata"]["name"]),
                          ("StorageClass", gate.SHARED_CLASS))
@@ -159,9 +216,20 @@ class Commands(unittest.TestCase):
         status = next(i for i, n in enumerate(names) if "rollout status" in n)
         self.assertIn("deployment/local-path-provisioner", names[restart])
         self.assertLess(restart, status)
-        self.assertLess(status, len(steps) - 1)
-        for argv, _ in steps[1:-1]:
-            self.assertEqual(argv[1:3], ["--context", gate.CONTEXT])
+        self.assertLess(status, helm)
+        for argv, _ in steps[1:]:
+            if argv[0] == "kubectl":
+                self.assertEqual(argv[1:3], ["--context", gate.CONTEXT])
+
+    def test_the_plugin_manifest_must_name_only_the_operators_namespace(self):
+        # The release manifest names its namespace itself; applied elsewhere, the plugin would
+        # not run next to the operator (ADR-043 §3).
+        text = "kind: Deployment\nmetadata:\n  name: barman-cloud\n  namespace: cnpg-system\n"
+        self.assertEqual(gate.plugin_manifest(text, "cnpg-system"), text)
+        with self.assertRaisesRegex(ValueError, "cnpg-system.*operators"):
+            gate.plugin_manifest(text, "operators")
+        with self.assertRaisesRegex(ValueError, "no namespace"):
+            gate.plugin_manifest("kind: Deployment\n", "cnpg-system")
 
     def test_the_kind_config_has_one_control_plane_and_two_workers(self):
         with open(os.path.join(HERE, "kind.yaml"), encoding="utf-8") as f:
@@ -178,33 +246,47 @@ class Commands(unittest.TestCase):
 class Install(unittest.TestCase):
     ROOT = os.path.dirname(HERE)
     THIS = ["python3", os.path.join(os.path.dirname(HERE), "install", "release.py")]
+    # ADR-048 §5: the gate-only allow policies, just before this commit's release.
+    GATE_POLICIES = ["python3", os.path.join(HERE, "gate.py"), "gate-policies"]
 
     def test_with_a_release_installs_it_from_its_tag_then_this_commit(self):
         commands, summary = gate.install_plan("platform-2026.10.10", "/tmp/prev", fresh=False)
         self.assertEqual(commands, [
             ["git", "-C", self.ROOT, "worktree", "add", "--detach", "/tmp/prev",
              "platform-2026.10.10"],
+            ["cp", "-p", os.path.join(self.ROOT, ".env"), "/tmp/prev/.env"],
             ["python3", "/tmp/prev/install/release.py"],
+            self.GATE_POLICIES,
             self.THIS,
         ])
         self.assertIn("platform-2026.10.10", summary)
-        self.assertIn("ADR-021", summary)
+        self.assertIn("ADR-051", summary)
+
+    def test_the_release_reads_the_gates_env_in_its_worktree(self):
+        # release.py reads .env from its own checkout; a tag's worktree has none, so a
+        # release that reads more than step 0 would find every endpoint empty.
+        commands, _ = gate.install_plan("platform-2026.10.12", "/tmp/prev", fresh=False)
+        worktree, copy, previous = commands[0], commands[1], commands[2]
+        self.assertEqual(worktree[3:5], ["worktree", "add"])
+        self.assertEqual(copy, ["cp", "-p", os.path.join(self.ROOT, ".env"), "/tmp/prev/.env"])
+        self.assertEqual(previous, ["python3", "/tmp/prev/install/release.py"])
 
     def test_without_a_release_installs_this_commit_and_says_so(self):
         commands, summary = gate.install_plan(None, "/tmp/prev", fresh=False)
-        self.assertEqual(commands, [self.THIS])
-        self.assertEqual(summary, "No release to upgrade from: fresh install (ADR-021).")
+        self.assertEqual(commands, [self.GATE_POLICIES, self.THIS])
+        self.assertEqual(summary, "No release to upgrade from: fresh install (ADR-051).")
 
     def test_fresh_ignores_the_release(self):
         commands, summary = gate.install_plan("platform-2026.10.10", "/tmp/prev", fresh=True)
-        self.assertEqual(commands, [self.THIS])
+        self.assertEqual(commands, [self.GATE_POLICIES, self.THIS])
         self.assertIn("Fresh install", summary)
 
     def test_dry_run_installs_the_release_then_dry_runs_this_commit_over_it(self):
         commands, summary = gate.install_plan("platform-2026.10.10", "/tmp/prev", fresh=False,
                                               dry_run=True)
-        self.assertEqual(commands[1], ["python3", "/tmp/prev/install/release.py"])
-        self.assertEqual(commands[2], self.THIS + ["--dry-run"])
+        self.assertEqual(commands[2], ["python3", "/tmp/prev/install/release.py"])
+        # A dry-run changes nothing, the gate's policies included.
+        self.assertEqual(commands[3:], [self.THIS + ["--dry-run"]])
         self.assertIn("server-side dry-run", summary)
 
     def test_dry_run_without_a_release_dry_runs_this_commit(self):
@@ -225,15 +307,22 @@ S3_REGION=
 POLARIS_WAREHOUSE_BUCKET=
 POLARIS_OPA_URL=
 POLARIS_DB_HOST=
+POLARIS_GATEWAY_NAMESPACE_LABEL=
+POLARIS_QUERY_NAMESPACE_LABEL=
+METRICS_NAMESPACE_LABEL=
+INGRESS_NAMESPACE_LABEL=
 POLARIS_CONSOLE_ENABLED=false
 POLARIS_CONSOLE_ORIGIN=
 POLARIS_CONSOLE_API_URL=
 POLARIS_LOGS_STORAGE_CLASS=
 POLARIS_LOGS_SIZE=
+POLARIS_BACKUP_BUCKET=
 POLARIS_S3_ACCESS_KEY_ID=
 POLARIS_S3_SECRET_ACCESS_KEY=
 SMOKE_S3_ACCESS_KEY_ID=
 SMOKE_S3_SECRET_ACCESS_KEY=
+POLARIS_BACKUP_S3_ACCESS_KEY_ID=
+POLARIS_BACKUP_S3_SECRET_ACCESS_KEY=
 POLARIS_DB_PASSWORD=
 """
 
@@ -271,6 +360,10 @@ class GateEnv(unittest.TestCase):
                          "gen-POLARIS_S3_SECRET_ACCESS_KEY")
         self.assertEqual(env["SMOKE_S3_ACCESS_KEY_ID"], "gen-SMOKE_S3_ACCESS_KEY_ID")
         self.assertEqual(env["SMOKE_S3_SECRET_ACCESS_KEY"], "gen-SMOKE_S3_SECRET_ACCESS_KEY")
+        self.assertEqual(env["POLARIS_BACKUP_S3_ACCESS_KEY_ID"],
+                         "gen-POLARIS_BACKUP_S3_ACCESS_KEY_ID")
+        self.assertEqual(env["POLARIS_BACKUP_S3_SECRET_ACCESS_KEY"],
+                         "gen-POLARIS_BACKUP_S3_SECRET_ACCESS_KEY")
 
     def test_the_endpoints_name_the_recorder_in_the_stand_ins_namespace(self):
         env = gate.init_env.parse(gate.gate_env(TEMPLATE.replace("NS_STANDINS=standins",
@@ -278,9 +371,19 @@ class GateEnv(unittest.TestCase):
         self.assertEqual(env["S3_ENDPOINT"], "http://recorder.si.svc.cluster.local:8333")
         self.assertEqual(env["S3_REGION"], "us-east-1")
         self.assertEqual(env["POLARIS_WAREHOUSE_BUCKET"], "polaris-warehouse")
+        self.assertEqual(env["POLARIS_BACKUP_BUCKET"], "polaris-backup")
         self.assertEqual(env["POLARIS_OPA_URL"],
                          "http://recorder.si.svc.cluster.local:8181/v1/data/polaris/authz")
         self.assertEqual(env["POLARIS_DB_HOST"], "recorder.si.svc.cluster.local")
+
+    def test_each_caller_class_gets_the_gates_namespace_label(self):
+        # ADR-048 §6: check-network gives these labels to its source namespaces.
+        env = gate.init_env.parse(gate.gate_env(TEMPLATE, gen=lambda name: "x"))
+        self.assertEqual({var: env[var] for var in gate.release.CALLER_VARS.values()}, {
+            "POLARIS_GATEWAY_NAMESPACE_LABEL": "lakehouse-gate/caller=gateway",
+            "POLARIS_QUERY_NAMESPACE_LABEL": "lakehouse-gate/caller=query",
+            "METRICS_NAMESPACE_LABEL": "lakehouse-gate/caller=metrics",
+            "INGRESS_NAMESPACE_LABEL": "lakehouse-gate/caller=ingress"})
 
     def test_the_console_is_enabled_at_its_service_and_reaches_polaris_at_its_service(self):
         env = gate.init_env.parse(gate.gate_env(TEMPLATE, gen=lambda name: "x"))
@@ -305,7 +408,7 @@ class GateEnv(unittest.TestCase):
             env = gate.init_env.parse(gate.gate_env(f.read()))
         for name in gate.GATE_ENV_GENERATED + ("KUBE_CONTEXT", "S3_ENDPOINT", "S3_REGION",
                                                "POLARIS_WAREHOUSE_BUCKET", "POLARIS_OPA_URL",
-                                               "POLARIS_DB_HOST", "POLARIS_CONSOLE_ORIGIN",
+                                               "POLARIS_BACKUP_BUCKET", "POLARIS_DB_HOST", "POLARIS_CONSOLE_ORIGIN",
                                                "POLARIS_CONSOLE_API_URL",
                                                "POLARIS_LOGS_STORAGE_CLASS", "POLARIS_LOGS_SIZE"):
             with self.subTest(name=name):
@@ -382,6 +485,116 @@ class PolarisPg(unittest.TestCase):
         self.assertIn("--all", commands[0])
         self.assertIn("cluster/polaris-pg", commands[1])
         self.assertIn("cnpg.io/cluster=polaris-pg,cnpg.io/podRole=instance", commands[2])
+
+
+def rebuilding(primary="polaris-pg-1", ready=3, condition="True"):
+    return {"spec": {"instances": 3},
+            "status": {"currentPrimary": primary, "readyInstances": ready,
+                       "conditions": [{"type": "Ready", "status": condition}]}}
+
+
+def jobs(*names, uid="1"):
+    return {"items": [{"metadata": {"name": n, "uid": f"{n}-{uid}"}} for n in names]}
+
+
+class RebuildReplica(unittest.TestCase):
+    """ADR-048 §7: a replica's PVC and pod deleted; CNPG rebuilds it with a join pod."""
+
+    def test_it_picks_a_replica_never_the_primary(self):
+        self.assertEqual(gate.rebuild_target(rebuilding("polaris-pg-1"), pods("a", "b", "c")),
+                         "polaris-pg-2")
+        self.assertEqual(gate.rebuild_target(rebuilding("polaris-pg-2"), pods("a", "b", "c")),
+                         "polaris-pg-1")
+
+    def test_with_no_replica_there_is_nothing_to_rebuild(self):
+        self.assertIsNone(gate.rebuild_target(rebuilding("polaris-pg-1"), pods("a")))
+
+    def test_it_deletes_the_pvc_without_waiting_then_the_pod_in_polaris_namespace(self):
+        pvc, pod = gate.rebuild_commands("catalog-polaris", "polaris-pg-2")
+        for argv in (pvc, pod):
+            self.assertEqual(argv[:5], ["kubectl", "--context", gate.CONTEXT, "-n",
+                                        "catalog-polaris"])
+        self.assertEqual(pvc[5:], ["delete", "pvc", "polaris-pg-2", "--wait=false"])
+        self.assertEqual(pod[5:], ["delete", "pod", "polaris-pg-2"])
+
+    def test_it_reads_polaris_pgs_join_jobs(self):
+        argv = gate.join_jobs_command("catalog-polaris")
+        self.assertEqual(argv[argv.index("-n") + 1], "catalog-polaris")
+        self.assertIn("cnpg.io/cluster=polaris-pg,cnpg.io/jobRole=join", argv)
+
+    def test_rebuilt_needs_a_new_join_and_the_cluster_ready_with_every_instance(self):
+        self.assertTrue(gate.rebuilt(rebuilding(), {"polaris-pg-4-join"}))
+        self.assertFalse(gate.rebuilt(rebuilding(), set()))
+        self.assertFalse(gate.rebuilt(rebuilding(ready=2), {"polaris-pg-4-join"}))
+        self.assertFalse(gate.rebuilt(rebuilding(condition="False"), {"polaris-pg-4-join"}))
+
+    def answers(self, after):
+        """gate.output's answers: the Cluster, its instances and the join Jobs before the
+        deletion, then (join Jobs, Cluster) for each poll in `after`."""
+        before = [json.dumps(rebuilding()), json.dumps(pods("a", "b", "c")),
+                  json.dumps(jobs("polaris-pg-2-join", "polaris-pg-3-join"))]
+        return before + [json.dumps(x) for pair in after for x in pair]
+
+    def run_rebuild(self, after, timeout=900):
+        ran, other = [], []
+        clock = iter(range(0, 100000, 3))
+        with mock.patch.object(gate, "output", side_effect=self.answers(after)), \
+                mock.patch.object(gate, "run", side_effect=ran.append), \
+                mock.patch.object(gate.subprocess, "run",
+                                  side_effect=lambda argv, **kw: other.append(argv)), \
+                mock.patch.object(gate.time, "monotonic", side_effect=lambda: next(clock)), \
+                mock.patch.object(gate.time, "sleep"), \
+                mock.patch.object(gate, "REBUILD_TIMEOUT", timeout):
+            problems, notes = gate.rebuild_replica({"NS_CATALOG_POLARIS": "catalog-polaris"})
+        return problems, notes, ran, other
+
+    def test_it_passes_once_a_new_join_ran_and_the_cluster_is_ready_again(self):
+        old = jobs("polaris-pg-2-join", "polaris-pg-3-join")
+        new = jobs("polaris-pg-2-join", "polaris-pg-3-join", "polaris-pg-4-join")
+        problems, notes, ran, other = self.run_rebuild([
+            (old, rebuilding()),            # the operator has not acted yet
+            (new, rebuilding(ready=2)),     # the join runs
+            (old, rebuilding()),            # CNPG removed the finished Job: seen all the same
+        ])
+        self.assertEqual(problems, [])
+        self.assertEqual(ran, gate.rebuild_commands("catalog-polaris", "polaris-pg-2"))
+        self.assertIn("polaris-pg-4-join", "\n".join(notes))
+        self.assertEqual(other, [])
+
+    def test_a_ready_cluster_without_a_new_join_fails_and_prints_the_join_pods_log(self):
+        old = jobs("polaris-pg-2-join", "polaris-pg-3-join")
+        problems, _, _, other = self.run_rebuild([(old, rebuilding())] * 3, timeout=6)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("polaris-pg", problems[0])
+        (logs,) = other
+        self.assertIn("logs", logs)
+        self.assertIn("cnpg.io/cluster=polaris-pg,cnpg.io/jobRole=join", logs)
+
+    def test_a_join_job_made_again_under_an_old_name_counts_as_new(self):
+        problems, notes, _, _ = self.run_rebuild([
+            (jobs("polaris-pg-2-join", "polaris-pg-3-join", uid="2"), rebuilding())])
+        self.assertEqual(problems, [])
+
+    def test_a_join_that_never_gets_the_cluster_ready_fails(self):
+        new = jobs("polaris-pg-2-join", "polaris-pg-3-join", "polaris-pg-4-join")
+        problems, _, _, _ = self.run_rebuild([(new, rebuilding(ready=2))] * 3, timeout=6)
+        self.assertEqual(len(problems), 1)
+
+    def test_with_no_replica_it_deletes_nothing(self):
+        with mock.patch.object(gate, "output", side_effect=[
+                    json.dumps(rebuilding()), json.dumps(pods("a"))]), \
+                mock.patch.object(gate, "run") as ran:
+            problems, _ = gate.rebuild_replica({"NS_CATALOG_POLARIS": "catalog-polaris"})
+        self.assertEqual(len(problems), 1)
+        ran.assert_not_called()
+
+    def test_main_runs_it_and_the_usage_names_it(self):
+        self.assertIn("| rebuild-replica |", gate.__doc__.strip().splitlines()[-1])
+        with mock.patch.object(gate, "rebuild_replica", return_value=([], ["ok"])) as rebuild, \
+                mock.patch.object(gate.release, "load_env", return_value={}), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(gate.main(["gate.py", "rebuild-replica"]), 0)
+        rebuild.assert_called_once()
 
 
 POLARIS_ENV = {"NS_CATALOG_POLARIS": "catalog-polaris", "POLARIS_DB_HOST": "recorder.standins.svc",
@@ -570,6 +783,7 @@ class ReleasedTags(unittest.TestCase):
 STANDIN_ENV = {"NS_STANDINS": "standins", "NS_CATALOG_POLARIS": "catalog-polaris",
                "S3_ENDPOINT": "http://seaweedfs.standins.svc.cluster.local:8333",
                "S3_REGION": "us-east-1", "POLARIS_WAREHOUSE_BUCKET": "polaris-warehouse",
+               "POLARIS_BACKUP_BUCKET": "polaris-backup",
                "POLARIS_OPA_URL": "http://opa.standins.svc.cluster.local:8181/v1/data/polaris/authz",
                "POLARIS_DB_HOST": "recorder.standins.svc.cluster.local"}
 CURL = "curlimages/curl:8.22.0@sha256:" + "c" * 64
@@ -683,15 +897,134 @@ class CheckConsole(unittest.TestCase):
                                        PYTHON, name="console-test")
 
 
+RESTORE_ENV = {"NS_CATALOG_POLARIS": "catalog-polaris"}
+PG_IMAGE = "ghcr.io/cloudnative-pg/postgresql:16.15-1-minimal-trixie@sha256:" + "a" * 64
+
+
+class CheckRestore(unittest.TestCase):
+    """ADR-043 §4: a backup of polaris-pg, restored into polaris-pg-restore, read, deleted."""
+
+    def test_an_on_demand_backup_of_polaris_pg_through_the_plugin(self):
+        backup = gate.backup_manifest(RESTORE_ENV, "polaris-pg-gate-1")
+        self.assertEqual((backup["apiVersion"], backup["kind"]),
+                         ("postgresql.cnpg.io/v1", "Backup"))
+        self.assertEqual(backup["metadata"], {"name": "polaris-pg-gate-1",
+                                              "namespace": "catalog-polaris"})
+        self.assertEqual(backup["spec"], {
+            "cluster": {"name": "polaris-pg"}, "method": "plugin",
+            "pluginConfiguration": {"name": "barman-cloud.cloudnative-pg.io"}})
+
+    def test_the_restore_bootstraps_from_the_object_store_to_the_latest_wal(self):
+        restore = gate.restore_cluster(RESTORE_ENV, PG_IMAGE)
+        self.assertEqual((restore["kind"], restore["metadata"]["name"]),
+                         ("Cluster", gate.RESTORE))
+        self.assertEqual(gate.RESTORE, "polaris-pg-restore")
+        self.assertEqual(restore["metadata"]["namespace"], "catalog-polaris")
+        spec = restore["spec"]
+        self.assertEqual(spec["instances"], 1)
+        self.assertEqual(spec["imageName"], PG_IMAGE)
+        # No recovery target: everything archived is replayed.
+        self.assertEqual(spec["bootstrap"], {"recovery": {
+            "source": "polaris-pg", "database": "polaris", "owner": "polaris",
+            "secret": {"name": "polaris-db"}}})
+        self.assertEqual(spec["externalClusters"], [{
+            "name": "polaris-pg",
+            "plugin": {"name": "barman-cloud.cloudnative-pg.io",
+                       "parameters": {"barmanObjectName": "polaris-backup",
+                                      "serverName": "polaris-pg"}}}])
+
+    def test_the_restore_never_archives_into_polaris_pgs_backups(self):
+        self.assertNotIn("plugins", gate.restore_cluster(RESTORE_ENV, PG_IMAGE)["spec"])
+
+    def test_a_backup_is_done_once_completed_or_failed(self):
+        self.assertIsNone(gate.backup_outcome({}))
+        self.assertIsNone(gate.backup_outcome({"status": {"phase": "running"}}))
+        self.assertEqual(gate.backup_outcome({"status": {"phase": "completed"}}),
+                         ("completed", ""))
+        self.assertEqual(gate.backup_outcome({"status": {"phase": "failed",
+                                                         "error": "no bucket"}}),
+                         ("failed", "no bucket"))
+
+    def test_the_check_pod_reads_the_restore_as_polaris_with_its_secret(self):
+        command = gate.check_restore_command(RESTORE_ENV, PG_IMAGE, "polaris", "check-restore-1")
+        self.assertEqual(command[:5], ["kubectl", "--context", gate.CONTEXT, "-n",
+                                       "catalog-polaris"])
+        self.assertIn("--rm", command)
+        self.assertEqual(command[command.index("--") + 1:],
+                         ["sh", "-s", "--", "polaris-pg-restore-rw", "polaris", "POLARIS",
+                          gate.ICEBERG_CATALOG])
+        overrides = json.loads(command[command.index("--overrides") + 1])
+        (c,) = overrides["spec"]["containers"]
+        self.assertEqual(c["image"], PG_IMAGE)
+        self.assertEqual(c["env"], [
+            {"name": "PGUSER", "valueFrom": {"secretKeyRef": {"name": "polaris-db",
+                                                              "key": "username"}}},
+            {"name": "PGPASSWORD", "valueFrom": {"secretKeyRef": {"name": "polaris-db",
+                                                                  "key": "password"}}}])
+
+    def test_check_restore_is_a_command(self):
+        self.assertIn("check-restore", gate.__doc__.strip().splitlines()[-1])
+
+    def check(self, settled=None):
+        """Runs check_restore with every command faked; (problems, notes, events)."""
+        events = []
+
+        def subprocess_run(argv, **kwargs):
+            events.append(("wait" if "wait" in argv else
+                           "delete" if "delete" in argv else "psql", argv))
+            return subprocess.CompletedProcess(argv, 0)
+
+        def settle(run, context, namespace, cluster):
+            events.append(("settle", (run, context, namespace, cluster)))
+            return settled
+
+        with mock.patch.object(gate, "run"), \
+                mock.patch.object(gate, "wait_for", return_value=("completed", "")), \
+                mock.patch.object(gate, "polaris_pg_values",
+                                  return_value={"image": PG_IMAGE, "database": "polaris"}), \
+                mock.patch.object(gate.subprocess, "run", side_effect=subprocess_run), \
+                mock.patch.object(gate.release, "settle", side_effect=settle):
+            problems, notes = gate.check_restore(RESTORE_ENV)
+        return problems, notes, events
+
+    # Smoke 38245393066: Ready, then psql refused while CNPG restarted the restored instance.
+    def test_the_restore_settles_after_ready_and_before_psql(self):
+        problems, notes, events = self.check()
+        self.assertEqual(problems, [])
+        self.assertEqual([kind for kind, _ in events], ["wait", "settle", "psql", "delete"])
+        self.assertEqual(events[1][1], (gate.release.call, gate.CONTEXT, "catalog-polaris",
+                                        "polaris-pg-restore"))
+        self.assertIn("healthy", "\n".join(notes))
+
+    def test_a_restore_that_does_not_settle_is_a_problem_and_still_deleted(self):
+        problems, _, events = self.check(settled="Cluster polaris-pg-restore did not settle")
+        self.assertEqual(problems, ["Cluster polaris-pg-restore did not settle"])
+        self.assertEqual([kind for kind, _ in events], ["wait", "settle", "delete"])
+
+
 class Standins(unittest.TestCase):
     def test_applies_the_list_server_side_then_waits_for_both_deployments(self):
-        apply, wait = gate.standins_commands(STANDIN_ENV)
+        (apply, stdin), (wait, _) = gate.standins_commands(
+            STANDIN_ENV, "the stand-ins list")[:2]
+        self.assertEqual(stdin, "the stand-ins list")
         self.assertEqual(apply[:3], ["kubectl", "--context", gate.CONTEXT])
         self.assertIn("--server-side", apply)
         self.assertEqual(apply[-2:], ["-f", "-"])
         self.assertEqual(wait[:5], ["kubectl", "--context", gate.CONTEXT, "-n", "standins"])
-        for name in ("seaweedfs", "opa", "recorder"):
+        for name in ("seaweedfs", "opa", "recorder", "prometheus"):
             self.assertIn(f"deployment/{name}", wait)
+
+    def test_then_the_backup_bucket_is_created_in_seaweedfs_and_checked(self):
+        # ADR-043 §2: `weed mini -bucket` makes one bucket; the backups get their own.
+        (create, stdin), (check, none) = gate.standins_commands(
+            STANDIN_ENV, "the stand-ins list")[2:]
+        exec_ = ["kubectl", "--context", gate.CONTEXT, "-n", "standins", "exec"]
+        self.assertEqual(create, exec_ + ["-i", "deployment/seaweedfs", "--", "weed", "shell"])
+        self.assertEqual(stdin, "s3.bucket.create -name polaris-backup\n")
+        self.assertEqual(check, exec_ + ["deployment/seaweedfs", "--", "curl", "-sf",
+                                         "-o", "/dev/null",
+                                         "http://127.0.0.1:8888/buckets/polaris-backup/"])
+        self.assertIsNone(none)
 
     def test_the_recorder_certificate_is_made_here_for_its_service_name(self):
         with tempfile.TemporaryDirectory() as d:
@@ -717,6 +1050,62 @@ class CheckTraffic(unittest.TestCase):
         self.assertIn("2 records: 1 HTTP, 1 PostgreSQL", lines[0])
         problems, _ = gate.check_traffic(log, [good, bad])
         self.assertEqual(len(problems), 1)
+
+
+def upgrading(*times, name="polaris-pg", reason="UpgradingInstance"):
+    return {"items": [{"involvedObject": {"kind": "Cluster", "name": name}, "reason": reason,
+                       "firstTimestamp": t} for t in times]}
+
+
+class RestartWindow(unittest.TestCase):
+    END = "2026-10-12T10:37:58+00:00"
+
+    def test_from_the_first_upgrading_instance_event_to_the_end_of_the_install(self):
+        events = upgrading("2026-10-12T10:34:40Z", "2026-10-12T10:34:00Z")
+        self.assertEqual(gate.restart_window(events, self.END),
+                         ("2026-10-12T10:34:00Z", self.END))
+
+    def test_no_window_without_a_restart_or_an_upgrade(self):
+        self.assertIsNone(gate.restart_window(upgrading(), self.END))
+        self.assertIsNone(gate.restart_window(upgrading("2026-10-12T10:34:00Z"), None))
+
+    def test_other_clusters_reasons_and_later_restarts_do_not_count(self):
+        self.assertIsNone(gate.restart_window(
+            upgrading("2026-10-12T10:34:00Z", name="polaris-pg-restore"), self.END))
+        self.assertIsNone(gate.restart_window(
+            upgrading("2026-10-12T10:34:00Z", reason="CreatingInstance"), self.END))
+        self.assertIsNone(gate.restart_window(upgrading("2026-10-12T10:40:00Z"), self.END))
+
+    def test_the_events_are_read_for_polaris_pg_in_its_namespace(self):
+        self.assertEqual(gate.restart_events_command("catalog-polaris"), [
+            "kubectl", "--context", gate.CONTEXT, "-n", "catalog-polaris", "get", "events",
+            "--field-selector", "involvedObject.name=polaris-pg,reason=UpgradingInstance",
+            "-o", "json"])
+
+    def test_check_traffic_names_the_window_and_passes_it_on(self):
+        log = json.dumps({"proto": "pg", "event": "statement", "time": "2026-10-12T10:37:06Z",
+                          "error": {"sqlstate": "57P01", "severity": "FATAL"}})
+        rule = [{"name": "no failed statement", "must": "not_exist",
+                 "match": {"event": "statement"},
+                 "allow_during_restart": {"error.sqlstate": "57P01"}}]
+        problems, lines = gate.check_traffic(log, [rule],
+                                             restart=("2026-10-12T10:34:00Z", self.END))
+        self.assertEqual(problems, [])
+        self.assertIn("polaris-pg restarted during the upgrade from 2026-10-12T10:34:00Z",
+                      lines[1])
+        problems, _ = gate.check_traffic(log, [rule])
+        self.assertEqual(len(problems), 1)
+
+    def test_only_the_rules_kade_named_carry_an_allowance(self):
+        # Two on 2026-10-12; the TLS negotiation on 2026-10-13 (nightly smoke 38385377721).
+        with open(os.path.join(HERE, "expectations", "standins.json"), encoding="utf-8") as f:
+            rules = {e["name"]: e.get("allow_during_restart")
+                     for e in json.load(f)["expectations"]}
+        self.assertEqual({n: a for n, a in rules.items() if a}, {
+            "No PostgreSQL statement failed, but for a table that did not exist yet":
+                {"error.sqlstate": "57P01", "error.severity": "FATAL"},
+            "No upstream the recorder could not reach": {"listener": "pg"},
+            "No PostgreSQL TLS negotiation failed": {"listener": "pg"}})
 
 
 class CheckStandins(unittest.TestCase):

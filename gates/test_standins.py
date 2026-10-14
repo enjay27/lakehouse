@@ -16,15 +16,21 @@ ENV = {"NS_STANDINS": "standins", "NS_CATALOG_POLARIS": "catalog-polaris",
        "POLARIS_S3_SECRET_ACCESS_KEY": "gatesecret",
        "SMOKE_S3_ACCESS_KEY_ID": "smokekey",
        "SMOKE_S3_SECRET_ACCESS_KEY": "smokesecret",
-       "POLARIS_WAREHOUSE_BUCKET": "polaris-warehouse"}
+       "POLARIS_BACKUP_S3_ACCESS_KEY_ID": "backupkey",
+       "POLARIS_BACKUP_S3_SECRET_ACCESS_KEY": "backupsecret",
+       "POLARIS_WAREHOUSE_BUCKET": "polaris-warehouse",
+       "POLARIS_BACKUP_BUCKET": "polaris-backup",
+       "METRICS_NAMESPACE_LABEL": "lakehouse-gate/caller=metrics"}
 PINS = gate.load_pins(os.path.join(HERE, "pins.json"))
 
 
 TLS = ("certificate-pem\n", "key-pem\n")
+PROMETHEUS_CONFIG = "global:\n  scrape_interval: 10s\nscrape_configs: []\n"
 
 
 def items(env=ENV):
-    return standins.manifests(env, PINS, "package polaris.authz\n", "# proxy.py\n", TLS)["items"]
+    return standins.manifests(env, PINS, "package polaris.authz\n", "# proxy.py\n", TLS,
+                              PROMETHEUS_CONFIG)["items"]
 
 
 def objects(env=ENV):
@@ -46,12 +52,15 @@ class Pins(unittest.TestCase):
 
 class Manifests(unittest.TestCase):
     def test_the_namespace_comes_first_and_holds_every_other_object(self):
+        # But the Prometheus stand-in's Role and RoleBinding, in the namespace it discovers.
         listed = items()
         self.assertEqual((listed[0]["kind"], listed[0]["metadata"]["name"]),
                          ("Namespace", "standins"))
         for o in listed[1:]:
             with self.subTest(object=o["metadata"]["name"]):
-                self.assertEqual(o["metadata"]["namespace"], "standins")
+                expected = ("catalog-polaris" if o["kind"] in ("Role", "RoleBinding")
+                            else "standins")
+                self.assertEqual(o["metadata"]["namespace"], expected)
 
     def test_the_namespace_name_comes_from_env(self):
         self.assertIn(("Namespace", "other-ns"), objects({**ENV, "NS_STANDINS": "other-ns"}))
@@ -77,7 +86,7 @@ class Manifests(unittest.TestCase):
         config = json.loads(base64.b64decode(
             objects()[("Secret", "seaweedfs-s3")]["data"]["s3.json"]))
         by_name = {i["name"]: i for i in config["identities"]}
-        self.assertEqual(sorted(by_name), ["polaris", "smoke"])
+        self.assertEqual(sorted(by_name), ["backup", "polaris", "smoke"])
         self.assertEqual(by_name["polaris"]["credentials"],
                          [{"accessKey": "gatekey", "secretKey": "gatesecret"}])
         self.assertIn("Admin", by_name["polaris"]["actions"])
@@ -87,11 +96,22 @@ class Manifests(unittest.TestCase):
                          ["List:polaris-warehouse", "Read:polaris-warehouse",
                           "Write:polaris-warehouse"])
 
+    def test_the_backup_key_may_read_write_and_list_its_own_bucket_only(self):
+        # ADR-043 §2: the backups' own key, never Polaris's warehouse key.
+        config = json.loads(base64.b64decode(
+            objects()[("Secret", "seaweedfs-s3")]["data"]["s3.json"]))
+        backup = next(i for i in config["identities"] if i["name"] == "backup")
+        self.assertEqual(backup["credentials"],
+                         [{"accessKey": "backupkey", "secretKey": "backupsecret"}])
+        self.assertEqual(sorted(backup["actions"]),
+                         ["List:polaris-backup", "Read:polaris-backup", "Write:polaris-backup"])
+
     def test_the_credentials_appear_only_in_the_secret(self):
         o = objects()
         del o[("Secret", "seaweedfs-s3")]
         text = json.dumps(list(o.values()))
-        for value in ("gatekey", "gatesecret", "smokekey", "smokesecret"):
+        for value in ("gatekey", "gatesecret", "smokekey", "smokesecret", "backupkey",
+                      "backupsecret"):
             self.assertNotIn(value, text)
             self.assertNotIn(base64.b64encode(value.encode()).decode(), text)
 
@@ -154,6 +174,104 @@ class Manifests(unittest.TestCase):
     def test_the_committed_policy_is_the_package_polaris_reads(self):
         with open(os.path.join(HERE, "opa", "policy.rego"), encoding="utf-8") as f:
             self.assertRegex(f.read(), r"(?m)^package polaris\.authz$")
+
+
+class NetworkPolicies(unittest.TestCase):
+    """ADR-048 §3, NS_STANDINS's rows restated from ADR-034."""
+
+    def setUp(self):
+        self.policies = {name: o["spec"] for (kind, name), o in objects().items()
+                         if kind == "NetworkPolicy"}
+
+    def test_every_pod_is_denied_ingress_by_default(self):
+        self.assertEqual(self.policies["default-deny-ingress"],
+                         {"podSelector": {}, "policyTypes": ["Ingress"]})
+
+    def test_the_recorder_from_polaris_namespace_on_its_three_ports(self):
+        spec = self.policies["recorder"]
+        self.assertEqual(spec["podSelector"],
+                         {"matchLabels": {"app.kubernetes.io/name": "recorder"}})
+        self.assertEqual(spec["ingress"], [{
+            "ports": [{"protocol": "TCP", "port": p} for p in (8181, 8333, 5432)],
+            "from": [{"namespaceSelector": {"matchLabels": {
+                "kubernetes.io/metadata.name": "catalog-polaris"}}}]}])
+
+    def test_seaweedfs_and_opa_from_the_recorder_and_the_gates_check_pods(self):
+        for name, port in (("seaweedfs", 8333), ("opa", 8181)):
+            with self.subTest(name=name):
+                spec = self.policies[name]
+                self.assertEqual(spec["podSelector"],
+                                 {"matchLabels": {"app.kubernetes.io/name": name}})
+                self.assertEqual(spec["ingress"], [{
+                    "ports": [{"protocol": "TCP", "port": port}],
+                    "from": [
+                        {"podSelector": {"matchLabels": {"app.kubernetes.io/name": "recorder"}}},
+                        {"namespaceSelector": {"matchLabels": {
+                            "kubernetes.io/metadata.name": "catalog-polaris"}},
+                         "podSelector": {"matchLabels": {"lakehouse-gate/check": "true"}}}]}])
+
+    def test_prometheus_from_the_gates_check_pods_only(self):
+        # ADR-046 §4.
+        spec = self.policies["prometheus"]
+        self.assertEqual(spec["podSelector"],
+                         {"matchLabels": {"app.kubernetes.io/name": "prometheus"}})
+        self.assertEqual(spec["ingress"], [{
+            "ports": [{"protocol": "TCP", "port": 9090}],
+            "from": [{"namespaceSelector": {"matchLabels": {
+                          "kubernetes.io/metadata.name": "catalog-polaris"}},
+                      "podSelector": {"matchLabels": {"lakehouse-gate/check": "true"}}}]}])
+
+    def test_every_policy_restricts_ingress_only(self):
+        self.assertEqual(sorted(self.policies),
+                         ["default-deny-ingress", "opa", "prometheus", "recorder", "seaweedfs"])
+        for name, spec in self.policies.items():
+            self.assertEqual(spec["policyTypes"], ["Ingress"], name)
+
+
+class Prometheus(unittest.TestCase):
+    """ADR-046 §5: the stand-in scrapes Polaris's namespace as the observability team's would."""
+
+    def setUp(self):
+        self.o = objects()
+
+    def test_the_namespace_carries_the_gates_metrics_label(self):
+        # So the stand-in crosses the release's own policies as the real scraper would.
+        ns = self.o[("Namespace", "standins")]
+        self.assertEqual(ns["metadata"]["labels"], {"lakehouse-gate/caller": "metrics"})
+
+    def test_an_empty_metrics_label_leaves_the_namespace_unlabelled(self):
+        ns = objects({**ENV, "METRICS_NAMESPACE_LABEL": ""})[("Namespace", "standins")]
+        self.assertNotIn("labels", ns["metadata"])
+
+    def test_it_runs_the_pinned_image_with_the_config_given(self):
+        deployment = self.o[("Deployment", "prometheus")]
+        c = container(deployment)
+        self.assertEqual(c["image"], PINS["standin_images"]["prometheus"]["image"])
+        self.assertIn("--config.file=/etc/prometheus/prometheus.yml", c["args"])
+        self.assertIn("--web.listen-address=:9090", c["args"])
+        self.assertEqual(c["readinessProbe"]["httpGet"], {"path": "/-/ready", "port": 9090})
+        self.assertEqual(self.o[("ConfigMap", "prometheus-config")]["data"],
+                         {"prometheus.yml": PROMETHEUS_CONFIG})
+        pod = deployment["spec"]["template"]["spec"]
+        self.assertEqual(pod["serviceAccountName"], "prometheus")
+        self.assertIn({"name": "config", "configMap": {"name": "prometheus-config"}},
+                      pod["volumes"])
+
+    def test_it_may_only_read_pods_in_polaris_namespace(self):
+        role = self.o[("Role", "prometheus-discovery")]
+        self.assertEqual(role["rules"], [{"apiGroups": [""], "resources": ["pods"],
+                                          "verbs": ["get", "list", "watch"]}])
+        binding = self.o[("RoleBinding", "prometheus-discovery")]
+        self.assertEqual(binding["roleRef"], {"apiGroup": "rbac.authorization.k8s.io",
+                                              "kind": "Role", "name": "prometheus-discovery"})
+        self.assertEqual(binding["subjects"], [{"kind": "ServiceAccount", "name": "prometheus",
+                                                "namespace": "standins"}])
+        self.assertIn(("ServiceAccount", "prometheus"), self.o)
+
+    def test_its_service_answers_on_9090(self):
+        svc = self.o[("Service", "prometheus")]["spec"]
+        self.assertEqual(svc["ports"][0]["port"], 9090)
+        self.assertEqual(svc["selector"], {"app.kubernetes.io/name": "prometheus"})
 
 
 class Cases(unittest.TestCase):

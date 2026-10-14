@@ -1,6 +1,6 @@
 # ADR-029: The CloudNativePG operator belongs to the operator team; this repository installs it only on the gate and test clusters
 
-- **Status:** Accepted
+- **Status:** Superseded by ADR-045
 - **Date:** 2026-10-10
 - **Related:** ADR-010, ADR-012, ADR-017, ADR-023
 

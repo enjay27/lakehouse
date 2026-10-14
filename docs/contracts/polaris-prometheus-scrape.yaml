@@ -1,0 +1,50 @@
+# Scrape configuration for Polaris and its PostgreSQL (ADR-046 §3): a `scrape_configs` block
+# for a plain Prometheus, discovering pods in Polaris's namespace. Replace ${NS_CATALOG_POLARIS}
+# with that namespace's name. The scraper's namespace needs the label METRICS_NAMESPACE_LABEL
+# names, or Polaris's network policies refuse it (ADR-044). Discovery needs get, list and watch
+# on pods in that namespace. The gate loads this file as it is (gates/metrics.py).
+scrape_configs:
+  - job_name: polaris
+    metrics_path: /q/metrics
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: ["${NS_CATALOG_POLARIS}"]
+    relabel_configs:
+      - source_labels:
+          - __meta_kubernetes_pod_label_app_kubernetes_io_name
+          - __meta_kubernetes_pod_label_app_kubernetes_io_instance
+        regex: polaris;polaris
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_container_port_name]
+        regex: polaris-mgmt
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_phase]
+        regex: Running
+        action: keep
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+  - job_name: polaris-pg
+    metrics_path: /metrics
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: ["${NS_CATALOG_POLARIS}"]
+    relabel_configs:
+      - source_labels:
+          - __meta_kubernetes_pod_label_cnpg_io_cluster
+          - __meta_kubernetes_pod_label_cnpg_io_podRole
+        regex: polaris-pg;instance
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_container_port_name]
+        regex: metrics
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_phase]
+        regex: Running
+        action: keep
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod

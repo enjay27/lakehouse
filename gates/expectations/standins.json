@@ -145,6 +145,8 @@
     {
       "name": "No PostgreSQL statement failed, but for a table that did not exist yet",
       "must": "not_exist",
+      "_comment_restart": "The upgrade that adds the Barman Cloud Plugin restarts polaris-pg's primary in place, which ends Polaris's connections with 57P01 (smoke 38236488707). Allowed only inside that restart (Kade, 2026-10-12).",
+      "allow_during_restart": {"error.sqlstate": "57P01", "error.severity": "FATAL"},
       "match": {
         "proto": "pg",
         "event": "statement",
@@ -176,6 +178,8 @@
     {
       "name": "No upstream the recorder could not reach",
       "must": "not_exist",
+      "_comment_restart": "polaris-pg-rw has no endpoint for about a second while its primary restarts (smoke 38236488707). Allowed only inside that restart, and only on the PostgreSQL listener (Kade, 2026-10-12).",
+      "allow_during_restart": {"listener": "pg"},
       "match": {
         "event": "upstream_unreachable"
       }
@@ -183,6 +187,8 @@
     {
       "name": "No PostgreSQL TLS negotiation failed",
       "must": "not_exist",
+      "_comment_restart": "A connection can end mid-negotiation while polaris-pg's primary restarts (nightly smoke 38385377721, 2026-10-13). Allowed only inside that restart, and only on the PostgreSQL listener (Kade, 2026-10-13).",
+      "allow_during_restart": {"listener": "pg"},
       "match": {
         "event": "negotiation_failed"
       }

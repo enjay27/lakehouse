@@ -12,6 +12,10 @@ image:
   # Docker Hub index digest (docker-content-digest, recomputed), read 2026-10-11.
   tag: "1.6.0@sha256:9738b2052dea20aabf0cd42521424ff963fee41b0ee888fef9f512efb256602a"
 
+# Only pods with this label reach polaris-pg (ADR-048 §3, charts/polaris-network-policies).
+podLabels:
+  lakehouse/polaris-pg-client: "true"
+
 affinity:
   podAntiAffinity:
     requiredDuringSchedulingIgnoredDuringExecution:
@@ -30,6 +34,12 @@ managementService:
   ports:
     - name: polaris-mgmt
       port: 8182
+
+# Metrics stay on as the chart defaults: /q/metrics on 8182 (ADR-046 §1). No ServiceMonitor:
+# the chart renders one wherever the Prometheus Operator's CRD exists, and how the scraper
+# finds Polaris is the observability team's; they get docs/contracts/ instead (ADR-046 §2).
+serviceMonitor:
+  enabled: false
 
 realmContext:
   realms:

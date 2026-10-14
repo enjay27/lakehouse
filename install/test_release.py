@@ -11,6 +11,9 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(__file__))
 import release  # noqa: E402
 
+# The settle reads after a helm upgrade of polaris-pg do not wait in these tests.
+release.SETTLE_INTERVAL = 0
+
 ENV = {"KUBE_CONTEXT": "kind-lakehouse-gate", "NS_CNPG_SYSTEM": "cnpg-system"}
 
 
@@ -20,19 +23,41 @@ def deployments(*images):
         for i in images]})
 
 
+def plugin_services(*selectors):
+    return json.dumps({"items": [{"metadata": {"name": "barman-cloud"},
+                                  "spec": {"selector": sel}} for sel in selectors]})
+
+
+def pods(*ready):
+    return json.dumps({"items": [
+        {"metadata": {"name": f"barman-cloud-{i}"},
+         "status": {"conditions": [{"type": "Ready", "status": "True" if r else "False"}]}}
+        for i, r in enumerate(ready)]})
+
+
 class FakeKubectl:
     """Answers kubectl calls by their arguments; records every call."""
 
-    def __init__(self, crd=True, deploys=deployments("ghcr.io/cloudnative-pg/cloudnative-pg:1.30.1")):
+    def __init__(self, crd=True, deploys=deployments("ghcr.io/cloudnative-pg/cloudnative-pg:1.30.1"),
+                 plugin_crd=True, services=plugin_services({"app": "barman-cloud"}),
+                 plugin_pods=pods(True)):
         self.crd, self.deploys, self.calls = crd, deploys, []
+        self.plugin_crd, self.services, self.plugin_pods = plugin_crd, services, plugin_pods
 
     def __call__(self, argv):
         self.calls.append(argv)
-        if "crd" in argv:
+        if "crd" in argv and release.CNPG_CRD in argv:
             return (0, "customresourcedefinition.apiextensions.k8s.io/" + release.CNPG_CRD) \
                 if self.crd else (1, "NotFound")
+        if "crd" in argv and release.PLUGIN_CRD in argv:
+            return (0, "customresourcedefinition.apiextensions.k8s.io/" + release.PLUGIN_CRD) \
+                if self.plugin_crd else (1, "NotFound")
         if "deployments" in argv:
             return 0, self.deploys
+        if "services" in argv:
+            return 0, self.services
+        if "pods" in argv:
+            return 0, self.plugin_pods
         raise AssertionError(f"unexpected call {argv}")
 
 
@@ -101,25 +126,98 @@ class Preconditions(unittest.TestCase):
             deploys=deployments("ghcr.io/cloudnative-pg/cloudnative-pg:1.300.0")))
         self.assertTrue(problems)
 
+    # ADR-043 §3: the plugin runs in NS_CNPG_SYSTEM and the ObjectStore CRD is present.
+    def test_the_plugin_running_is_named_in_the_notes(self):
+        problems, notes = self.check(FakeKubectl())
+        self.assertEqual(problems, [])
+        self.assertIn("Barman Cloud Plugin", "\n".join(notes))
 
-POLARIS_ENV = {**ENV, "NS_CATALOG_POLARIS": "catalog-polaris"}
+    def test_no_object_store_crd_stops(self):
+        problems, _ = self.check(FakeKubectl(plugin_crd=False))
+        self.assertEqual(len(problems), 1)
+        self.assertIn(release.PLUGIN_CRD, problems[0])
+        self.assertIn("ADR-043", problems[0])
+
+    def test_the_plugin_is_found_as_cnpg_finds_it_in_the_operator_namespace(self):
+        kubectl = FakeKubectl()
+        self.check(kubectl)
+        call = next(a for a in kubectl.calls if "services" in a)
+        self.assertEqual(call[call.index("-n") + 1], "cnpg-system")
+        self.assertEqual(call[call.index("-l") + 1],
+                         "cnpg.io/pluginName=barman-cloud.cloudnative-pg.io")
+
+    def test_its_pods_are_read_by_the_services_selector(self):
+        kubectl = FakeKubectl(services=plugin_services({"app": "barman-cloud", "tier": "x"}))
+        self.check(kubectl)
+        call = next(a for a in kubectl.calls if "pods" in a)
+        self.assertEqual(call[call.index("-n") + 1], "cnpg-system")
+        self.assertEqual(call[call.index("-l") + 1], "app=barman-cloud,tier=x")
+
+    def test_no_plugin_service_stops(self):
+        kubectl = FakeKubectl(services=plugin_services())
+        problems, _ = self.check(kubectl)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("no Barman Cloud Plugin", problems[0])
+        self.assertIn("cnpg-system", problems[0])
+        self.assertFalse([a for a in kubectl.calls if "pods" in a])
+
+    def test_no_ready_plugin_pod_stops(self):
+        for answer in (pods(), pods(False, False)):
+            with self.subTest(pods=answer):
+                problems, _ = self.check(FakeKubectl(plugin_pods=answer))
+                self.assertEqual(len(problems), 1)
+                self.assertIn("not running", problems[0])
+
+    def test_an_unsupported_operator_and_a_missing_plugin_are_both_named(self):
+        problems, _ = self.check(FakeKubectl(
+            deploys=deployments("ghcr.io/cloudnative-pg/cloudnative-pg:1.31.0"),
+            plugin_crd=False))
+        self.assertEqual(len(problems), 2)
+
+
+POLARIS_ENV = {**ENV, "NS_CATALOG_POLARIS": "catalog-polaris",
+               "NS_CATALOG_DATAHUB": "catalog-datahub",
+               "S3_ENDPOINT": "http://s3.example.invalid:8333",
+               "POLARIS_BACKUP_BUCKET": "polaris-backup"}
 
 
 class FakeCalls:
     """Answers step 1's kubectl and helm calls; records every call."""
 
-    def __init__(self, secret=True, helm=(0, ""), wait=(0, "")):
+    def __init__(self, secret=True, helm=(0, ""), wait=(0, ""), clusters=None, pods=(0, ""),
+                 label=(0, "")):
         self.secret, self.helm, self.wait, self.calls = secret, helm, wait, []
+        self.pods, self.label = pods, label
+        self.values = []
+        # The Cluster as each `get` reads it; the last answer repeats.
+        self.clusters = list(clusters or [cluster_status()])
 
     def __call__(self, argv):
         self.calls.append(argv)
         if argv[0] == "helm":
+            files = [argv[i + 1] for i, a in enumerate(argv) if a == "-f"]
+            for path in files:
+                if path.endswith(".json"):
+                    with open(path, encoding="utf-8") as f:
+                        self.values.append(json.load(f))
             return self.helm
         if "secret" in argv:
             return (0, "secret/polaris-db") if self.secret else (1, "NotFound")
         if "wait" in argv:
             return self.wait
+        if argv[5:7] == ["get", "pods"]:
+            return self.pods
+        if "label" in argv:
+            return self.label
+        if f"cluster/{release.POLARIS_PG}" in argv and "get" in argv:
+            answer = self.clusters.pop(0) if len(self.clusters) > 1 else self.clusters[0]
+            return (0, json.dumps(answer)) if isinstance(answer, dict) else answer
         raise AssertionError(f"unexpected call {argv}")
+
+
+def cluster_status(phase="Cluster in healthy state", ready=3, instances=3):
+    return {"spec": {"instances": instances},
+            "status": {"phase": phase, "readyInstances": ready}}
 
 
 class PolarisPostgres(unittest.TestCase):
@@ -130,7 +228,8 @@ class PolarisPostgres(unittest.TestCase):
         calls = FakeCalls()
         problems, notes = self.step(calls)
         self.assertEqual(problems, [])
-        self.assertEqual([c[0] for c in calls.calls], ["kubectl", "helm", "kubectl"])
+        self.assertEqual([c[0] for c in calls.calls], ["kubectl", "helm", "kubectl"]
+                         + ["kubectl"] * release.SETTLE_READS)
         helm = calls.calls[1]
         self.assertEqual(helm[:3], ["helm", "--kube-context", "kind-lakehouse-gate"])
         self.assertEqual(helm[helm.index("-n") + 1], "catalog-polaris")
@@ -177,10 +276,236 @@ class PolarisPostgres(unittest.TestCase):
         problems, _ = self.step(FakeCalls(helm=(1, "admission webhook denied")))
         self.assertIn("admission webhook denied", "\n".join(problems))
 
+    # CNPG sets no observedGeneration on Ready: after an upgrade, `kubectl wait` passed before
+    # the operator began restarting the instances (smoke 38215183351, adding the plugin).
+    def test_after_ready_the_cluster_must_read_healthy_several_times_in_a_row(self):
+        calls = FakeCalls(clusters=[
+            cluster_status(), cluster_status("Upgrading cluster", ready=2),
+            cluster_status("Waiting for the instances to become active", ready=2),
+            cluster_status(), cluster_status(), cluster_status()])
+        problems, notes = self.step(calls)
+        self.assertEqual(problems, [])
+        reads = [c for c in calls.calls if f"cluster/{release.POLARIS_PG}" in c and "get" in c]
+        self.assertEqual(len(reads), 6)
+        for argv in reads:
+            self.assertEqual(argv[:5], ["kubectl", "--context", "kind-lakehouse-gate", "-n",
+                                        "catalog-polaris"])
+            self.assertEqual(argv[-2:], ["-o", "json"])
+        self.assertIn("healthy", "\n".join(notes))
+
+    def test_all_instances_must_be_ready_for_a_healthy_read(self):
+        calls = FakeCalls(clusters=[cluster_status(ready=2)] * 2 + [cluster_status()])
+        problems, _ = self.step(calls)
+        self.assertEqual(problems, [])
+        reads = [c for c in calls.calls if f"cluster/{release.POLARIS_PG}" in c and "get" in c]
+        self.assertEqual(len(reads), 2 + release.SETTLE_READS)
+
+    def test_a_cluster_that_never_settles_stops_with_its_phase(self):
+        with mock.patch.object(release, "SETTLE_TIMEOUT", 0):
+            problems, _ = self.step(FakeCalls(clusters=[cluster_status("Upgrading cluster", 2)]))
+        self.assertIn("polaris-pg", "\n".join(problems))
+        self.assertIn("Upgrading cluster", "\n".join(problems))
+
+    def test_a_dry_run_reads_no_cluster(self):
+        calls = FakeCalls()
+        self.step(calls, dry_run=True)
+        self.assertFalse([c for c in calls.calls if f"cluster/{release.POLARIS_PG}" in c])
+
     def test_a_cluster_that_never_gets_ready_stops(self):
         problems, _ = self.step(FakeCalls(wait=(1, "timed out")))
         self.assertIn("polaris-pg", "\n".join(problems))
         self.assertIn("timed out", "\n".join(problems))
+
+    # ADR-043 §2: backups to the S3 endpoint from .env, into their own bucket, with their key.
+    def test_the_backups_endpoint_and_bucket_come_from_env_in_a_values_file(self):
+        for dry_run in (False, True):
+            with self.subTest(dry_run=dry_run):
+                calls = FakeCalls()
+                self.step(calls, dry_run=dry_run)
+                self.assertEqual(calls.values, [{"backup": {
+                    "endpointURL": "http://s3.example.invalid:8333",
+                    "bucket": "polaris-backup"}}])
+                self.assertFalse(any(os.path.exists(a) for c in calls.calls for a in c
+                                     if a.endswith(".json")))
+
+    def test_the_backup_key_secret_is_required_with_the_database_one(self):
+        calls = FakeCalls()
+        self.step(calls)
+        secret = calls.calls[0]
+        self.assertEqual(secret[secret.index("secret") + 1:secret.index("-o")],
+                         ["polaris-db", "polaris-backup-s3"])
+        problems, _ = self.step(FakeCalls(secret=False))
+        self.assertIn("polaris-backup-s3", "\n".join(problems))
+
+    def test_an_empty_bucket_or_endpoint_stops_before_any_call(self):
+        for var in ("POLARIS_BACKUP_BUCKET", "S3_ENDPOINT"):
+            with self.subTest(var=var):
+                calls = FakeCalls()
+                problems, _ = self.step(calls, env={**POLARIS_ENV, var: ""})
+                self.assertIn(var, "\n".join(problems))
+                self.assertIn("ADR-043", "\n".join(problems))
+                self.assertEqual(calls.calls, [])
+
+
+NETPOL_ENV = {**POLARIS_ENV,
+              "POLARIS_GATEWAY_NAMESPACE_LABEL": "example.org/caller=gateway",
+              "POLARIS_QUERY_NAMESPACE_LABEL": "example.org/caller=query",
+              "METRICS_NAMESPACE_LABEL": "example.org/caller=metrics",
+              "INGRESS_NAMESPACE_LABEL": "example.org/caller=ingress"}
+
+
+class NetworkPolicies(unittest.TestCase):
+    """ADR-048, first in step 1 (ADR-045)."""
+
+    def step(self, calls, env=NETPOL_ENV, dry_run=False):
+        return release.network_policies(env, calls, dry_run=dry_run)
+
+    def helm(self, calls):
+        (helm,) = [c for c in calls.calls if c[0] == "helm"]
+        return helm
+
+    def test_installs_this_repositorys_chart_in_polaris_namespace(self):
+        calls = FakeCalls()
+        problems, notes = self.step(calls)
+        self.assertEqual(problems, [])
+        helm = self.helm(calls)
+        self.assertEqual(helm[:3], ["helm", "--kube-context", "kind-lakehouse-gate"])
+        self.assertEqual(helm[helm.index("-n") + 1], "catalog-polaris")
+        self.assertEqual(helm[helm.index("upgrade"):helm.index("upgrade") + 4],
+                         ["upgrade", "--install", release.POLARIS_NETPOL_RELEASE,
+                          release.POLARIS_NETPOL_CHART])
+        self.assertTrue(os.path.isfile(os.path.join(release.POLARIS_NETPOL_CHART, "Chart.yaml")))
+        self.assertNotIn("--dry-run=server", helm)
+        self.assertIn("network policies", "\n".join(notes))
+
+    def test_every_call_names_the_context_and_the_namespace(self):
+        calls = FakeCalls(pods=(0, "pod/polaris-a\npod/polaris-b\n"))
+        self.step(calls)
+        self.assertEqual(len(calls.calls), 3)
+        for argv in calls.calls:
+            flag = "--kube-context" if argv[0] == "helm" else "--context"
+            self.assertEqual(argv[1:3], [flag, "kind-lakehouse-gate"])
+            self.assertEqual(argv[argv.index("-n") + 1], "catalog-polaris")
+
+    def test_the_values_come_from_env(self):
+        calls = FakeCalls()
+        self.step(calls)
+        self.assertEqual(calls.values, [{
+            "callers": {"gateway": {"key": "example.org/caller", "value": "gateway"},
+                        "query": {"key": "example.org/caller", "value": "query"},
+                        "metrics": {"key": "example.org/caller", "value": "metrics"},
+                        "ingress": {"key": "example.org/caller", "value": "ingress"}},
+            "namespaces": {"datahub": "catalog-datahub", "operator": "cnpg-system"},
+            "console": {"enabled": False}}])
+
+    def test_the_console_enabled_opens_its_rules(self):
+        calls = FakeCalls()
+        self.step(calls, env={**NETPOL_ENV, **CONSOLE_ENV})
+        self.assertEqual(calls.values[0]["console"], {"enabled": True})
+
+    def test_an_empty_caller_class_is_left_out_and_named(self):
+        calls = FakeCalls()
+        env = {**NETPOL_ENV, "POLARIS_QUERY_NAMESPACE_LABEL": "", "METRICS_NAMESPACE_LABEL": ""}
+        problems, notes = self.step(calls, env=env)
+        self.assertEqual(problems, [])
+        self.assertEqual(sorted(calls.values[0]["callers"]), ["gateway", "ingress"])
+        text = "\n".join(notes)
+        self.assertIn("POLARIS_QUERY_NAMESPACE_LABEL", text)
+        self.assertIn("METRICS_NAMESPACE_LABEL", text)
+
+    def test_a_label_without_a_value_stops_before_any_call(self):
+        calls = FakeCalls()
+        problems, _ = self.step(calls, env={**NETPOL_ENV, "METRICS_NAMESPACE_LABEL": "team"})
+        self.assertIn("METRICS_NAMESPACE_LABEL", "\n".join(problems))
+        self.assertEqual(calls.calls, [])
+
+    def test_an_empty_namespace_stops_before_any_call(self):
+        for var in ("NS_CATALOG_POLARIS", "NS_CATALOG_DATAHUB", "NS_CNPG_SYSTEM"):
+            with self.subTest(var=var):
+                calls = FakeCalls()
+                problems, _ = self.step(calls, env={**NETPOL_ENV, var: ""})
+                self.assertIn(var, "\n".join(problems))
+                self.assertEqual(calls.calls, [])
+
+    def test_running_polaris_pods_get_the_client_label_before_the_policies(self):
+        # The first upgrade to a release with policies: Polaris's pods from the release before
+        # keep reaching polaris-pg until their rollout (Kade, 2026-10-13, option a).
+        calls = FakeCalls(pods=(0, "pod/polaris-a\npod/polaris-b\n"))
+        problems, notes = self.step(calls)
+        self.assertEqual(problems, [])
+        get, label, helm = calls.calls
+        self.assertEqual(get[5:], ["get", "pods", "-l", release.POLARIS_POD_SELECTOR,
+                                   "-o", "name"])
+        self.assertEqual(release.POLARIS_POD_SELECTOR,
+                         "app.kubernetes.io/name=polaris,app.kubernetes.io/instance=polaris")
+        self.assertEqual(label[5:], ["label", "--overwrite", "pod/polaris-a", "pod/polaris-b",
+                                     f"{release.PG_CLIENT_LABEL}=true"])
+        self.assertEqual(helm[0], "helm")
+        self.assertIn("2 running Polaris pods", "\n".join(notes))
+
+    def test_no_running_polaris_pod_labels_nothing(self):
+        calls = FakeCalls()
+        self.step(calls)
+        self.assertFalse(any("label" in c for c in calls.calls))
+
+    def test_a_failed_label_or_listing_stops_before_helm(self):
+        for fake in (FakeCalls(pods=(1, "forbidden")),
+                     FakeCalls(pods=(0, "pod/polaris-a"), label=(1, "forbidden"))):
+            with self.subTest(fake=fake.pods):
+                problems, _ = self.step(fake)
+                self.assertIn("forbidden", "\n".join(problems))
+                self.assertFalse(any(c[0] == "helm" for c in fake.calls))
+
+    def test_dry_run_is_server_side_and_labels_nothing(self):
+        calls = FakeCalls(pods=(0, "pod/polaris-a"))
+        problems, notes = self.step(calls, dry_run=True)
+        self.assertEqual(problems, [])
+        self.assertEqual([c[0] for c in calls.calls], ["helm"])
+        self.assertIn("--dry-run=server", calls.calls[0])
+        self.assertIn("dry-run", "\n".join(notes))
+
+    def test_a_failed_helm_stops_with_its_error(self):
+        problems, _ = self.step(FakeCalls(helm=(1, "values don't meet the schema")))
+        self.assertIn("values don't meet the schema", "\n".join(problems))
+
+
+class Settle(unittest.TestCase):
+    """settle reads the Cluster it is given, polaris-pg unless told otherwise."""
+
+    @staticmethod
+    def reads(*clusters):
+        calls, answers = [], list(clusters)
+
+        def run(argv):
+            calls.append(argv)
+            return 0, json.dumps(answers.pop(0) if len(answers) > 1 else answers[0])
+        return calls, run
+
+    def test_polaris_pg_by_default(self):
+        calls, run = self.reads(cluster_status())
+        self.assertIsNone(release.settle(run, "kind-lakehouse-gate", "catalog-polaris"))
+        self.assertTrue(all(f"cluster/{release.POLARIS_PG}" in argv for argv in calls))
+
+    # Smoke 38245393066: polaris-pg-restore read Ready, then refused psql while CNPG
+    # restarted it after the recovery (#83).
+    def test_the_cluster_it_is_given(self):
+        calls, run = self.reads(cluster_status(instances=1, ready=0),
+                                cluster_status(instances=1, ready=1))
+        self.assertIsNone(release.settle(run, "kind-lakehouse-gate", "catalog-polaris",
+                                         cluster="polaris-pg-restore"))
+        self.assertEqual(len(calls), 1 + release.SETTLE_READS)
+        for argv in calls:
+            self.assertEqual(argv, ["kubectl", "--context", "kind-lakehouse-gate", "-n",
+                                    "catalog-polaris", "get", "cluster/polaris-pg-restore",
+                                    "-o", "json"])
+
+    def test_a_problem_names_the_cluster_it_is_given(self):
+        _, run = self.reads(cluster_status("Setting up primary", ready=0, instances=1))
+        with mock.patch.object(release, "SETTLE_TIMEOUT", 0):
+            problem = release.settle(run, "kind-lakehouse-gate", "catalog-polaris",
+                                     cluster="polaris-pg-restore")
+        self.assertIn("Cluster polaris-pg-restore in catalog-polaris", problem)
+        self.assertIn("Setting up primary", problem)
 
 
 class Steps(unittest.TestCase):
@@ -199,7 +524,7 @@ class Steps(unittest.TestCase):
         boot, pol, claim = FakeBootstrap(), FakePolaris(), FakeClaim()
 
         def run(argv, stdin=None):
-            if "crd" in argv or "deployments" in argv:
+            if "crd" in argv or "cnpg-system" in argv:
                 return step0(argv)
             if "endpoint-check" in " ".join(argv):
                 return endpoints(argv, stdin)
@@ -217,14 +542,33 @@ class Steps(unittest.TestCase):
                                           dry_run=False)
         self.assertEqual(problems, [])
         self.assertEqual([n.split(":")[0] for n in notes],
-                         ["Step 0"] + ["Step 1"] * 5 + ["Step 2"] * 2)
-        self.assertIn("polaris-pg", notes[1])
-        self.assertIn("answer", notes[2])
-        self.assertIn("bootstrapped", notes[3])
-        self.assertIn("polaris-logs", notes[4])
-        self.assertIn("deployment/polaris", notes[5])
-        self.assertIn("cronjob/polaris-log-batch", notes[6])
-        self.assertIn("console is not enabled", notes[7])
+                         ["Step 0"] * 2 + ["Step 1"] * 6 + ["Step 2"] * 2)
+        self.assertIn("Barman Cloud Plugin", notes[1])
+        self.assertIn("network policies", notes[2])
+        self.assertIn("polaris-pg", notes[3])
+        self.assertIn("answer", notes[4])
+        self.assertIn("bootstrapped", notes[5])
+        self.assertIn("polaris-logs", notes[6])
+        self.assertIn("deployment/polaris", notes[7])
+        self.assertIn("cronjob/polaris-log-batch", notes[8])
+        self.assertIn("console is not enabled", notes[9])
+        # ADR-045 §2: the policies first in step 1, before polaris-pg.
+        helms = [c for c in pg.calls if c[0] == "helm"]
+        self.assertEqual([h[h.index("--install") + 1] for h in helms],
+                         [release.POLARIS_NETPOL_RELEASE, release.POLARIS_PG_RELEASE])
+
+    def test_failed_network_policies_stop_before_polaris_pg(self):
+        step0, pg = FakeKubectl(), FakeCalls(helm=(1, "values don't meet the schema"))
+
+        def run(argv, stdin=None):
+            if "crd" in argv or "cnpg-system" in argv:
+                return step0(argv)
+            return pg(argv)
+        problems, _ = release.install(BOOTSTRAP_ENV, run, ["1.30"], dry_run=False)
+        self.assertIn("schema", "\n".join(problems))
+        helms = [c for c in pg.calls if c[0] == "helm"]
+        self.assertEqual(len(helms), 1)
+        self.assertIn(release.POLARIS_NETPOL_CHART, helms[0])
 
     def test_a_failed_batch_stops_the_install_before_the_console(self):
         step0, pg, endpoints = FakeKubectl(), FakeCalls(), FakeRun()
@@ -232,7 +576,7 @@ class Steps(unittest.TestCase):
         batch, console = FakeBatch(helm=(1, "image tag invalid")), FakeConsole()
 
         def run(argv, stdin=None):
-            if "crd" in argv or "deployments" in argv:
+            if "crd" in argv or "cnpg-system" in argv:
                 return step0(argv)
             if "endpoint-check" in " ".join(argv):
                 return endpoints(argv, stdin)
@@ -259,7 +603,7 @@ class Steps(unittest.TestCase):
         claim = FakeClaim(storage_class=(1, "NotFound"))
 
         def run(argv, stdin=None):
-            if "crd" in argv or "deployments" in argv:
+            if "crd" in argv or "cnpg-system" in argv:
                 return step0(argv)
             if "endpoint-check" in " ".join(argv):
                 return endpoints(argv, stdin)
@@ -281,7 +625,7 @@ class Steps(unittest.TestCase):
         console = FakeConsole(rollout=(1, "ErrImageNeverPull"))
 
         def run(argv, stdin=None):
-            if "crd" in argv or "deployments" in argv:
+            if "crd" in argv or "cnpg-system" in argv:
                 return step0(argv)
             if "endpoint-check" in " ".join(argv):
                 return endpoints(argv, stdin)
@@ -308,7 +652,7 @@ class Steps(unittest.TestCase):
         claim = FakeClaim()
 
         def run(argv, stdin=None):
-            if "crd" in argv or "deployments" in argv:
+            if "crd" in argv or "cnpg-system" in argv:
                 return step0(argv)
             if "endpoint-check" in " ".join(argv):
                 return endpoints(argv, stdin)
@@ -327,7 +671,7 @@ class Steps(unittest.TestCase):
         step0, step1 = FakeKubectl(), FakeCalls()
 
         def run(argv, stdin=None):
-            if "crd" in argv or "deployments" in argv:
+            if "crd" in argv or "cnpg-system" in argv:
                 return step0(argv)
             return (1, "http://s3.example:8333 did not answer") if "run" in argv \
                 else step1(argv)
@@ -338,7 +682,7 @@ class Steps(unittest.TestCase):
         step0, step1, endpoints, claim = FakeKubectl(), FakeCalls(), FakeRun(), FakeClaim()
 
         def run(argv, stdin=None):
-            if "crd" in argv or "deployments" in argv:
+            if "crd" in argv or "cnpg-system" in argv:
                 return step0(argv)
             if "storageclass" in argv or "apply" in argv:
                 return claim(argv, stdin)
@@ -543,6 +887,12 @@ class Bootstrap(unittest.TestCase):
                          {"name": "polaris-root", "key": "clientId"})
         self.assertEqual(env["POLARIS_ROOT_CLIENT_SECRET"]["valueFrom"]["secretKeyRef"],
                          {"name": "polaris-root", "key": "clientSecret"})
+
+    def test_the_pod_carries_the_label_polaris_pgs_policy_allows(self):
+        # ADR-048 §3: only pods labelled as its clients reach polaris-pg.
+        calls = FakeBootstrap()
+        self.step(calls)
+        self.assertIn(f"--labels={release.PG_CLIENT_LABEL}=true", self.run_call(calls))
 
     def test_it_reaches_the_database_as_polaris_does(self):
         calls = FakeBootstrap()

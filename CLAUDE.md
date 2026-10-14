@@ -30,11 +30,11 @@ storage, observability, SSO and the catalog gateway are other teams' services, r
 | `scripts/auto_merge_gate.py` | Merge, wait or stop from a head's checks, drafts and paths (ADR-022, ADR-030) |
 | `scripts/gate_check.py` | gate-check: platform files need a dry-run and a smoke covering the head (ADR-039), batch and fixture spec files a log-batch (ADR-040) |
 | `scripts/branch_cleanup.py` | Which merged `claude/*` and stale `gate/*` branches to delete (ADR-032) |
-| `gates/` | The kind gate: pinned tools and node image, the cluster, CNPG, the stand-ins (SeaweedFS, OPA with `gates/opa/policy.rego`), the recorder that `check-traffic` reads, the PyIceberg smoke tests (`gates/iceberg/`), the console's sign-in check (`gates/console/`), `check-logs` with a stand-in Fluent Bit reading the log batch's output; `fixtures.py`, Polaris's files across a real UTC hour, and `log_batch_gate.py`, the batch over them through Fluent Bit into an OpenSearch stand-in (ADR-040); on the gate only, the gate's Secrets (ADR-017, ADR-026, ADR-029, ADR-031, ADR-034, ADR-036) |
-| `charts/`, `images/` | Local charts: `polaris-postgres` (ADR-010); `polaris`, upstream's 1.6.0, and `polaris-console`, polaris-tools at a pinned commit, each unchanged with our `values-lakehouse.yaml` (ADR-009, ADR-028); `images/polaris-console` builds the console on the gate from that commit with our lockfile; `polaris-log-batch` and `images/polaris-log-batch`, the log batch's CronJob and image, its contract in `docs/contracts/` (ADR-036); tests render each chart, check its values schema, run kubeconform on CNPG's CRD (ADR-016) |
-| `install/` | `release.py` installs a release in ADR-029's order (step 0 the CNPG precondition; step 1 Polaris's PostgreSQL, the S3 and policy endpoints answering, the realm bootstrap, Polaris; step 2 the log batch, whose failure stops the install (ADR-037), then the console when enabled, never blocking); `release_tag.py` names tags, reads the release gate, writes notes (ADR-033) |
+| `gates/` | The kind gate: pinned tools and node image, the cluster, CNPG, cert-manager and the Barman Cloud Plugin, the stand-ins (SeaweedFS, OPA with `gates/opa/policy.rego`), the recorder that `check-traffic` reads, the PyIceberg smoke tests (`gates/iceberg/`), the console's sign-in check (`gates/console/`), `check-restore` (a backup of polaris-pg restored, ADR-043), `check-logs` with a stand-in Fluent Bit reading the log batch's output; `network.py`, the gate's own allow policies and `check-network`, one allowed and one refused connection per rule (ADR-048); `metrics.py`, a Prometheus stand-in loading `docs/contracts/`'s scrape file and `check-metrics` (ADR-046); `fixtures.py`, Polaris's files across a real UTC hour, and `log_batch_gate.py`, the batch over them through Fluent Bit into an OpenSearch stand-in (ADR-040); on the gate only, the gate's Secrets (ADR-017, ADR-026, ADR-031, ADR-034, ADR-036, ADR-045) |
+| `charts/`, `images/` | Local charts: `polaris-postgres` with its backups (ADR-010, ADR-043); `polaris-network-policies`, ingress to Polaris's namespace (ADR-048, ADR-046); `polaris`, upstream's 1.6.0, and `polaris-console`, polaris-tools at a pinned commit, each unchanged with our `values-lakehouse.yaml` (ADR-009, ADR-028); `images/polaris-console` builds the console on the gate from that commit with our lockfile; `polaris-log-batch` and `images/polaris-log-batch`, the log batch's CronJob and image, its contract in `docs/contracts/` (ADR-036); tests render each chart, check its values schema, run kubeconform on CNPG's CRD and the pinned NetworkPolicy schema (ADR-016) |
+| `install/` | `release.py` installs a release in ADR-045's order (step 0 the CNPG and plugin preconditions; step 1 Polaris's network policies, its PostgreSQL, the S3 and policy endpoints answering, the realm bootstrap, Polaris; step 2 the log batch, whose failure stops the install (ADR-037), then the console when enabled, never blocking); `release_tag.py` names tags, reads the release gate, writes notes (ADR-033) |
 | `scripts/init_env.py` | init-env: `.env` with credentials per clone; `--apply-secrets` (ADR-006) |
-| `.github/workflows/` | `static.yml`, `gate-check.yml` (ADR-039), `dry-run.yml`, `smoke.yml` (ADR-038), `log-batch.yml`, `create-fixtures.yml` (ADR-040), `auto-merge.yml` (ADR-022), `branch-cleanup.yml` (ADR-032), `release-gate.yml`, `release.yml` (ADR-033, ADR-042), `labels.yml` |
+| `.github/workflows/` | `static.yml`, `gate-check.yml` (ADR-039), `dry-run.yml`, `smoke.yml` (ADR-050), `log-batch.yml`, `create-fixtures.yml` (ADR-040), `auto-merge.yml` (ADR-022), `branch-cleanup.yml` (ADR-032), `delete-gate-branch.yml` (ADR-049), `release-gate.yml`, `release.yml` (ADR-033, ADR-042), `labels.yml` |
 | `.github/labels.json` | The state labels, synced by `labels.yml` (ADR-003) |
 | `.env.template` | Every per-environment variable, credentials empty (ADR-002) |
 
@@ -48,11 +48,11 @@ storage, observability, SSO and the catalog gateway are other teams' services, r
 | `CLAUDE.md`, `.claude/` | `python3 scripts/claude_md_check.py` |
 | `init_env.py --apply-secrets` | Needs a Linux test cluster: label the issue `cmd:verify-needs-linux` |
 
-CI runs all of these as the **static** gate on every push to `claude/**` and every PR (ADR-038).
-**gate-check** runs on every PR into `main` (ADR-039): a PR changing `charts/`, `images/`,
-`install/`, `gates/` or the gate workflows needs a passing dry-run and smoke covering its head; one
-changing batch or fixture spec files, a log-batch (ADR-040 §5). gate-check does not wait: push each
-head to `gate/<dry-run|smoke|log-batch>/<task>` as needed, then open the PR or push it once all passed.
+CI runs these as the **static** gate on every push to `claude/**` and every PR (ADR-050). **gate-check**
+(ADR-039, every PR into `main`): `charts/`, `images/`, `install/`, `gates/` or the gate workflows need
+passing dry-run and smoke runs on the head; batch or fixture spec files, a log-batch (ADR-040 §5).
+`install/`, `scripts/init_env.py` or a file added to or removed from `charts/` also need smoke-fresh,
+unread by gate-check (ADR-050 §3). How to push each head to `gate/<level>/<task>`: `.claude/rules/gates.md`.
 
 ## Environments and clusters (ADR-004, ADR-005)
 
@@ -91,7 +91,7 @@ head to `gate/<dry-run|smoke|log-batch>/<task>` as needed, then open the PR or p
   It never merges a draft, nor a PR changing `.github/workflows/`, `scripts/auto_merge_gate.py`
   or `scripts/gate_check.py` (ADR-030): open those as drafts Kade merges by hand. It is read
   from `main`, so a change to it acts after its own merge. Kade's branches merge by hand.
-- `branch-cleanup.yml` deletes merged `claude/*` branches and their `gate/*` branches (ADR-032).
+- A gate run deletes its `gate/*` branch when it ends (ADR-049); `branch-cleanup.yml` deletes merged `claude/*` branches and any gate branch left over (ADR-032).
 - Releases (ADR-033): a PR from `main` into `rc`, gated by `release-gate.yml`, merged by Kade;
   `release.yml` on `rc` tags it. Sessions open such a PR or run a release only when asked.
 

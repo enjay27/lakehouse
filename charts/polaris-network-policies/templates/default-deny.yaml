@@ -1,0 +1,12 @@
+# Every pod in the namespace is denied ingress unless another policy allows it (ADR-048 §1).
+# Connections from the pod's own node, the kubelet's probes among them, stay allowed.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  labels:
+    {{- include "polaris-network-policies.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress

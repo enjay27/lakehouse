@@ -68,7 +68,7 @@ source does not matter for operation. What follows is the list they cover.
     `.env`.
   - Object storage becomes an external S3 endpoint, with SeaweedFS only as the gate's
     stand-in (ADR-031).
-  - The install order without storage and monitoring (restated in full by ADR-029).
+  - The install order without storage and monitoring (restated in full by ADR-045).
   - Fluent Bit and OpenSearch belong to the observability team; this repository delivers the
     log files ADR-014 describes, in a documented format (ADR-024).
   - ADR-014: its open question (sharing the log volume across nodes) is answered before the
@@ -87,12 +87,12 @@ source does not matter for operation. What follows is the list they cover.
 
 ### P1: the gates and the foundation
 
-- The kind gate with dry-run and smoke workflows (ADR-017, ADR-038), gate-check (ADR-039),
-  and the release flow `main` → `rc` → tag (ADR-033, ADR-021). The first release has nothing
+- The kind gate with dry-run and smoke workflows (ADR-017, ADR-050), gate-check (ADR-039),
+  and the release flow `main` → `rc` → tag (ADR-033, ADR-051). The first release has nothing
   to upgrade from.
 - The CloudNativePG operator on the gate and test clusters only, at the pinned version; on
   the target clusters it is the operator team's, and a release only checks it is present
-  (ADR-029, accepted by Kade on 2026-10-10).
+  (first decided by Kade on 2026-10-10; ADR-045).
 - gate-check first, before any platform file (done, PR #16); then ADR-030 (accepted), so
   auto-merge leaves PRs that change workflows or gate scripts, and drafts, to Kade
   ([#15](https://github.com/enjay27/lakehouse/issues/15)).
@@ -132,7 +132,7 @@ source does not matter for operation. What follows is the list they cover.
   installed by `gates/gate.py standins` before every gate install. The policy follows what
   Polaris 1.6.0 actually sends and reads, from its source: `docs/contracts/polaris-opa-input.md`
   (the URL names the package, the answer is `result.allow`). `release.py` now stops before
-  Polaris unless the S3 and policy endpoints answer from Polaris's namespace (ADR-029); the
+  Polaris unless the S3 and policy endpoints answer from Polaris's namespace (ADR-045); the
   smoke gate's `check-standins` makes an S3 round trip with Polaris's credentials and checks
   the policy's allowed and refused cases.
   Gates on commit `4f173d8` (2026-10-11), both upgrading from `platform-2026.10.10`: dry-run
@@ -208,8 +208,26 @@ source does not matter for operation. What follows is the list they cover.
   books balance, each refused request is kept once from its pod, no read is kept but the rows
   count them, both pods' files are read, and the second run changes nothing.
   The release workflow pushes the batch's image to GHCR under its content-hash tag, and a
-  cluster pulls it from `IMAGE_REGISTRY` or GHCR (ADR-042, #55); the first release proves
-  the push.
+  cluster pulls it from `IMAGE_REGISTRY` or GHCR (ADR-042, #55); `platform-2026.10.12`,
+  the first release with Polaris, pushed it (#78).
+- Backups (2026-10-12, ADR-043, #83). polaris-pg archives its WAL and takes a daily base
+  backup through the Barman Cloud Plugin into `POLARIS_BACKUP_BUCKET`, with its own key in
+  `polaris-backup-s3`; step 0 requires the plugin and its `ObjectStore` CRD. The gate
+  installs cert-manager and the plugin from pinned manifests, and the smoke gate's
+  `check-restore` backs polaris-pg up, restores it into `polaris-pg-restore` and reads the
+  root principal and the smoke tests' catalog from it.
+- Network policies (2026-10-13, ADR-048, ADR-045, #93). `charts/polaris-network-policies`
+  denies ingress to Polaris's namespace by default and allows each rule of ADR-048 by
+  namespace label from `.env`; step 1 installs it first, after labelling Polaris's running
+  pods as polaris-pg's clients. The stand-ins' namespace denies by default too. The smoke
+  gate's `check-network` makes one allowed and one refused connection per rule. The target
+  clusters' labels are a question for the operator team (#9).
+- Polaris's metrics (2026-10-13, ADR-046, #98): P5's Polaris half, built ahead of Datahub.
+  Polaris on 8182 and polaris-pg's instances on 9187 are a scrape contract in
+  `docs/contracts/`; a release ships no `ServiceMonitor`. The smoke gate's Prometheus
+  stand-in loads the contract's scrape file and `check-metrics` requires every pod up and
+  the contract's series.
+- Before Datahub (Kade, 2026-10-12): failover (#31) next.
 - **Gate:** dry-run and smoke. **Linux:** the release installed on a test cluster.
 
 ### P3: Datahub
@@ -244,8 +262,8 @@ source does not matter for operation. What follows is the list they cover.
 
 ### P5: hooks for the observability team
 
-- Metrics endpoints for Polaris (management port 8182) and Datahub, and the scrape
-  configuration the other team's Prometheus needs.
+- Metrics endpoints and the scrape configuration the other team's Prometheus needs:
+  Polaris's done in P2 (ADR-046); Datahub's join the contract with its chart.
 - Log files and their format as P0 documents them. No dashboards of our own.
 
 ### P6: measurements
@@ -257,7 +275,7 @@ source does not matter for operation. What follows is the list they cover.
 
 - The first release with Polaris and Datahub, `main` → `rc` → `platform-YYYY.MM.DD`
   (ADR-033), with release notes and runbooks for installing and upgrading.
-- The Polaris 1.7.0 upgrade as its own PR (ADR-009), gated from the last release (ADR-021).
+- The Polaris 1.7.0 upgrade as its own PR (ADR-009), gated from the last release (ADR-051).
 
 ## Pinned versions
 
@@ -268,7 +286,9 @@ when Kade learns the target clusters' version.
 | Item | Pin | Source |
 |---|---|---|
 | Kubernetes (gate, kind) | 1.36 (`kindest/node:v1.36.4`) | Kade: latest stable; 1.37 exists, but CloudNativePG 1.30 supports 1.34–1.36 |
-| CloudNativePG operator (gate only, ADR-029) | 1.30.1 | latest; target unknown |
+| CloudNativePG operator (gate only, ADR-045) | 1.30.1 | latest; target unknown |
+| cert-manager (gate only, ADR-043) | v1.21.2 | newest at least two weeks old; target unknown |
+| Barman Cloud Plugin (gate only, ADR-043) | v0.15.0 | newest at least two weeks old (v0.15.1 under two weeks); target unknown |
 | Polaris | 1.6.0 | Kade (ADR-009) |
 | PostgreSQL for Polaris | 16 (CNPG image 16.15, by digest in `charts/polaris-postgres`), 3 instances, required anti-affinity | Kade |
 | Pooler for Polaris | none | open: Kade does not know (ADR-010) |

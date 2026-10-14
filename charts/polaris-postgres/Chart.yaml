@@ -1,9 +1,10 @@
 # The PostgreSQL of Apache Polaris (ADR-008, ADR-010): one CloudNativePG `Cluster`, installed by
-# install/release.py step 1 before Polaris (ADR-029). The CNPG operator is a precondition,
-# never part of this chart.
+# install/release.py step 1 before Polaris (ADR-029), with its backups: an `ObjectStore` and a
+# daily `ScheduledBackup` through the Barman Cloud Plugin (ADR-043). The CNPG operator and the
+# plugin are preconditions, never part of this chart.
 apiVersion: v2
 name: polaris-postgres
-description: PostgreSQL for Apache Polaris, one CloudNativePG Cluster
+description: PostgreSQL for Apache Polaris, one CloudNativePG Cluster and its backups
 type: application
-version: 0.1.0
+version: 0.2.0
 appVersion: "16.15"

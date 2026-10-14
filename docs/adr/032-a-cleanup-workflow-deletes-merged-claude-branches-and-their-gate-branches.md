@@ -1,6 +1,6 @@
 # ADR-032: A cleanup workflow deletes merged `claude/*` branches and their `gate/*` branches
 
-- **Status:** Accepted
+- **Status:** Amended by ADR-049
 - **Date:** 2026-10-10
 - **Related:** ADR-018, ADR-019, ADR-022, ADR-030
 
