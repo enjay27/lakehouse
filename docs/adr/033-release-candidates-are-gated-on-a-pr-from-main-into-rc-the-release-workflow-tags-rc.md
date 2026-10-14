@@ -1,6 +1,6 @@
 # ADR-033: Release candidates are gated on a PR from `main` into `rc`; the release workflow tags `rc`
 
-- **Status:** Accepted
+- **Status:** Amended by ADR-053
 - **Date:** 2026-10-10
 - **Related:** ADR-018, ADR-019, ADR-020, ADR-021, ADR-022, ADR-032
 
