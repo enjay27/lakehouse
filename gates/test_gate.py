@@ -1033,6 +1033,8 @@ def recovery_pod(suffix, phase, created, containers, init=()):
                        "containerStatuses": [status(*c) for c in containers]}}
 
 
+ARCHIVED_BEFORE = "000000010000000000000007"
+SWITCHED = "000000010000000000000008"
 DONE = {"terminated": {"reason": "Completed", "exitCode": 0}}
 ERROR = {"terminated": {"reason": "Error", "exitCode": 1}}
 # Listed out of order: the report sorts them by creation.
@@ -1161,22 +1163,38 @@ class CheckRestore(unittest.TestCase):
         lines, _ = gate.recovery_report({"items": list(seen.values())})
         self.assertEqual(lines[0], "Full recovery of polaris-pg-restore: 3 pods, 2 failed.")
 
-    def check(self, polls=None, settled=None, unread=()):
+    def check(self, polls=None, settled=None, unread=(), archived=None):
         """Runs check_restore with every command faked. `polls` lists, per read of the wait,
         whether the restore is Ready and the pods read; once they run out the clock passes
-        the timeout. `unread` names the reads of the pods (0-based) that fail.
+        the timeout. `unread` names the reads of the pods (0-based) that fail. `archived`
+        lists what pg_stat_archiver answers on each read, the last answer repeated.
         (problems, notes, events)."""
+        if archived is None:
+            archived = [ARCHIVED_BEFORE, SWITCHED]
         if polls is None:
             aaaaa, bbbbb, ccccc = sorted(RECOVERY_PODS["items"],
                                          key=lambda p: p["metadata"]["name"])
             polls = [(False, [aaaaa]), (False, [bbbbb]), (True, [ccccc])]
-        events, reads = [], {"cluster": 0, "pods": 0}
+        events, reads = [], {"cluster": 0, "pods": 0, "archived": 0}
 
         def subprocess_run(argv, **kwargs):
-            kind = ("cluster" if f"cluster/{gate.RESTORE}" in argv else
+            text = " ".join(argv)
+            kind = ("switch" if "pg_switch_wal" in text else
+                    "archived" if "pg_stat_archiver" in text else
+                    "primary" if f"cluster/{gate.release.POLARIS_PG}" in argv else
+                    "cluster" if f"cluster/{gate.RESTORE}" in argv else
                     "delete" if "delete" in argv else "pods" if "get" in argv else
                     "logs" if "logs" in argv else "psql")
             events.append((kind, argv))
+            if kind == "primary":
+                return subprocess.CompletedProcess(argv, 0, json.dumps(
+                    {"status": {"currentPrimary": "polaris-pg-2"}}), "")
+            if kind == "switch":
+                return subprocess.CompletedProcess(argv, 0, SWITCHED + "\n", "")
+            if kind == "archived":
+                answer = archived[min(reads["archived"], len(archived) - 1)]
+                reads["archived"] += 1
+                return subprocess.CompletedProcess(argv, 0, answer + "\n", "")
             if kind == "cluster":
                 ready = polls[min(reads["cluster"], len(polls) - 1)][0]
                 reads["cluster"] += 1
@@ -1199,7 +1217,10 @@ class CheckRestore(unittest.TestCase):
             # Within the timeout for as many reads as there are polls, past it after.
             return 0 if reads["cluster"] < len(polls) else gate.RESTORE_TIMEOUT + 1
 
-        with mock.patch.object(gate, "run"), \
+        def run(argv, stdin=None):
+            events.append(("apply", stdin and json.loads(stdin)["kind"]))
+
+        with mock.patch.object(gate, "run", side_effect=run), \
                 mock.patch.object(gate, "wait_for", return_value=("completed", "")), \
                 mock.patch.object(gate, "polaris_pg_values",
                                   return_value={"image": PG_IMAGE, "database": "polaris"}), \
@@ -1227,9 +1248,9 @@ class CheckRestore(unittest.TestCase):
         # #86: the logs are read as soon as a pod fails, before CNPG deletes it.
         problems, notes, events = self.check()
         self.assertEqual(problems, [])
-        self.assertEqual([kind for kind, _ in events][:8],
-                         ["cluster", "pods", "logs", "cluster", "pods", "logs", "cluster",
-                          "pods"])
+        wait = [kind for kind, _ in events][events.index(("apply", "Cluster")) + 1:]
+        self.assertEqual(wait[:8], ["cluster", "pods", "logs", "cluster", "pods", "logs",
+                                    "cluster", "pods"])
         logs = [argv for kind, argv in events if kind == "logs"]
         self.assertEqual([argv[argv.index("logs") + 1] for argv in logs],
                          ["polaris-pg-restore-1-full-recovery-aaaaa",
@@ -1260,6 +1281,45 @@ class CheckRestore(unittest.TestCase):
         problems, _, events = self.check(settled="Cluster polaris-pg-restore did not settle")
         self.assertEqual(problems, ["Cluster polaris-pg-restore did not settle"])
         self.assertEqual([kind for kind, _ in events][-2:], ["settle", "delete"])
+
+    # #86: a backup from a standby is consistent only past the WAL archived so far; without a
+    # switch, the restore failed until archive_timeout (smoke 38515945485: 4 attempts).
+    def test_the_primary_switches_wal_and_it_is_archived_before_the_restore(self):
+        problems, notes, events = self.check(archived=[ARCHIVED_BEFORE, ARCHIVED_BEFORE,
+                                                       SWITCHED])
+        self.assertEqual(problems, [])
+        kinds = [kind for kind, _ in events]
+        self.assertEqual(kinds[:7], ["apply", "primary", "switch", "archived", "archived",
+                                     "archived", "apply"])
+        self.assertEqual(events[0][1], "Backup")
+        self.assertEqual(events[6][1], "Cluster")
+        self.assertIn(f"WAL switched on polaris-pg-2: {SWITCHED} archived before the "
+                      "restore.", notes)
+
+    def test_the_switch_and_the_archive_are_read_on_the_primary(self):
+        self.assertEqual(gate.wal_switch_command("catalog-polaris", "polaris-pg-2"), [
+            "kubectl", "--context", gate.CONTEXT, "-n", "catalog-polaris", "exec",
+            "polaris-pg-2", "-c", "postgres", "--", "psql", "-XAtq", "-c",
+            "SELECT pg_walfile_name(pg_switch_wal())"])
+        self.assertEqual(gate.archived_wal_command("catalog-polaris", "polaris-pg-2")[-1],
+                         "SELECT coalesce(last_archived_wal, '') FROM pg_stat_archiver")
+
+    def test_a_segment_counts_as_archived_once_the_archiver_reached_it(self):
+        self.assertTrue(gate.wal_archived(SWITCHED, SWITCHED))
+        self.assertTrue(gate.wal_archived(SWITCHED, "000000010000000000000009"))
+        self.assertFalse(gate.wal_archived(SWITCHED, ARCHIVED_BEFORE))
+        self.assertFalse(gate.wal_archived(SWITCHED, ""))
+        # A later timeline's segment comes after every segment of an earlier one.
+        self.assertTrue(gate.wal_archived(SWITCHED, "000000020000000000000001"))
+
+    def test_a_segment_never_archived_is_a_problem_and_no_restore_is_made(self):
+        problems, _, events = self.check(archived=[ARCHIVED_BEFORE])
+        self.assertEqual(problems, [f"WAL segment {SWITCHED} from polaris-pg-2 was not "
+                                    f"archived within {gate.ARCHIVE_TIMEOUT} s"])
+        kinds = [kind for kind, _ in events]
+        self.assertNotIn("cluster", kinds)
+        self.assertEqual([args for kind, args in events if kind == "apply"], ["Backup"])
+        self.assertEqual(kinds.count("archived"), gate.ARCHIVE_TIMEOUT // gate.RESTORE_POLL)
 
 class Standins(unittest.TestCase):
     def test_applies_the_list_server_side_then_waits_for_both_deployments(self):
