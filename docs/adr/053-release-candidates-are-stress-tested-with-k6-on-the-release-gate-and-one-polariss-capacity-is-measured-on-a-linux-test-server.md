@@ -31,6 +31,11 @@ on 2026-10-14:
   *before* it reads `metadata.json`, so a 304 skips both the S3 read and the 1 MB of JSON.
 - **Authorization still runs first.** A 304 still costs one call to the policy endpoint
   (ADR-026) and a lookup of the table's row in PostgreSQL.
+- **Polaris's only cache is its entity cache, in each replica's heap** (`InMemoryEntityCache`,
+  about 100 MB by default, `ENTITY_CACHE_WEIGHER_TARGET`). It needs no external service, and
+  it does not cache `metadata.json`. Each request still checks its cached entities against
+  PostgreSQL in one batched version query. None of this differs in 1.7.0, 1.8.0 or upstream's
+  `main` of 2026-10-14.
 - **A commit always pays in full:** Polaris reads the current metadata, writes a new
   `metadata.json` to S3, swaps the location in PostgreSQL, and returns the full metadata.
 
@@ -193,6 +198,10 @@ on 2026-10-14:
   the gate's pins, so it differs from the gate in size only. Polaris has one replica;
   polaris-pg has its three instances; the stand-ins are SeaweedFS and OPA (ADR-031); k6 runs
   in the same cluster, limited to 2 CPUs.
+- **Polaris's CPU and memory are set explicitly**, requests equal to limits, a size change
+  only (ADR-017). Neither upstream's chart nor `values-lakehouse.yaml` sets them, so without
+  this the JVM would size its heap from the server's memory. The values are tuning values in
+  the runbook.
 - **What it runs:** the four ramps with longer steps, then **a hold of the mixed profile at
   80% of its knee for 2 hours**, the length of one of the target's peak windows. The hold
   looks for what only time shows: memory growth, pool exhaustion, garbage-collection pauses.
@@ -200,6 +209,8 @@ on 2026-10-14:
   - the knee, in req/s for one Polaris replica;
   - Polaris's and polaris-pg's CPU-seconds per request at the knee;
   - the hold's p50, p95 and p99, and its error rate.
+  - Polaris's CPU and memory limits, its maximum heap, and its heap used after garbage
+    collection over the hold.
 - **The sizing for 12,000 req/s** follows from it:
   - Polaris replicas: 12,000 ÷ the mixed knee;
   - polaris-pg cores: 12,000 × polaris-pg's CPU-seconds per request, because every replica
