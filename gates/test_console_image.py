@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
 import gate  # noqa: E402
@@ -73,6 +74,32 @@ class Commands(unittest.TestCase):
         self.assertEqual(commands[4], ["kind", "load", "docker-image",
                                        "lakehouse/polaris-console:3edb60fcb591",
                                        "--name", gate.CLUSTER])
+
+    def commands_run(self, *flags):
+        """The commands `gate.py console-image *flags` runs, and whether it copied the lockfile."""
+        with mock.patch.object(gate, "run") as run, \
+                mock.patch.object(gate, "check_commit"), \
+                mock.patch.object(gate.shutil, "copyfile") as copyfile:
+            self.assertEqual(gate.main(["gate.py", "console-image", *flags]), 0)
+        return [c.args[0] for c in run.call_args_list], copyfile.called
+
+    def test_build_alone_fetches_and_builds_without_the_cluster(self):
+        # smoke starts it before kind is up, so nothing in it may reach kind.
+        commands, copied = self.commands_run("--build")
+        self.assertEqual([c[0] for c in commands], ["git", "git", "git", "docker"])
+        self.assertTrue(copied)
+
+    def test_load_alone_loads_the_built_image_into_kind(self):
+        commands, copied = self.commands_run("--load")
+        self.assertEqual(commands, [["kind", "load", "docker-image",
+                                     gate.console_image(gate.console_source()),
+                                     "--name", gate.CLUSTER]])
+        self.assertFalse(copied)
+
+    def test_without_a_flag_it_builds_then_loads(self):
+        commands, copied = self.commands_run()
+        self.assertEqual([c[0] for c in commands], ["git", "git", "git", "docker", "kind"])
+        self.assertTrue(copied)
 
     def test_a_checkout_of_another_commit_is_refused(self):
         with tempfile.TemporaryDirectory() as d:
