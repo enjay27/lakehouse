@@ -98,12 +98,12 @@ flowchart LR
 | [047](047-failover-is-measured-on-the-gate-before-it-is-tuned-a-pgjdbc-probe-times-each-setup-under-three-failures.md) | Failover is measured on the gate before it is tuned: a pgjdbc probe times each setup under three failures | Accepted |
 | [048](048-ingress-is-denied-by-default-allowed-per-caller-cnpgs-join-pods-included-and-smoke-rebuilds-a-replica.md) | Ingress is denied by default and allowed per caller, CNPG's join pods included; smoke rebuilds a replica under the policies | Accepted |
 | [049](049-a-gate-run-deletes-its-own-gate-branch-when-it-ends-pass-or-fail.md) | A gate run deletes its own gate branch when it ends, pass or fail | Accepted |
-| [050](050-gates-run-from-throwaway-gate-branches-before-the-pr-opens-and-smoke-fresh-installs-a-commit-from-nothing.md) | Gates run from throwaway `gate/*` branches before the PR opens; `smoke-fresh` installs a commit from nothing | Accepted |
+| [050](050-gates-run-from-throwaway-gate-branches-before-the-pr-opens-and-smoke-fresh-installs-a-commit-from-nothing.md) | Gates run from throwaway `gate/*` branches before the PR opens; `smoke-fresh` installs a commit from nothing | Amended by ADR-055 |
 | [051](051-gates-upgrade-from-the-last-release-over-seeded-data-and-check-every-seeded-object-after-the-upgrade.md) | Gates upgrade from the last release over seeded data, and check every seeded object after the upgrade | Accepted |
 | [052](052-runbooks-are-living-documents-and-cite-only-adrs-in-force.md) | Runbooks are living documents and cite only ADRs in force | Accepted |
 | [053](053-release-candidates-are-stress-tested-with-k6-on-the-release-gate-and-one-polariss-capacity-is-measured-on-a-linux-test-server.md) | Release candidates are stress-tested with k6 on the release gate, and one Polaris's capacity is measured on a Linux test server | Amended by ADR-054 |
 | [054](054-the-stress-test-runs-only-when-kade-starts-it-not-in-the-release-gate.md) | The stress test runs only when Kade starts it, not in the release gate | Accepted |
-| [055](055-main-is-re-tested-after-claudes-merges-and-weekly-and-a-red-run-on-main-opens-an-issue.md) | `main` is re-tested after Claude's merges and weekly, and a red run on `main` opens an issue | Proposed |
+| [055](055-main-is-re-tested-after-claudes-merges-and-weekly-and-a-red-run-on-main-opens-an-issue.md) | `main` is re-tested after Claude's merges and weekly, and a red run on `main` opens an issue | Accepted |
 
 ## Not ADRs
 
