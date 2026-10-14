@@ -417,6 +417,146 @@ class ImagePulls(unittest.TestCase):
             self.assertIn("Image pulls: not measured (", out.getvalue())
 
 
+class InstallTimeline(unittest.TestCase):
+    """#125: where the install's time goes, read back from the cluster after it."""
+    SINCE = "2026-10-14T06:44:00+00:00"
+    HISTORIES = {("catalog-polaris", "polaris-postgres"): [
+        # Before the install: not on the timeline.
+        {"revision": 1, "updated": "2026-10-13T03:00:00.5+00:00", "status": "superseded"},
+        {"revision": 2, "updated": "2026-10-14T06:44:05.811736291Z", "status": "deployed"}],
+        ("catalog-polaris", "polaris"): [
+        {"revision": 1, "updated": "2026-10-14T06:45:30.1Z", "status": "deployed"}]}
+    JOBS = {"items": [{"metadata": {"namespace": "catalog-polaris", "name": "polaris-bootstrap"},
+                       "status": {"startTime": "2026-10-14T06:45:00Z",
+                                  "completionTime": "2026-10-14T06:45:20Z"}}]}
+    DEPLOYMENTS = {"items": [
+        {"metadata": {"namespace": "catalog-polaris", "name": "polaris"},
+         "status": {"conditions": [
+             {"type": "Available", "status": "True",
+              "lastTransitionTime": "2026-10-14T06:46:00Z"},
+             {"type": "Progressing", "status": "True", "reason": "NewReplicaSetAvailable",
+              "lastUpdateTime": "2026-10-14T06:46:10Z"}]}},
+        # Still rolling out: no end to show.
+        {"metadata": {"namespace": "catalog-polaris", "name": "polaris-console"},
+         "status": {"conditions": [
+             {"type": "Progressing", "status": "True", "reason": "ReplicaSetUpdated",
+              "lastUpdateTime": "2026-10-14T06:46:20Z"}]}}]}
+    CLUSTERS = {"items": [{"metadata": {"namespace": "catalog-polaris", "name": "polaris-pg"},
+                           "status": {"conditions": [
+                               {"type": "Ready", "status": "True",
+                                "lastTransitionTime": "2026-10-14T06:44:50Z"}]}}]}
+    COMMANDS = [("2026-10-14T06:44:01+00:00", "2026-10-14T06:46:12+00:00",
+                 "release.py (the last release)")]
+
+    def entries(self):
+        return gate.timeline_entries(self.SINCE, self.HISTORIES, self.JOBS, self.DEPLOYMENTS,
+                                     self.CLUSTERS, self.COMMANDS)
+
+    def test_what_happened_since_the_start_in_order(self):
+        self.assertEqual([text for _, text in self.entries()], [
+            "release.py (the last release) started",
+            "helm catalog-polaris/polaris-postgres revision 2 deployed",
+            "cluster catalog-polaris/polaris-pg Ready",
+            "job catalog-polaris/polaris-bootstrap started",
+            "job catalog-polaris/polaris-bootstrap complete",
+            "helm catalog-polaris/polaris revision 1 deployed",
+            "deployment catalog-polaris/polaris rolled out",
+            "release.py (the last release) ended",
+        ])
+
+    def test_helms_nanosecond_times_are_read(self):
+        at = dict((text, when) for when, text in self.entries())
+        self.assertEqual(at["helm catalog-polaris/polaris-postgres revision 2 deployed"],
+                         gate.dt.datetime(2026, 10, 14, 6, 44, 5, 811736,
+                                          tzinfo=gate.dt.timezone.utc))
+
+    def test_a_revision_without_a_time_is_left_out(self):
+        # Helm 4 omits a zero `updated` from history's JSON.
+        entries = gate.timeline_entries(self.SINCE, {("catalog-polaris", "polaris"): [
+            {"revision": 1, "status": "pending-install"}]}, {}, {}, {}, [])
+        self.assertEqual(entries, [])
+
+    def test_lines_give_seconds_from_the_start_and_since_the_line_before(self):
+        lines = gate.timeline_lines(self.entries()[:3], self.SINCE)
+        self.assertEqual(lines, [
+            "Install timeline, seconds after the install started (and since the line before):",
+            "-   1 s (+ 1)  release.py (the last release) started",
+            "-   5 s (+ 4)  helm catalog-polaris/polaris-postgres revision 2 deployed",
+            "-  50 s (+45)  cluster catalog-polaris/polaris-pg Ready",
+        ])
+
+    def test_nothing_after_the_start_is_said(self):
+        self.assertEqual(gate.timeline_lines([], self.SINCE),
+                         ["Install timeline: nothing recorded after the install started."])
+
+    def test_each_command_is_named_for_what_it_installs(self):
+        previous = os.path.join(tempfile.gettempdir(), "previous", "install", "release.py")
+        this = os.path.join(gate.ROOT, "install", "release.py")
+        for command, label in (
+                (["python3", previous], "release.py (the last release)"),
+                (["python3", this], "release.py (this commit)"),
+                (["python3", this, "--dry-run"], "release.py (this commit) --dry-run"),
+                (["python3", os.path.join(gate.HERE, "gate.py"), "gate-policies"],
+                 "gate.py gate-policies"),
+                (["git", "-C", gate.ROOT, "worktree", "add"], "git worktree add")):
+            with self.subTest(label=label):
+                self.assertEqual(gate.command_label(command), label)
+
+    def test_a_measurement_that_fails_never_fails_the_install(self):
+        refused = subprocess.CompletedProcess([], 1, stdout="", stderr="connection refused")
+        with mock.patch.object(gate.subprocess, "run", return_value=refused):
+            lines = gate.measure_timeline(self.SINCE, [])
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("Install timeline: not measured ("), lines[0])
+
+    def test_reads_every_helm_release_then_jobs_deployments_and_clusters(self):
+        answers = {
+            "list": json.dumps([{"name": "polaris", "namespace": "catalog-polaris"}]),
+            "history": json.dumps(self.HISTORIES[("catalog-polaris", "polaris")]),
+            "jobs": json.dumps(self.JOBS), "deployments": json.dumps(self.DEPLOYMENTS),
+            "clusters.postgresql.cnpg.io": json.dumps(self.CLUSTERS)}
+        calls = []
+
+        def subprocess_run(argv, **kwargs):
+            calls.append(argv)
+            key = next(k for k in answers if k in argv)
+            return subprocess.CompletedProcess(argv, 0, stdout=answers[key], stderr="")
+
+        with mock.patch.object(gate.subprocess, "run", side_effect=subprocess_run):
+            lines = gate.measure_timeline(self.SINCE, self.COMMANDS)
+        # Helm 4, as pinned, lists every release without --all, and has no such flag.
+        self.assertEqual(calls[0], ["helm", "--kube-context", gate.CONTEXT, "list",
+                                    "--all-namespaces", "-o", "json"])
+        self.assertIn(["helm", "--kube-context", gate.CONTEXT, "-n", "catalog-polaris",
+                       "history", "polaris", "-o", "json"], calls)
+        self.assertIn("helm catalog-polaris/polaris revision 1 deployed", "\n".join(lines))
+        self.assertIn("deployment catalog-polaris/polaris rolled out", "\n".join(lines))
+
+    def test_a_dry_run_that_installs_nothing_measures_nothing(self):
+        with mock.patch.object(gate, "released_tags", return_value=[]), \
+                mock.patch.object(gate, "run"), \
+                mock.patch.object(gate, "measure_pulls", return_value=[]), \
+                mock.patch.object(gate, "measure_timeline") as timeline, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(gate.main(["gate.py", "install", "--dry-run"]), 0)
+        timeline.assert_not_called()
+
+    def test_an_install_prints_its_timeline_with_each_command_timed(self):
+        with mock.patch.object(gate, "released_tags", return_value=[]), \
+                mock.patch.object(gate, "run"), \
+                mock.patch.object(gate, "measure_pulls", return_value=[]), \
+                mock.patch.object(gate, "measure_timeline",
+                                  return_value=["Install timeline: x"]) as timeline, \
+                mock.patch.object(gate, "INSTALL_RECORD",
+                                  os.path.join(tempfile.mkdtemp(), "install.json")), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(gate.main(["gate.py", "install"]), 0)
+        since, commands = timeline.call_args.args
+        self.assertEqual([label for _, _, label in commands],
+                         ["gate.py gate-policies", "release.py (this commit)"])
+        self.assertIn("Install timeline: x", out.getvalue())
+
+
 TEMPLATE = """KUBE_CONTEXT=
 NS_CATALOG_POLARIS=catalog-polaris
 NS_STANDINS=standins
