@@ -54,6 +54,11 @@ CHECK_LABEL = "lakehouse-gate/check"
 # `GET /v1/config` asks about none.
 STRESS_ACTIONS = ("LIST_NAMESPACES", "CREATE_NAMESPACE", "LIST_TABLES", "CREATE_TABLE_DIRECT",
                   "LOAD_TABLE", "TABLE_EXISTS", "ADD_TABLE_SNAPSHOT", "SET_TABLE_SNAPSHOT_REF")
+# What gates/opa/policy.rego lets gate_seed do inside gate_seed_catalog (ADR-051 §2): the actions
+# Polaris 1.6.0's IcebergCatalogHandler asks about for gates/seed.py's writes as gate_seed, a
+# table made, appended to twice, given a column, and a view. Root writes everything else.
+SEED_ACTIONS = ("CREATE_TABLE_DIRECT", "LOAD_TABLE", "ADD_TABLE_SNAPSHOT", "SET_TABLE_SNAPSHOT_REF",
+                "ADD_TABLE_SCHEMA", "SET_TABLE_CURRENT_SCHEMA", "CREATE_VIEW")
 # The stand-ins a stress install points Polaris at directly, with their ports.
 DIRECT = (("seaweedfs", S3_PORT), ("opa", OPA_PORT))
 

@@ -154,7 +154,7 @@
       }
     },
     {
-      "name": "PyIceberg wrote nothing outside gate_catalog",
+      "name": "PyIceberg wrote nothing outside gate_catalog and the seed's gate_seed_catalog (ADR-051)",
       "must": "not_exist",
       "match": {
         "proto": "http",
@@ -163,7 +163,7 @@
           "regex": "^(PUT|POST|DELETE)$"
         },
         "path": {
-          "regex": "^(?!/polaris-warehouse/gate_catalog/)"
+          "regex": "^(?!/polaris-warehouse/(gate_catalog|gate_seed_catalog)/)"
         },
         "request_headers.user-agent": {
           "regex": "^aws-sdk-cpp/"

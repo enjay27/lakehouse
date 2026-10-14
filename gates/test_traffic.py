@@ -254,6 +254,33 @@ class VendedCredentials(unittest.TestCase):
 
 
 
+class PyIcebergWrites(unittest.TestCase):
+    """iceberg.json's must-not: PyIceberg writes only in the smoke tests' catalog and the seed's
+    (ADR-051 §2)."""
+
+    def write(self, path):
+        return {"proto": "http", "listener": "s3", "method": "PUT", "status": 200,
+                "path": path, "request_headers": {"user-agent": "aws-sdk-cpp/1.11.580"}}
+
+    def failed(self, *recorded):
+        expectations = traffic.load(os.path.join(HERE, "expectations", "iceberg.json"))
+        must_nots = [e for e in expectations if e["must"] == "not_exist"]
+        problems, _ = traffic.check(list(recorded), must_nots)
+        return problems
+
+    def test_writes_in_the_smoke_catalog_and_the_seed_catalog_pass(self):
+        self.assertEqual(self.failed(
+            self.write("/polaris-warehouse/gate_catalog/smoke/run_1/data/a.parquet"),
+            self.write("/polaris-warehouse/gate_seed_catalog/seed/orders/data/b.parquet")), [])
+
+    def test_a_write_anywhere_else_fails(self):
+        for path in ("/polaris-warehouse/gate_logs/logs/t/data/a.parquet",
+                     "/polaris-warehouse/gate_seed_catalog_other/x.parquet",
+                     "/polaris-backup/polaris-pg/base/x"):
+            with self.subTest(path=path):
+                self.assertTrue(self.failed(self.write(path)))
+
+
 class Maintainer(unittest.TestCase):
     """console.json's must-nots: gate_maintainer is never allowed anything but a read."""
 

@@ -185,16 +185,35 @@ class SmokeFresh(unittest.TestCase):
                          "startsWith(github.ref, 'refs/heads/gate/smoke-fresh/') }}")
 
 
-class RebuildReplica(unittest.TestCase):
-    """Smoke rebuilds a replica right after the install, before check-polaris-pg (ADR-048 §7)."""
+class CheckMigration(unittest.TestCase):
+    """Smoke reads the seed back right after the install, before any other step (ADR-051 §3)."""
 
-    def test_the_step_sits_between_the_install_and_check_polaris_pg(self):
+    def test_the_step_comes_right_after_the_install(self):
         steps = read_workflow(os.path.join(WORKFLOWS, "smoke.yml"))["jobs"]["smoke"]["steps"]
         runs = [s.get("run", "") for s in steps]
         install = next(i for i, r in enumerate(runs) if "gate.py install" in r)
+        check = next(i for i, r in enumerate(runs) if "gate.py check-migration" in r)
+        self.assertEqual(check, install + 1)
+
+    def test_only_smoke_runs_it(self):
+        for name, workflow in workflows().items():
+            if name != "smoke.yml":
+                for job in (workflow.get("jobs") or {}).values():
+                    for step in job.get("steps") or []:
+                        self.assertNotIn("check-migration", step.get("run", ""), name)
+
+
+class RebuildReplica(unittest.TestCase):
+    """Smoke rebuilds a replica after the install and check-migration, before check-polaris-pg
+    (ADR-048 §7, ADR-051 §3)."""
+
+    def test_the_step_sits_between_check_migration_and_check_polaris_pg(self):
+        steps = read_workflow(os.path.join(WORKFLOWS, "smoke.yml"))["jobs"]["smoke"]["steps"]
+        runs = [s.get("run", "") for s in steps]
+        migration = next(i for i, r in enumerate(runs) if "gate.py check-migration" in r)
         rebuild = next(i for i, r in enumerate(runs) if "gate.py rebuild-replica" in r)
         check = next(i for i, r in enumerate(runs) if "gate.py check-polaris-pg" in r)
-        self.assertEqual((rebuild, check), (install + 1, install + 2))
+        self.assertEqual((rebuild, check), (migration + 1, migration + 2))
 
     def test_only_smoke_runs_it(self):
         for name, workflow in workflows().items():
