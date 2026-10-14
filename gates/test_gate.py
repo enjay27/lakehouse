@@ -246,17 +246,18 @@ class Commands(unittest.TestCase):
 class Install(unittest.TestCase):
     ROOT = os.path.dirname(HERE)
     THIS = ["python3", os.path.join(os.path.dirname(HERE), "install", "release.py")]
-    # ADR-048 §5: the gate-only allow policies, just before this commit's release.
+    # ADR-048 §5: the gate-only allow policies, before the first release that installs for
+    # real: the last release has network policies of its own since platform-2026.10.14.
     GATE_POLICIES = ["python3", os.path.join(HERE, "gate.py"), "gate-policies"]
 
     def test_with_a_release_installs_it_from_its_tag_then_this_commit(self):
         commands, summary = gate.install_plan("platform-2026.10.10", "/tmp/prev", fresh=False)
         self.assertEqual(commands, [
+            self.GATE_POLICIES,
             ["git", "-C", self.ROOT, "worktree", "add", "--detach", "/tmp/prev",
              "platform-2026.10.10"],
             ["cp", "-p", os.path.join(self.ROOT, ".env"), "/tmp/prev/.env"],
             ["python3", "/tmp/prev/install/release.py"],
-            self.GATE_POLICIES,
             self.THIS,
         ])
         self.assertIn("platform-2026.10.10", summary)
@@ -266,7 +267,7 @@ class Install(unittest.TestCase):
         # release.py reads .env from its own checkout; a tag's worktree has none, so a
         # release that reads more than step 0 would find every endpoint empty.
         commands, _ = gate.install_plan("platform-2026.10.12", "/tmp/prev", fresh=False)
-        worktree, copy, previous = commands[0], commands[1], commands[2]
+        worktree, copy, previous = commands[1], commands[2], commands[3]
         self.assertEqual(worktree[3:5], ["worktree", "add"])
         self.assertEqual(copy, ["cp", "-p", os.path.join(self.ROOT, ".env"), "/tmp/prev/.env"])
         self.assertEqual(previous, ["python3", "/tmp/prev/install/release.py"])
@@ -284,9 +285,12 @@ class Install(unittest.TestCase):
     def test_dry_run_installs_the_release_then_dry_runs_this_commit_over_it(self):
         commands, summary = gate.install_plan("platform-2026.10.10", "/tmp/prev", fresh=False,
                                               dry_run=True)
-        self.assertEqual(commands[2], ["python3", "/tmp/prev/install/release.py"])
-        # A dry-run changes nothing, the gate's policies included.
-        self.assertEqual(commands[3:], [self.THIS + ["--dry-run"]])
+        # The last release installs for real, so the gate's policies come first; dry-run 38493145873
+        # failed without them: the recorder could not reach polaris-pg for the realm bootstrap.
+        self.assertEqual(commands[0], self.GATE_POLICIES)
+        self.assertEqual(commands[3], ["python3", "/tmp/prev/install/release.py"])
+        # The dry-run itself changes nothing.
+        self.assertEqual(commands[4:], [self.THIS + ["--dry-run"]])
         self.assertIn("server-side dry-run", summary)
 
     def test_dry_run_without_a_release_dry_runs_this_commit(self):

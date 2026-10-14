@@ -94,7 +94,8 @@
   gate-policies   applies the gate's own allow policies in Polaris's namespace (gates/network.py,
                   ADR-048 §5): the check pods, labelled lakehouse-gate/check, reach every pod;
                   the PostgreSQL recorder reaches the CNPG instances on 5432. `install` runs
-                  it right before this commit's release.
+                  it before the first release it installs for real: the last release, or this
+                  commit's when there is none to upgrade from.
   check-network   creates a namespace per caller class with the gate's label, one without any
                   label and Datahub's, then from a short-lived pod in each, from an
                   unlabelled pod in Polaris's namespace, and from a pod with CNPG's join label
@@ -475,18 +476,21 @@ def check_traffic(log_text, expectation_lists, restart=None):
 def install_plan(previous, previous_dir, fresh, dry_run=False):
     """The commands that install a release on the gate, and the line that says which. The
     release before this one runs from a worktree of its tag, with the gate's `.env`."""
-    this = ["python3", os.path.join(ROOT, "install", "release.py")] + (
-        ["--dry-run"] if dry_run else [])
-    # The gate's own allow policies (ADR-048 §5), right before this commit's release applies
-    # Polaris's: never in a dry-run, which changes nothing.
-    this = [this] if dry_run else [["python3", os.path.join(HERE, "gate.py"),
-                                    "gate-policies"], this]
+    this = [["python3", os.path.join(ROOT, "install", "release.py")] + (
+        ["--dry-run"] if dry_run else [])]
+    # The gate's own allow policies (ADR-048 §5), before the first release that installs for
+    # real: since platform-2026.10.14 the last release applies Polaris's policies too, and its
+    # realm bootstrap reaches polaris-pg through the recorder (dry-run 38493145873). Never
+    # before a dry-run alone, which changes nothing.
+    policies = [["python3", os.path.join(HERE, "gate.py"), "gate-policies"]]
     then = " (server-side dry-run)" if dry_run else ""
-    if fresh:
-        return this, f"Fresh install of this commit{then}, as asked."
-    if not previous:
-        return this, f"No release to upgrade from: fresh install{then} (ADR-051)."
+    if fresh or not previous:
+        commands = this if dry_run else policies + this
+        if fresh:
+            return commands, f"Fresh install of this commit{then}, as asked."
+        return commands, f"No release to upgrade from: fresh install{then} (ADR-051)."
     return [
+        *policies,
         ["git", "-C", ROOT, "worktree", "add", "--detach", previous_dir, previous],
         # release.py reads .env from its own checkout, and a tag's worktree has none.
         ["cp", "-p", os.path.join(ROOT, ".env"), os.path.join(previous_dir, ".env")],
