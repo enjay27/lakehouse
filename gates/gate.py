@@ -38,7 +38,10 @@
                   its tag, with the gate's `.env` copied into it, then this commit's release
                   over it (ADR-051); with no tag, or with
                   --fresh, only this commit's release. With --dry-run, this commit's release is
-                  a server-side dry-run over the installed one (ADR-038). Prints which it did.
+                  a server-side dry-run over the installed one (ADR-038). Prints which it did,
+                  then the image pulls since it started, from the kubelet's Pulled events:
+                  each image's pulls and nodes, and the busiest node's pull time against the
+                  install's (#125). A measurement that fails says so and never fails it.
   rebuild-replica deletes one replica of polaris-pg, never the primary: its PVC without waiting,
                   then its pod. CNPG makes a new instance through a join pod that clones the
                   primary under the network policies; it passes once a new join Job ran and the
@@ -121,6 +124,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -497,6 +501,105 @@ def install_plan(previous, previous_dir, fresh, dry_run=False):
         ["python3", os.path.join(previous_dir, "install", "release.py")],
         *this,
     ], f"Upgrade: {previous} installed from its tag, then this commit over it{then} (ADR-051)."
+
+
+def pull_events_command():
+    """The kubelet's Pulled events in every namespace: one per image pulled, or found already
+    present, on a node (#125)."""
+    return ["kubectl", "--context", CONTEXT, "get", "events", "--all-namespaces",
+            "--field-selector", "reason=Pulled", "-o", "json"]
+
+
+GO_UNITS = {"h": 3600.0, "m": 60.0, "s": 1.0, "ms": 1e-3, "us": 1e-6, "µs": 1e-6, "ns": 1e-9}
+GO_DURATION_RE = re.compile(r"(\d+(?:\.\d+)?)(ms|us|µs|ns|h|m|s)")
+
+
+def go_seconds(text):
+    """A Go duration as the kubelet prints it (`1m2.5s`, `512ms`) in seconds."""
+    parts = GO_DURATION_RE.findall(text)
+    if not parts or "".join(n + u for n, u in parts) != text:
+        raise ValueError(f"not a Go duration: {text!r}")
+    return sum(float(n) * GO_UNITS[u] for n, u in parts)
+
+
+PULLED_RE = re.compile(r'Successfully pulled image "([^"]+)" in (\S+) \((\S+) including waiting\)'
+                       r"(?:\. Image size: (\d+) bytes)?")
+PRESENT_RE = re.compile(r'Container image "([^"]+)" already present on machine')
+
+
+def image_pulls(events, since):
+    """(pulls, present, unknown) from Pulled events last seen at or after `since`: each pull
+    with its node, seconds, seconds with waiting and size; the (image, node) pairs already
+    present; how many Pulled messages matched neither form."""
+    pulls, present, unknown = [], set(), 0
+    for e in events.get("items", []):
+        at = e.get("lastTimestamp") or e.get("eventTime") or e.get("firstTimestamp")
+        if e.get("reason") != "Pulled" or not at or traffic.when(at) < traffic.when(since):
+            continue
+        node = (e.get("source") or {}).get("host") or e.get("reportingInstance") or "?"
+        message = e.get("message", "")
+        m = PULLED_RE.match(message)
+        if m:
+            pulls.append({"image": m[1], "node": node, "seconds": go_seconds(m[2]),
+                          "waiting": go_seconds(m[3]), "bytes": int(m[4]) if m[4] else None})
+        elif PRESENT_RE.match(message):
+            present.add((PRESENT_RE.match(message)[1], node))
+        else:
+            unknown += 1
+    return pulls, present, unknown
+
+
+def _count(n, word):
+    return f"{n} {word}" if n == 1 else f"{n} {word}s"
+
+
+def pull_lines(pulls, present, unknown, install_seconds):
+    """A summary against the install's length, then one line per image, slowest pull first,
+    then images only present, then each node's pull time. A kubelet pulls one image at a time
+    by default, so the busiest node's sum bounds what pulls cost the install."""
+    per_node = {}
+    for p in pulls:
+        per_node[p["node"]] = per_node.get(p["node"], 0.0) + p["seconds"]
+    if per_node:
+        busiest = max(per_node, key=per_node.get)
+        lines = [f"Image pulls during the install: {_count(len(pulls), 'pull')} of "
+                 f"{_count(len({p['image'] for p in pulls}), 'image')}; the busiest node, "
+                 f"{busiest}, spent {per_node[busiest]:.1f} s pulling, of the install's "
+                 f"{install_seconds:.0f} s."]
+    else:
+        lines = ["Image pulls during the install: none; every image was already present."]
+    images = {}
+    for p in pulls:
+        images.setdefault(p["image"], []).append(p)
+    for image, its in sorted(images.items(), key=lambda kv: -max(p["seconds"] for p in kv[1])):
+        slowest = max(its, key=lambda p: p["seconds"])
+        line = (f"- {image}: pulled on {_count(len(its), 'node')}, longest "
+                f"{slowest['seconds']:.1f} s ({slowest['waiting']:.1f} s with waiting)")
+        if slowest["bytes"] is not None:
+            line += f", {slowest['bytes'] / 1e6:.1f} MB"
+        nodes = sum(1 for i, _ in present if i == image)
+        lines.append(line + (f"; already present on {_count(nodes, 'node')}" if nodes else ""))
+    for image in sorted({i for i, _ in present} - set(images)):
+        lines.append(f"- {image}: already present on "
+                     f"{_count(sum(1 for i, _ in present if i == image), 'node')}")
+    if per_node:
+        lines.append("- per node: " + ", ".join(
+            f"{n} {s:.1f} s" for n, s in sorted(per_node.items(), key=lambda kv: -kv[1])))
+    if unknown:
+        lines.append(f"- {unknown} Pulled events not understood")
+    return lines
+
+
+def measure_pulls(since, install_seconds):
+    """pull_lines for the install that started at `since`; never stops the gate."""
+    try:
+        done = subprocess.run(pull_events_command(), capture_output=True, text=True,
+                              check=False)
+        if done.returncode != 0:
+            raise RuntimeError(done.stderr.strip() or f"kubectl exited {done.returncode}")
+        return pull_lines(*image_pulls(json.loads(done.stdout), since), install_seconds)
+    except Exception as e:  # noqa: BLE001 - a measurement must never fail the install
+        return [f"Image pulls: not measured ({e})"]
 
 
 def polaris_pg_commands(namespace):
@@ -1416,6 +1519,7 @@ def main(argv):
         return 1 if problems else 0
     if argv[1:2] == ["install"] and set(argv[2:]) <= {"--fresh", "--dry-run"} \
             and len(set(argv[2:])) == len(argv[2:]):
+        start = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
         with tempfile.TemporaryDirectory() as d:
             commands, summary = install_plan(release_tag.previous(released_tags()),
                                              os.path.join(d, "previous"),
@@ -1423,9 +1527,12 @@ def main(argv):
             print(summary, flush=True)
             for command in commands:
                 run(command)
+        end = dt.datetime.now(dt.timezone.utc)
         if len(commands) > 1 and "--dry-run" not in argv:
             with open(INSTALL_RECORD, "w", encoding="utf-8") as f:
-                json.dump({"end": dt.datetime.now(dt.timezone.utc).isoformat()}, f)
+                json.dump({"end": end.isoformat()}, f)
+        for line in measure_pulls(start.isoformat(), (end - start).total_seconds()):
+            print(line, flush=True)
         return 0
     if argv[1:] == ["console-image"]:
         source = console_source()
