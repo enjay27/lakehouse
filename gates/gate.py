@@ -60,6 +60,8 @@
                   the commit in images/polaris-console/source.json and checked, its console/ as
                   the context with this repository's package-lock.json, built with
                   images/polaris-console/Dockerfile, then loaded into the kind cluster.
+                  --build stops before the load and needs no cluster, so smoke runs it while
+                  kind starts; --load loads the image it built.
   batch-image     builds the log batch's image from images/polaris-log-batch, tagged as
                   install/release.py names it, and loads it into the kind cluster (ADR-036).
   check-logs      follows traffic to the hand-off (ADR-024, ADR-036): gates/logs_traffic.sh in
@@ -121,7 +123,7 @@
 Every kubectl and helm call names the gate's context, and a namespace where the object has
 one. Nothing here reaches any cluster but the kind cluster it creates (ADR-017).
 
-Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | rebuild-replica | check-polaris-pg | check-polaris | console-image | batch-image | check-logs | check-console | check-iceberg | check-restore | gate-policies | check-network | check-metrics
+Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | rebuild-replica | check-polaris-pg | check-polaris | console-image [--build|--load] | batch-image | check-logs | check-console | check-iceberg | check-restore | gate-policies | check-network | check-metrics
 """
 
 import concurrent.futures
@@ -1693,17 +1695,19 @@ def main(argv):
         for line in measure_pulls(start.isoformat(), (end - start).total_seconds()):
             print(line, flush=True)
         return 0
-    if argv[1:] == ["console-image"]:
+    if argv[1:2] == ["console-image"] and argv[2:] in ([], ["--build"], ["--load"]):
         source = console_source()
         with tempfile.TemporaryDirectory() as d:
             commands = console_image_commands(source, d)
-            for command in commands[:3]:
-                run(command)
-            check_commit(d, source["commit"])
-            shutil.copyfile(os.path.join(CONSOLE_IMAGE_DIR, "package-lock.json"),
-                            os.path.join(d, source["path"], "package-lock.json"))
-            for command in commands[3:]:
-                run(command)
+            if argv[2:] != ["--load"]:
+                for command in commands[:3]:
+                    run(command)
+                check_commit(d, source["commit"])
+                shutil.copyfile(os.path.join(CONSOLE_IMAGE_DIR, "package-lock.json"),
+                                os.path.join(d, source["path"], "package-lock.json"))
+                run(commands[3])
+            if argv[2:] != ["--build"]:
+                run(commands[4])
         return 0
     if argv[1:] == ["batch-image"]:
         env = release.load_env(ROOT, os.environ)
