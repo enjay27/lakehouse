@@ -1,6 +1,6 @@
 # ADR-054: The stress test runs only when Kade starts it, not in the release gate
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-14
 - **Related:** ADR-003, ADR-030, ADR-033, ADR-049, ADR-053
 

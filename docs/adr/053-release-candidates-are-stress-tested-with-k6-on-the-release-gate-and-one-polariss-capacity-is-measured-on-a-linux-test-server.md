@@ -1,6 +1,6 @@
 # ADR-053: Release candidates are stress-tested with k6 on the release gate, and one Polaris's capacity is measured on a Linux test server
 
-- **Status:** Accepted
+- **Status:** Amended by ADR-054
 - **Date:** 2026-10-14
 - **Related:** ADR-000, ADR-002, ADR-003, ADR-004, ADR-005, ADR-015, ADR-017, ADR-026, ADR-028, ADR-030, ADR-031, ADR-033, ADR-034, ADR-039, ADR-046, ADR-047, ADR-048, ADR-049, ADR-050, ADR-052
 
