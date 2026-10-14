@@ -44,8 +44,9 @@
                   install's (#125). Then, unless a dry-run alone installed nothing, its
                   timeline read back from Helm and the cluster: each Helm revision (a step of
                   release.py starts there), Job, rolled-out Deployment and Ready CNPG Cluster
-                  since it started, with each of its own commands (#125). A measurement that
-                  fails says so and never fails it.
+                  since it started, with each of its own commands and the events of Jobs and
+                  CNPG Clusters, which outlive the initdb and join Jobs CNPG deletes (#125). A
+                  measurement that fails says so and never fails it.
   rebuild-replica deletes one replica of polaris-pg, never the primary: its PVC without waiting,
                   then its pod. CNPG makes a new instance through a join pod that clones the
                   primary under the network policies; it passes once a new join Job ran and the
@@ -631,12 +632,23 @@ def command_label(command):
     return " ".join([command[0], *command[3:5]] if command[1:2] == ["-C"] else command[:2])
 
 
-def timeline_entries(since, histories, jobs, deployments, clusters, commands):
+# The kinds whose events go on the timeline: CNPG deletes its initdb and join Jobs once they
+# end, so their events are what is left of them; the Cluster's say what CNPG is doing.
+TIMELINE_EVENT_KINDS = ("Job", "Cluster")
+
+
+def timeline_entries(since, histories, jobs, deployments, clusters, commands, events=None):
     """[(time, what happened)] at or after `since`, in order: each Helm revision (release.py
     runs Helm without --wait, so a step starts at its revision), each Job's start and end,
-    each Deployment's finished rollout, each CNPG Cluster's Ready, and the gate's own
-    commands (start, end, label)."""
+    each Deployment's finished rollout, each CNPG Cluster's Ready, the gate's own commands
+    (start, end, label), and the events of TIMELINE_EVENT_KINDS."""
     entries = []
+    for e in (events or {}).get("items", []):
+        obj = e.get("involvedObject", {})
+        at = e.get("lastTimestamp") or e.get("eventTime") or e.get("firstTimestamp")
+        if obj.get("kind") in TIMELINE_EVENT_KINDS and at:
+            entries.append((at, f"{obj['kind'].lower()} {obj.get('namespace')}/{obj.get('name')}"
+                                f": {e.get('reason')} ({e.get('message', '').strip()[:100]})"))
     for (namespace, name), revisions in histories.items():
         for r in revisions:
             if r.get("updated"):
@@ -701,8 +713,12 @@ def measure_timeline(since, commands):
         jobs, deployments, clusters = (read(kubectl[:4] + [kind] + kubectl[4:])
                                        for kind in ("jobs", "deployments",
                                                     "clusters.postgresql.cnpg.io"))
+        try:
+            events, missing = read(kubectl[:4] + ["events"] + kubectl[4:]), []
+        except Exception as e:  # noqa: BLE001 - the rest of the timeline still stands
+            events, missing = None, [f"- events not read ({e})"]
         return timeline_lines(timeline_entries(since, histories, jobs, deployments, clusters,
-                                               commands), since)
+                                               commands, events), since) + missing
     except Exception as e:  # noqa: BLE001 - a measurement must never fail the install
         return [f"Install timeline: not measured ({e})"]
 

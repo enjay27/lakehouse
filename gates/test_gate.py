@@ -470,6 +470,48 @@ class InstallTimeline(unittest.TestCase):
                          gate.dt.datetime(2026, 10, 14, 6, 44, 5, 811736,
                                           tzinfo=gate.dt.timezone.utc))
 
+    EVENTS = {"items": [
+        {"involvedObject": {"kind": "Job", "namespace": "catalog-polaris",
+                            "name": "polaris-pg-1-initdb"},
+         "reason": "SuccessfulCreate", "message": "Created pod: polaris-pg-1-initdb-x",
+         "lastTimestamp": "2026-10-14T06:44:10Z"},
+        {"involvedObject": {"kind": "Job", "namespace": "catalog-polaris",
+                            "name": "polaris-pg-1-initdb"},
+         "reason": "Completed", "message": "Job completed", "eventTime": None,
+         "lastTimestamp": "2026-10-14T06:44:30Z"},
+        {"involvedObject": {"kind": "Cluster", "namespace": "catalog-polaris",
+                            "name": "polaris-pg"},
+         "reason": "CreatingInstance", "message": "Primary instance (initdb)",
+         "eventTime": "2026-10-14T06:44:08.123456Z", "lastTimestamp": None},
+        # Not a Job or a Cluster, and one from before the install: left out.
+        {"involvedObject": {"kind": "Pod", "namespace": "catalog-polaris", "name": "p"},
+         "reason": "Pulled", "message": "x", "lastTimestamp": "2026-10-14T06:44:20Z"},
+        {"involvedObject": {"kind": "Job", "namespace": "catalog-polaris", "name": "old"},
+         "reason": "Completed", "message": "Job completed",
+         "lastTimestamp": "2026-10-13T06:44:20Z"}]}
+
+    def test_job_and_cluster_events_split_what_cnpg_does(self):
+        # CNPG deletes its initdb and join Jobs once they end; their events stay.
+        entries = gate.timeline_entries(self.SINCE, {}, {}, {}, {}, [], events=self.EVENTS)
+        self.assertEqual([text for _, text in entries], [
+            "cluster catalog-polaris/polaris-pg: CreatingInstance (Primary instance (initdb))",
+            "job catalog-polaris/polaris-pg-1-initdb: SuccessfulCreate "
+            "(Created pod: polaris-pg-1-initdb-x)",
+            "job catalog-polaris/polaris-pg-1-initdb: Completed (Job completed)",
+        ])
+
+    def test_events_that_cannot_be_read_leave_the_rest_of_the_timeline(self):
+        def subprocess_run(argv, **kwargs):
+            if "events" in argv:
+                return subprocess.CompletedProcess(argv, 1, stdout="", stderr="forbidden")
+            out = "[]" if "list" in argv else json.dumps({"items": []})
+            return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="")
+
+        with mock.patch.object(gate.subprocess, "run", side_effect=subprocess_run):
+            lines = gate.measure_timeline(self.SINCE, self.COMMANDS)
+        self.assertIn("release.py (the last release) started", "\n".join(lines))
+        self.assertEqual(lines[-1], "- events not read (forbidden)")
+
     def test_a_revision_without_a_time_is_left_out(self):
         # Helm 4 omits a zero `updated` from history's JSON.
         entries = gate.timeline_entries(self.SINCE, {("catalog-polaris", "polaris"): [
@@ -514,7 +556,8 @@ class InstallTimeline(unittest.TestCase):
             "list": json.dumps([{"name": "polaris", "namespace": "catalog-polaris"}]),
             "history": json.dumps(self.HISTORIES[("catalog-polaris", "polaris")]),
             "jobs": json.dumps(self.JOBS), "deployments": json.dumps(self.DEPLOYMENTS),
-            "clusters.postgresql.cnpg.io": json.dumps(self.CLUSTERS)}
+            "clusters.postgresql.cnpg.io": json.dumps(self.CLUSTERS),
+            "events": json.dumps(self.EVENTS)}
         calls = []
 
         def subprocess_run(argv, **kwargs):
@@ -531,6 +574,9 @@ class InstallTimeline(unittest.TestCase):
                        "history", "polaris", "-o", "json"], calls)
         self.assertIn("helm catalog-polaris/polaris revision 1 deployed", "\n".join(lines))
         self.assertIn("deployment catalog-polaris/polaris rolled out", "\n".join(lines))
+        self.assertIn(["kubectl", "--context", gate.CONTEXT, "get", "events",
+                       "--all-namespaces", "-o", "json"], calls)
+        self.assertIn("job catalog-polaris/polaris-pg-1-initdb: Completed", "\n".join(lines))
 
     def test_a_dry_run_that_installs_nothing_measures_nothing(self):
         with mock.patch.object(gate, "released_tags", return_value=[]), \
