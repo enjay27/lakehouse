@@ -288,7 +288,7 @@ when Kade learns the target clusters' version.
 | Kubernetes (gate, kind) | 1.36 (`kindest/node:v1.36.4`) | Kade: latest stable; 1.37 exists, but CloudNativePG 1.30 supports 1.34–1.36 |
 | CloudNativePG operator (gate only, ADR-045) | 1.30.1 | latest; target unknown |
 | cert-manager (gate only, ADR-043) | v1.21.2 | newest at least two weeks old; target unknown |
-| Barman Cloud Plugin (gate only, ADR-043) | v0.15.0 | newest at least two weeks old (v0.15.1 under two weeks); target unknown |
+| Barman Cloud Plugin (gate only, ADR-043) | v0.15.1 | newest at least two weeks old (released 2026-09-30); target unknown |
 | Polaris | 1.6.0 | Kade (ADR-009) |
 | PostgreSQL for Polaris | 16 (CNPG image 16.15, by digest in `charts/polaris-postgres`), 3 instances, required anti-affinity | Kade |
 | Pooler for Polaris | none | open: Kade does not know (ADR-010) |

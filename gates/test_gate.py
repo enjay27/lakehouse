@@ -1018,6 +1018,28 @@ RESTORE_ENV = {"NS_CATALOG_POLARIS": "catalog-polaris"}
 PG_IMAGE = "ghcr.io/cloudnative-pg/postgresql:16.15-1-minimal-trixie@sha256:" + "a" * 64
 
 
+def recovery_pod(suffix, phase, created, containers, init=()):
+    def status(name, state, restarts=0):
+        return {"name": name, "state": state, "restartCount": restarts}
+    return {"metadata": {"name": f"polaris-pg-restore-1-full-recovery-{suffix}",
+                         "creationTimestamp": created},
+            "status": {"phase": phase,
+                       "initContainerStatuses": [status(*c) for c in init],
+                       "containerStatuses": [status(*c) for c in containers]}}
+
+
+DONE = {"terminated": {"reason": "Completed", "exitCode": 0}}
+ERROR = {"terminated": {"reason": "Error", "exitCode": 1}}
+# Listed out of order: the report sorts them by creation.
+RECOVERY_PODS = {"items": [
+    recovery_pod("ccccc", "Succeeded", "2026-10-14T00:03:00Z", [("full-recovery", DONE)]),
+    recovery_pod("aaaaa", "Failed", "2026-10-14T00:01:00Z", [("full-recovery", ERROR)],
+                 init=[("plugin-barman-cloud", DONE)]),
+    recovery_pod("bbbbb", "Failed", "2026-10-14T00:02:00Z", [("full-recovery", ERROR, 2)],
+                 init=[("plugin-barman-cloud", {"running": {}})]),
+]}
+
+
 class CheckRestore(unittest.TestCase):
     """ADR-043 §4: a backup of polaris-pg, restored into polaris-pg-restore, read, deleted."""
 
@@ -1082,14 +1104,48 @@ class CheckRestore(unittest.TestCase):
     def test_check_restore_is_a_command(self):
         self.assertIn("check-restore", gate.__doc__.strip().splitlines()[-1])
 
-    def check(self, settled=None):
+    def test_it_reads_the_restores_full_recovery_pods(self):
+        argv = gate.recovery_pods_command("catalog-polaris")
+        self.assertEqual(argv[:5], ["kubectl", "--context", gate.CONTEXT, "-n",
+                                    "catalog-polaris"])
+        self.assertIn("cnpg.io/cluster=polaris-pg-restore,cnpg.io/jobRole=full-recovery", argv)
+
+    def test_the_report_counts_the_pods_and_names_how_each_ended(self):
+        # #86: the Job ran six pods before one completed; why is still unknown.
+        lines, failed = gate.recovery_report(RECOVERY_PODS)
+        self.assertEqual(lines[0], "Full recovery of polaris-pg-restore: 3 pods, 2 failed.")
+        self.assertEqual(lines[1:], [
+            "  polaris-pg-restore-1-full-recovery-aaaaa: Failed; plugin-barman-cloud: "
+            "terminated Completed (exit 0); full-recovery: terminated Error (exit 1)",
+            "  polaris-pg-restore-1-full-recovery-bbbbb: Failed; plugin-barman-cloud: "
+            "running; full-recovery: terminated Error (exit 1), 2 restarts",
+            "  polaris-pg-restore-1-full-recovery-ccccc: Succeeded; full-recovery: "
+            "terminated Completed (exit 0)"])
+        self.assertEqual(failed, ["polaris-pg-restore-1-full-recovery-aaaaa",
+                                  "polaris-pg-restore-1-full-recovery-bbbbb"])
+
+    def test_no_pods_read_is_said_and_names_none(self):
+        self.assertEqual(gate.recovery_report({"items": []}),
+                         (["Full recovery of polaris-pg-restore: 0 pods, 0 failed."], []))
+
+    def test_pods_that_cannot_be_read_are_said_and_the_check_goes_on(self):
+        unread = subprocess.CompletedProcess([], 1, "", "connection refused")
+        with mock.patch.object(gate.subprocess, "run", return_value=unread) as run:
+            lines = gate.report_recovery(["kubectl"], "catalog-polaris")
+        self.assertEqual(lines, ["Full recovery of polaris-pg-restore: its pods could not be "
+                                 "read (connection refused)."])
+        run.assert_called_once()
+
+    def check(self, settled=None, ready=0):
         """Runs check_restore with every command faked; (problems, notes, events)."""
         events = []
 
         def subprocess_run(argv, **kwargs):
-            events.append(("wait" if "wait" in argv else
-                           "delete" if "delete" in argv else "psql", argv))
-            return subprocess.CompletedProcess(argv, 0)
+            kind = ("wait" if "wait" in argv else "delete" if "delete" in argv else
+                    "pods" if "get" in argv else "logs" if "logs" in argv else "psql")
+            events.append((kind, argv))
+            out = json.dumps(RECOVERY_PODS) if kind == "pods" else ""
+            return subprocess.CompletedProcess(argv, ready if kind == "wait" else 0, out, "")
 
         def settle(run, context, namespace, cluster):
             events.append(("settle", (run, context, namespace, cluster)))
@@ -1108,15 +1164,33 @@ class CheckRestore(unittest.TestCase):
     def test_the_restore_settles_after_ready_and_before_psql(self):
         problems, notes, events = self.check()
         self.assertEqual(problems, [])
-        self.assertEqual([kind for kind, _ in events], ["wait", "settle", "psql", "delete"])
-        self.assertEqual(events[1][1], (gate.release.call, gate.CONTEXT, "catalog-polaris",
+        self.assertEqual([kind for kind, _ in events],
+                         ["wait", "pods", "logs", "logs", "settle", "psql", "delete"])
+        self.assertEqual(events[4][1], (gate.release.call, gate.CONTEXT, "catalog-polaris",
                                         "polaris-pg-restore"))
         self.assertIn("healthy", "\n".join(notes))
+
+    def test_the_full_recovery_pods_are_reported_and_each_failed_ones_log_printed(self):
+        _, notes, events = self.check()
+        self.assertIn("Full recovery of polaris-pg-restore: 3 pods, 2 failed.", notes)
+        logs = [argv for kind, argv in events if kind == "logs"]
+        self.assertEqual([argv[argv.index("logs") + 1] for argv in logs],
+                         ["polaris-pg-restore-1-full-recovery-aaaaa",
+                          "polaris-pg-restore-1-full-recovery-bbbbb"])
+        for argv in logs:
+            self.assertIn("--all-containers", argv)
+
+    def test_a_restore_that_never_gets_ready_still_reports_its_pods(self):
+        problems, notes, events = self.check(ready=1)
+        self.assertEqual(len(problems), 1)
+        self.assertEqual([kind for kind, _ in events], ["wait", "pods", "logs", "logs", "delete"])
+        self.assertIn("Full recovery of polaris-pg-restore: 3 pods, 2 failed.", notes)
 
     def test_a_restore_that_does_not_settle_is_a_problem_and_still_deleted(self):
         problems, _, events = self.check(settled="Cluster polaris-pg-restore did not settle")
         self.assertEqual(problems, ["Cluster polaris-pg-restore did not settle"])
-        self.assertEqual([kind for kind, _ in events], ["wait", "settle", "delete"])
+        self.assertEqual([kind for kind, _ in events],
+                         ["wait", "pods", "logs", "logs", "settle", "delete"])
 
 
 class Standins(unittest.TestCase):
