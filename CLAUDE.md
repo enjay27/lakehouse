@@ -12,8 +12,8 @@ storage, observability, SSO and the catalog gateway are other teams' services, r
 - A new ADR is Proposed; Kade accepts it in a commit of its own after reading the final text.
   Accepted ADRs are immutable: change one with a new ADR that supersedes or amends it.
 - The index changes in the same commit as any ADR; an ADR changes in the same commit as the
-  code it affects. Living documents (this file, `README.md`, `.claude/`, `docs/plans/`, the
-  index) cite only ADRs in force.
+  code it affects. Living documents (this file, `README.md`, `.claude/`, `docs/plans/`,
+  `docs/runbooks/`, the index) cite only ADRs in force (ADR-052).
 - The archive `enjay27/lakehouse-k8s` is evidence only: cite by path and commit, copy code
   only under an Accepted ADR.
 
@@ -23,7 +23,7 @@ storage, observability, SSO and the catalog gateway are other teams' services, r
 |---|---|
 | `docs/adr/` | Decisions and their index |
 | `docs/plans/roadmap.md` | The plan to the first release: scope, phases P0 to P7, open items |
-| `docs/measurements/`, `docs/runbooks/` | Measurements, with evidence and the versions measured, once the first is taken (ADR-003); runbooks, one per procedure, merged once proven on a Linux test cluster (ADR-043) |
+| `docs/measurements/`, `docs/runbooks/` | Measurements, with evidence and the versions measured, once the first is taken (ADR-003); runbooks, one per procedure, used on a target cluster only once proven on a Linux test cluster (ADR-043, ADR-052) |
 | `scripts/adr_check.py` | ADR-000 checks: names, numbers, headers, index rows, citations |
 | `scripts/repo_check.py` | No env file, key file, secret pattern or CRLF in what git tracks (ADR-002, ADR-006) |
 | `scripts/claude_md_check.py` | This file at most 100 lines; `.claude/rules/*.md` at most 80 with `paths:` |

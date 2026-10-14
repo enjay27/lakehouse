@@ -6,9 +6,9 @@
   line whose ADRs exist (Related is optional); `Superseded by ADR-NNN` names an existing ADR;
   `Amended by ADR-NNN` names an existing ADR whose Related line lists the amended one.
 - README.md has one row per ADR with the same title and status, and no row for a missing file.
-- Living documents cite no superseded ADR (ADR-000 rule 9): the index outside its rows, the
-  root README.md, CLAUDE.md, .claude/ and docs/plans/. A line that also names the ADR now in
-  force passes.
+- Living documents cite no superseded ADR (ADR-000 rule 9, amended by ADR-052): the index
+  outside its rows, the root README.md, CLAUDE.md, .claude/, docs/plans/ and docs/runbooks/.
+  A line that also names the ADR now in force passes.
 
 Whether a decision needs a Mermaid diagram is a judgement; the `adr` skill asks for it.
 
@@ -28,7 +28,7 @@ SUPERSEDED_RE = re.compile(r"^Superseded by ADR-(\d{3})$")
 AMENDED_RE = re.compile(r"^Amended by ADR-(\d{3})$")
 CITE_RE = re.compile(r"ADR-(\d{3})\b")
 LIVING_FILES = ["README.md", "CLAUDE.md"]
-LIVING_DIRS = [".claude", os.path.join("docs", "plans")]
+LIVING_DIRS = [".claude", os.path.join("docs", "plans"), os.path.join("docs", "runbooks")]
 DATE_RE = re.compile(r"^- \*\*Date:\*\* \d{4}-\d{2}-\d{2}$")
 ROW_RE = re.compile(r"^\|\s*\[(\d{3})\]\(([^)]+)\)\s*\|\s*(.*?)\s*\|\s*(.*?)\s*\|\s*$")
 
