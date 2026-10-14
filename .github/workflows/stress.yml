@@ -1,0 +1,153 @@
+# The stress test's Tier A (ADR-053, amended by ADR-054): runs only when Kade starts it by hand,
+# on the commit he picks; never on a push, never in the release gate, so it is not a gate
+# workflow (ADR-049) and has no delete job, and auto-merge.yml does not list it. Claude sessions
+# start it only when Kade asks in that session.
+# kind as smoke builds it (ADR-017, ADR-029, ADR-043), the gate's Secrets and the stand-ins in
+# direct mode, so Polaris reaches SeaweedFS, OPA and polaris-pg without the recorder (ADR-053
+# §4), this commit installed fresh; then gates/stress/driver.py: the seed (100 tables, about
+# 1 MB of metadata each), a step ramp per profile chosen, the mixed profile held at 70% of its
+# knee for 10 minutes, and the checks: only a correctness fault fails a run; speed is reported
+# (ADR-054 §2). The summary goes to the job summary and, with the steps and k6's console, to the
+# artifact `stress`. With `baseline_run`, the `stress` artifact of that earlier run is read
+# and each knee and the hold's p99 are compared with it (ADR-054 §3); its own job, the only one
+# that may read another run's artifacts, hands it over.
+name: Stress
+
+on:
+  workflow_dispatch:
+    inputs:
+      profiles:
+        description: The profiles to ramp, separated by spaces (gates/stress/config.json).
+        type: string
+        default: "commits queries-conditional queries-full mixed"
+      baseline_run:
+        description: An earlier Stress run's id to compare with; empty for none.
+        type: string
+        default: ""
+
+permissions: {}
+
+concurrency:
+  group: stress-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  baseline:
+    name: baseline
+    if: ${{ inputs.baseline_run != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    steps:
+      - name: The baseline run's summary
+        uses: actions/download-artifact@v8
+        with:
+          name: stress
+          path: ${{ runner.temp }}/baseline
+          run-id: ${{ inputs.baseline_run }}
+          github-token: ${{ github.token }}
+
+      - name: Handed to the stress job
+        uses: actions/upload-artifact@v7
+        with:
+          name: stress-baseline
+          path: ${{ runner.temp }}/baseline/summary.json
+          retention-days: 1
+          if-no-files-found: error
+
+  stress:
+    name: stress
+    needs: [baseline]
+    if: ${{ !cancelled() && needs.baseline.result != 'failure' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      KUBE_CONTEXT: kind-lakehouse-gate
+      NS_CNPG_SYSTEM: cnpg-system
+      NS_CATALOG_POLARIS: catalog-polaris
+      NS_STANDINS: standins
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Tools at pinned versions
+        run: |
+          python3 gates/gate.py tools "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: kind cluster and the CNPG operator (gate only, ADR-029)
+        run: python3 gates/gate.py up
+
+      - name: The gate's Secrets, Polaris pointed at the stand-ins directly (ADR-006, ADR-053)
+        run: python3 gates/gate.py secrets --direct
+
+      - name: The log batch's image, built from this checkout and loaded into kind (ADR-036)
+        run: python3 gates/gate.py batch-image
+
+      - name: The stand-ins, reachable from Polaris's namespace and CPU-limited (ADR-031, ADR-053)
+        run: python3 gates/gate.py standins --direct
+
+      - name: Install this commit (ADR-029)
+        run: |
+          set -euo pipefail
+          python3 gates/gate.py install --fresh | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: The seed, then the k6 pod (ADR-053 §3)
+        run: python3 gates/stress/driver.py seed "$RUNNER_TEMP/stress"
+
+      - name: A step ramp per profile, to each one's knee (ADR-053 §4)
+        env:
+          PROFILES: ${{ inputs.profiles }}
+        run: |
+          set -euo pipefail
+          for profile in $PROFILES; do
+            python3 gates/stress/driver.py ramp "$profile" "$RUNNER_TEMP/stress"
+          done
+
+      - name: The mixed profile held at 70% of its knee (ADR-053 §5)
+        run: python3 gates/stress/driver.py hold "$RUNNER_TEMP/stress"
+
+      - name: No failed request at or below a knee, no lost commit, no restart (ADR-054 §2)
+        run: python3 gates/stress/driver.py verify "$RUNNER_TEMP/stress"
+
+      - name: The baseline run's summary
+        if: ${{ !cancelled() && inputs.baseline_run != '' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: stress-baseline
+          path: ${{ runner.temp }}/baseline
+
+      - name: The summary, against the baseline run when one is named (ADR-054)
+        if: ${{ !cancelled() }}
+        env:
+          BASELINE: ${{ inputs.baseline_run }}
+        run: |
+          set -euo pipefail
+          if [ -n "$BASELINE" ]; then
+            python3 gates/stress/driver.py report "$RUNNER_TEMP/stress" "$RUNNER_TEMP/baseline" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            python3 gates/stress/driver.py report "$RUNNER_TEMP/stress" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload the summary, the steps and k6's console
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: stress
+          path: ${{ runner.temp }}/stress
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: State of the cluster on failure
+        if: failure()
+        run: |
+          kubectl --context "$KUBE_CONTEXT" get pods -A -o wide || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_POLARIS" get events --sort-by=.lastTimestamp || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_POLARIS" logs -l app.kubernetes.io/name=polaris --tail=80 --prefix || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_STANDINS" logs deployment/seaweedfs --tail=60 || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_STANDINS" logs deployment/opa --tail=60 || true
+          df -h / "$RUNNER_TEMP" || true

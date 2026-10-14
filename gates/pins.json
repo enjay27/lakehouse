@@ -80,5 +80,11 @@
       "image": "opensearchproject/opensearch:3.6.0@sha256:b5dd1512af2a99748c942cfbbd7f32162623336b210667d0fc6333c6321f171d",
       "source": "Docker Hub tag API digest and docker pull's RepoDigests agree, read 2026-10-11; 3.6.0 published 2026-05-15 (ADR-040)"
     }
+  },
+  "load_images": {
+    "k6": {
+      "image": "grafana/k6:2.3.0@sha256:9c2dee7f8ed74d317e4027c06a10f169b625638189de8d4555d0b3486a5aeb34",
+      "source": "Docker Hub index digest (docker-content-digest, recomputed), read 2026-10-14; 2.3.0 pushed 2026-09-21, the newest release at least two weeks old (1.8.2 of 2026-10-12 patches the 1.x line); Alpine 3.24.1 base with BusyBox's sleep and wget, which the driver uses (ADR-053 §2)"
+    }
   }
 }
