@@ -1,6 +1,6 @@
 # ADR-055: `main` is re-tested after Claude's merges and weekly, and a red run on `main` opens an issue
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-14
 - **Related:** ADR-000, ADR-003, ADR-022, ADR-030, ADR-049, ADR-050
 
