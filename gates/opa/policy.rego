@@ -19,6 +19,9 @@
 #   IcebergCatalogHandler asks about for its requests (gates/standins.py STRESS_ACTIONS). Seeding
 #   creates namespaces and tables and appends; the run lists, loads, checks a table exists and
 #   commits snapshots. No *_WITH_*_DELEGATION, no drop.
+# - gate_seed, the seed's writer (ADR-051 §2), may only do what gates/seed.py does as it, and
+#   only inside the catalog gate_seed_catalog: create tables, append, add a column, create a view
+#   (gates/standins.py SEED_ACTIONS). Root makes the rest of the seed. No drop.
 # - Anything else is refused.
 package polaris.authz
 
@@ -47,6 +50,18 @@ allow if {
 	count(input.resource.targets) > 0
 	every target in input.resource.targets {
 		in_catalog(target, "gate_stress_catalog")
+	}
+}
+
+allow if {
+	input.actor.principal == "gate_seed"
+	input.action in {
+		"CREATE_TABLE_DIRECT", "LOAD_TABLE", "ADD_TABLE_SNAPSHOT", "SET_TABLE_SNAPSHOT_REF",
+		"ADD_TABLE_SCHEMA", "SET_TABLE_CURRENT_SCHEMA", "CREATE_VIEW",
+	}
+	count(input.resource.targets) > 0
+	every target in input.resource.targets {
+		in_catalog(target, "gate_seed_catalog")
 	}
 }
 

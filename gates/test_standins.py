@@ -8,6 +8,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(__file__))
 import gate  # noqa: E402
+import seed  # noqa: E402
 import standins  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -356,6 +357,28 @@ class Cases(unittest.TestCase):
             with self.subTest(action=action):
                 self.assertIn(f'"{action}"', block)
         self.assertIn('in_catalog(target, "gate_stress_catalog")', block)
+
+    def test_the_seed_principal_is_allowed_in_its_catalog_and_refused_outside_it(self):
+        # ADR-051 §2: gate_seed writes the seed's tables and view, in gate_seed_catalog only.
+        cases = [c for c in standins.load_cases(os.path.join(HERE, "opa", "cases.json"))
+                 if c["input"]["actor"]["principal"] == seed.WRITER]
+        allowed = {c["input"]["action"] for c in cases if c["allow"]}
+        self.assertEqual(allowed, set(standins.SEED_ACTIONS))
+        refused = [c for c in cases if not c["allow"]]
+        self.assertTrue(any(c["input"]["action"] in standins.SEED_ACTIONS for c in refused),
+                        "an action it may do, refused in another catalog")
+        self.assertTrue(any(c["input"]["action"] not in standins.SEED_ACTIONS
+                            for c in refused), "an action it may not do, in its own catalog")
+
+    def test_the_policy_names_every_seed_action_in_the_seed_catalog(self):
+        with open(os.path.join(HERE, "opa", "policy.rego"), encoding="utf-8") as f:
+            rego = f.read()
+        block = rego[rego.index(f'input.actor.principal == "{seed.WRITER}"'):]
+        block = block[:block.index("}\n}")]
+        for action in standins.SEED_ACTIONS:
+            with self.subTest(action=action):
+                self.assertIn(f'"{action}"', block)
+        self.assertIn(f'in_catalog(target, "{seed.CATALOG}")', block)
 
 
 if __name__ == "__main__":
