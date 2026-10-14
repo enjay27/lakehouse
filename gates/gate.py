@@ -107,11 +107,12 @@
   check-network   creates a namespace per caller class with the gate's label, one without any
                   label and Datahub's, then from a short-lived pod in each, from an
                   unlabelled pod in Polaris's namespace, and from a pod with CNPG's join label
-                  in Polaris's namespace and in the unlabelled one, connects to each target of
-                  gates/network.py's CASES: each allowed one must connect, each refused one
-                  must time out or be reset (ADR-048 §6). One that should be refused and
-                  connects means the cluster does not enforce NetworkPolicy. polaris-pg's
-                  exporter on 9187 is reached through a Service the gate adds (ADR-046 §4).
+                  in Polaris's namespace and in the unlabelled one, all at once, connects to
+                  each target of gates/network.py's CASES: each allowed one must connect, each
+                  refused one must time out or be reset (ADR-048 §6). One that should be
+                  refused and connects means the cluster does not enforce NetworkPolicy.
+                  polaris-pg's exporter on 9187 is reached through a Service the gate adds
+                  (ADR-046 §4).
   check-metrics   asks the Prometheus stand-in, from a check pod, until every target is up:
                   `up` 1 for every running Polaris pod and polaris-pg instance, Polaris's
                   http_server_requests_seconds_count above 0, cnpg_collector_up 1 on every
@@ -123,6 +124,7 @@ one. Nothing here reaches any cluster but the kind cluster it creates (ADR-017).
 Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | rebuild-replica | check-polaris-pg | check-polaris | console-image | batch-image | check-logs | check-console | check-iceberg | check-restore | gate-policies | check-network | check-metrics
 """
 
+import concurrent.futures
 import copy
 import datetime as dt
 import hashlib
@@ -954,15 +956,17 @@ def check_restore_command(env, image, database, name):
 
 def check_network(env, pins):
     """ADR-048 §6: the source namespaces, then from a pod in each a connection to each target
-    of network.CASES. Returns (problems, lines)."""
+    of network.CASES. The probe pods all run at once. Returns (problems, lines)."""
     objects = network.namespaces_manifest(env)
     objects["items"].append(network.metrics_service(env))
     manifest = json.dumps(objects)
     apply = ["kubectl", "--context", CONTEXT, "apply", "--server-side", "--field-manager=gate",
              "-f", "-"]
     subprocess.run(apply, input=manifest, text=True, check=True, capture_output=True)
-    addresses, results = network.targets(env), {}
-    for source, (namespace, _) in network.source_namespaces(env).items():
+    addresses, sources = network.targets(env), network.source_namespaces(env)
+
+    def probe(source):
+        namespace, _ = sources[source]
         wanted = sorted({c.target for c in network.CASES if c.source == source})
         command = network.probe_command(namespace, smoke_python_image(pins),
                                         f"check-network-{source}-{os.getpid()}",
@@ -971,7 +975,10 @@ def check_network(env, pins):
         out = subprocess.run(command, input=network.PROBE, capture_output=True, text=True,
                              check=False)
         by_address = network.parse_probe(out.stdout)
-        results[source] = {t: by_address.get(addresses[t]) for t in wanted}
+        return {t: by_address.get(addresses[t]) for t in wanted}
+
+    with concurrent.futures.ThreadPoolExecutor(len(sources)) as pool:
+        results = dict(zip(sources, pool.map(probe, sources)))
     return network.report(network.CASES, results)
 
 
