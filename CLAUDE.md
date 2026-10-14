@@ -52,7 +52,7 @@ CI runs these as the **static** gate on every push to `claude/**` and every PR (
 (ADR-039, every PR into `main`): `charts/`, `images/`, `install/`, `gates/` or the gate workflows need
 passing dry-run and smoke runs on the head; batch or fixture spec files, a log-batch (ADR-040 §5).
 `install/`, `scripts/init_env.py` or a file added to or removed from `charts/` also need smoke-fresh,
-unread by gate-check (ADR-050 §3). Push each head to `gate/<level>/<task>`; open the PR once all passed.
+unread by gate-check (ADR-050 §3). How to push each head to `gate/<level>/<task>`: `.claude/rules/gates.md`.
 
 ## Environments and clusters (ADR-004, ADR-005)
 
