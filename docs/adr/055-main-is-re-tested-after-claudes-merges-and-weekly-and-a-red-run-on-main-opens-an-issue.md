@@ -26,6 +26,9 @@ The daily drift run filed #122 (MG-03): `main` is not re-tested after merges mad
 - **ADR-022 cannot be amended again:** it is already Amended by ADR-030, and ADR-000 rule 6
   supersedes an amended ADR whole. Static's triggers are ADR-050 §1's static row, which this
   ADR amends.
+- **GitHub chains `workflow_run` at most three levels deep.** Static, then Auto-merge, then
+  Labels already uses all three (`docs/plans/roadmap.md`, *Risks to verify*). A workflow
+  triggered at a fourth level never starts.
 
 ## Decision
 
@@ -46,6 +49,9 @@ The daily drift run filed #122 (MG-03): `main` is not re-tested after merges mad
   - Static's concurrency group names the ref, so repeats on `main` collapse into the newest.
   - Auto-merge acts only on runs whose event is `pull_request`, so these runs never start a
     merge.
+  - **This run is the third level:** Static or Gate check, then Auto-merge, then Static, as
+    Labels is. Nothing chains after it, and nothing needs to: §2's job is a called workflow
+    (`workflow_call`), which is part of the run, not a level.
 - **Weekly:** a `schedule` on Monday mornings UTC. It catches what changes without a commit:
   a pinned download that disappears, a runner image's Python.
 
@@ -85,8 +91,9 @@ flowchart LR
 - **`auto-merge.yml` dispatches static after a merge it made:** one run per merge and no API
   check, but it changes the merge workflow, so ADR-022 would be superseded whole (ADR-000
   rule 6) to add one step.
-- **Weekly only:** the smallest change, and enough for MG-03, but a broken `main` would wait up
-  to a week, with every PR in between red for a reason not its own.
+- **Weekly only:** the smallest change, and enough for MG-03. It also leaves the
+  `workflow_run` chain at its present depth. But a broken `main` would wait up to a week, with
+  every PR in between red for a reason not its own.
 - **Dry-run and smoke after each merge too:** about 16 minutes of smoke per merge. The nightly
   smoke and the release gate (ADR-033) already cover the platform on `main`.
 - **Record an exception to MG-03 instead:** keeps ADR-022's wording, but leaves the gap the
@@ -106,6 +113,9 @@ flowchart LR
   acts from its merge on: `workflow_run` and `schedule` workflows are read from `main`.
 - **Living documents follow in that PR:** `static.yml`'s header and `CLAUDE.md`'s Gates
   paragraph name the new triggers and this ADR.
+- **No workflow may start from Static's runs on `main` through `workflow_run`:** they are the
+  third level, so it would never start. Auto-merge, which listens to Static, would not run on
+  them; it skips them already, since their event is not `pull_request`.
 - **Cost:** one static run on `main` per merge that changed it, about 3 minutes; one a week; and
   a skipped run of a few seconds for each Auto-merge run that merged nothing.
 - **#122** closes once the drift run sees static's schedule.
