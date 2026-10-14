@@ -102,6 +102,7 @@ flowchart LR
 | [051](051-gates-upgrade-from-the-last-release-over-seeded-data-and-check-every-seeded-object-after-the-upgrade.md) | Gates upgrade from the last release over seeded data, and check every seeded object after the upgrade | Accepted |
 | [052](052-runbooks-are-living-documents-and-cite-only-adrs-in-force.md) | Runbooks are living documents and cite only ADRs in force | Accepted |
 | [053](053-release-candidates-are-stress-tested-with-k6-on-the-release-gate-and-one-polariss-capacity-is-measured-on-a-linux-test-server.md) | Release candidates are stress-tested with k6 on the release gate, and one Polaris's capacity is measured on a Linux test server | Accepted |
+| [054](054-the-stress-test-runs-only-when-kade-starts-it-not-in-the-release-gate.md) | The stress test runs only when Kade starts it, not in the release gate | Proposed |
 
 ## Not ADRs
 
