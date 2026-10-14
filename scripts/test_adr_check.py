@@ -180,14 +180,17 @@ class Citations(AdrCase):
     def test_every_living_document_is_checked(self):
         self.chain()
         for path in ["README.md", "CLAUDE.md", ".claude/rules/r.md",
-                     ".claude/skills/s/SKILL.md", "docs/plans/plan.md"]:
+                     ".claude/skills/s/SKILL.md", "docs/plans/plan.md",
+                     "docs/runbooks/restore.md"]:
             self.write(path, "See ADR-002.\n", base=self.root)
         self.assertEqual(sorted(self.citation_errors()), sorted([
             ".claude/rules/r.md:1: cites superseded ADR-002; cite ADR-003",
             ".claude/skills/s/SKILL.md:1: cites superseded ADR-002; cite ADR-003",
             "CLAUDE.md:1: cites superseded ADR-002; cite ADR-003",
             "README.md:1: cites superseded ADR-002; cite ADR-003",
-            "docs/plans/plan.md:1: cites superseded ADR-002; cite ADR-003"]))
+            "docs/plans/plan.md:1: cites superseded ADR-002; cite ADR-003",
+            # ADR-052: runbooks are living documents too.
+            "docs/runbooks/restore.md:1: cites superseded ADR-002; cite ADR-003"]))
 
     def test_index_text_is_checked_but_its_rows_are_not(self):
         self.chain()

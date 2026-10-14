@@ -12,8 +12,8 @@ storage, observability, SSO and the catalog gateway are other teams' services, r
 - A new ADR is Proposed; Kade accepts it in a commit of its own after reading the final text.
   Accepted ADRs are immutable: change one with a new ADR that supersedes or amends it.
 - The index changes in the same commit as any ADR; an ADR changes in the same commit as the
-  code it affects. Living documents (this file, `README.md`, `.claude/`, `docs/plans/`, the
-  index) cite only ADRs in force.
+  code it affects. Living documents (this file, `README.md`, `.claude/`, `docs/plans/`,
+  `docs/runbooks/`, the index) cite only ADRs in force (ADR-052).
 - The archive `enjay27/lakehouse-k8s` is evidence only: cite by path and commit, copy code
   only under an Accepted ADR.
 
