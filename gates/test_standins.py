@@ -177,7 +177,7 @@ class Manifests(unittest.TestCase):
 
 
 class NetworkPolicies(unittest.TestCase):
-    """ADR-044 §3, NS_STANDINS's rows restated from ADR-034."""
+    """ADR-048 §3, NS_STANDINS's rows restated from ADR-034."""
 
     def setUp(self):
         self.policies = {name: o["spec"] for (kind, name), o in objects().items()

@@ -39,6 +39,11 @@
                   over it (ADR-051); with no tag, or with
                   --fresh, only this commit's release. With --dry-run, this commit's release is
                   a server-side dry-run over the installed one (ADR-038). Prints which it did.
+  rebuild-replica deletes one replica of polaris-pg, never the primary: its PVC without waiting,
+                  then its pod. CNPG makes a new instance through a join pod that clones the
+                  primary under the network policies; it passes once a new join Job ran and the
+                  Cluster is Ready with all its instances, within REBUILD_TIMEOUT s. On failure,
+                  the join pods' logs (ADR-048 §7). Gate only: it deletes a volume.
   check-polaris-pg
                   compares the running `Cluster` polaris-pg with the values its helm release
                   was installed with, and checks its instances run on different nodes
@@ -87,14 +92,15 @@
                   polaris-pg-restore is deleted whatever happened.
 
   gate-policies   applies the gate's own allow policies in Polaris's namespace (gates/network.py,
-                  ADR-044 §5): the check pods, labelled lakehouse-gate/check, reach every pod;
+                  ADR-048 §5): the check pods, labelled lakehouse-gate/check, reach every pod;
                   the PostgreSQL recorder reaches the CNPG instances on 5432. `install` runs
                   it right before this commit's release.
   check-network   creates a namespace per caller class with the gate's label, one without any
-                  label and Datahub's, then from a short-lived pod in each, and from an
-                  unlabelled pod in Polaris's namespace, connects to each target of
+                  label and Datahub's, then from a short-lived pod in each, from an
+                  unlabelled pod in Polaris's namespace, and from a pod with CNPG's join label
+                  in Polaris's namespace and in the unlabelled one, connects to each target of
                   gates/network.py's CASES: each allowed one must connect, each refused one
-                  must time out or be reset (ADR-044 §6). One that should be refused and
+                  must time out or be reset (ADR-048 §6). One that should be refused and
                   connects means the cluster does not enforce NetworkPolicy. polaris-pg's
                   exporter on 9187 is reached through a Service the gate adds (ADR-046 §4).
   check-metrics   asks the Prometheus stand-in, from a check pod, until every target is up:
@@ -105,7 +111,7 @@
 Every kubectl and helm call names the gate's context, and a namespace where the object has
 one. Nothing here reaches any cluster but the kind cluster it creates (ADR-017).
 
-Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | check-polaris-pg | check-polaris | console-image | batch-image | check-logs | check-console | check-iceberg | check-restore | gate-policies | check-network | check-metrics
+Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | rebuild-replica | check-polaris-pg | check-polaris | console-image | batch-image | check-logs | check-console | check-iceberg | check-restore | gate-policies | check-network | check-metrics
 """
 
 import copy
@@ -161,7 +167,7 @@ POLARIS_S3_ENV = {"AWS_ACCESS_KEY_ID": "accessKeyId", "AWS_SECRET_ACCESS_KEY": "
 POLARIS_POD_LABELS = "app.kubernetes.io/name=polaris,app.kubernetes.io/instance=polaris"
 POLARIS_API_PORT, POLARIS_MGMT_PORT = 8181, 8182
 # Every pod the gate starts in Polaris's namespace to check it carries this label, which the
-# gate's own allow policy lets reach every pod there (ADR-044 §5).
+# gate's own allow policy lets reach every pod there (ADR-048 §5).
 CHECK_POD_LABEL = f"--labels={network.CHECK_LABEL}=true"
 # The catalog the smoke tests create and the gate's policy names (gates/opa/policy.rego).
 ICEBERG_CATALOG = "gate_catalog"
@@ -321,7 +327,7 @@ def console_settings(ns):
 def gate_env(template_text, gen=init_env.generate):
     """`.env` for the gate: its context, the stand-ins' endpoints, the S3 stand-in's
     credentials, the console's settings, the log claim's shared class and a namespace label
-    per caller class (ADR-044 §6); init_env fills the rest."""
+    per caller class (ADR-048 §6); init_env fills the rest."""
     template = init_env.parse(template_text)
     fixed = {"KUBE_CONTEXT": CONTEXT, **standin_endpoints(template["NS_STANDINS"]),
              **console_settings(template["NS_CATALOG_POLARIS"]),
@@ -471,7 +477,7 @@ def install_plan(previous, previous_dir, fresh, dry_run=False):
     release before this one runs from a worktree of its tag, with the gate's `.env`."""
     this = ["python3", os.path.join(ROOT, "install", "release.py")] + (
         ["--dry-run"] if dry_run else [])
-    # The gate's own allow policies (ADR-044 §5), right before this commit's release applies
+    # The gate's own allow policies (ADR-048 §5), right before this commit's release applies
     # Polaris's: never in a dry-run, which changes nothing.
     this = [this] if dry_run else [["python3", os.path.join(HERE, "gate.py"),
                                     "gate-policies"], this]
@@ -545,6 +551,73 @@ def _properties(configmap):
 
 def _running(pods):
     return [p for p in pods["items"] if p.get("status", {}).get("phase") == "Running"]
+
+
+# Seconds a rebuilt replica has to join and the Cluster to get Ready again, as release.py's
+# wait for the Cluster (ADR-048 §7).
+REBUILD_TIMEOUT = 900
+JOIN_SELECTOR = f"cnpg.io/cluster={release.POLARIS_PG},cnpg.io/jobRole=join"
+
+
+def rebuild_target(cluster, pods):
+    """The replica rebuild-replica deletes: the first instance by name that is not the primary;
+    None without one."""
+    primary = cluster.get("status", {}).get("currentPrimary")
+    names = sorted(p["metadata"]["name"] for p in pods["items"]
+                   if p["metadata"]["name"] != primary)
+    return names[0] if names else None
+
+
+def rebuild_commands(namespace, instance):
+    """The instance's PVC, without waiting (its pod still holds it), then its pod. CNPG names
+    both after the instance."""
+    kubectl = ["kubectl", "--context", CONTEXT, "-n", namespace, "delete"]
+    return [kubectl + ["pvc", instance, "--wait=false"], kubectl + ["pod", instance]]
+
+
+def join_jobs_command(namespace):
+    return ["kubectl", "--context", CONTEXT, "-n", namespace, "get", "jobs", "-l",
+            JOIN_SELECTOR, "-o", "json"]
+
+
+def rebuilt(cluster, joins):
+    """A new join Job ran and the Cluster is Ready with every instance."""
+    status = cluster.get("status", {})
+    ready = any(c.get("type") == "Ready" and c.get("status") == "True"
+                for c in status.get("conditions", []))
+    return bool(joins) and ready and status.get("readyInstances") == cluster["spec"]["instances"]
+
+
+def rebuild_replica(env):
+    """ADR-048 §7. Returns (problems, notes)."""
+    ns = env["NS_CATALOG_POLARIS"]
+    cluster_command, pods_command = polaris_pg_commands(ns)[1:]
+    instance = rebuild_target(json.loads(output(cluster_command)),
+                              json.loads(output(pods_command)))
+    if not instance:
+        return [f"Cluster {release.POLARIS_PG} has no replica to rebuild"], []
+    jobs_command = join_jobs_command(ns)
+    # By uid: a Job made again under an old instance's name is new all the same.
+    before = {j["metadata"]["uid"] for j in json.loads(output(jobs_command))["items"]}
+    for command in rebuild_commands(ns, instance):
+        run(command)
+    # A poll sees a join Job while it runs, even if CNPG removes it once done.
+    joins, end = set(), time.monotonic() + REBUILD_TIMEOUT
+    while True:
+        joins |= {j["metadata"]["name"] for j in json.loads(output(jobs_command))["items"]
+                  if j["metadata"]["uid"] not in before}
+        if rebuilt(json.loads(output(cluster_command)), joins):
+            return [], [f"Replica {instance} deleted with its PVC; {', '.join(sorted(joins))} "
+                        f"cloned the primary, and Cluster {release.POLARIS_PG} is Ready with "
+                        f"every instance."]
+        if time.monotonic() > end:
+            break
+        time.sleep(3)
+    subprocess.run(["kubectl", "--context", CONTEXT, "-n", ns, "logs", "-l", JOIN_SELECTOR,
+                    "--all-containers", "--prefix", "--tail=200"], check=False)
+    joined = ", ".join(sorted(joins)) or "no join Job"
+    return [f"Cluster {release.POLARIS_PG} not Ready with every instance {REBUILD_TIMEOUT} s "
+            f"after {instance} was deleted with its PVC ({joined})"], []
 
 
 def polaris_problems(values, deployment, pods, configmap, env):
@@ -726,7 +799,7 @@ def check_restore_command(env, image, database, name):
 
 
 def check_network(env, pins):
-    """ADR-044 §6: the source namespaces, then from a pod in each a connection to each target
+    """ADR-048 §6: the source namespaces, then from a pod in each a connection to each target
     of network.CASES. Returns (problems, lines)."""
     objects = network.namespaces_manifest(env)
     objects["items"].append(network.metrics_service(env))
@@ -739,7 +812,8 @@ def check_network(env, pins):
         wanted = sorted({c.target for c in network.CASES if c.source == source})
         command = network.probe_command(namespace, smoke_python_image(pins),
                                         f"check-network-{source}-{os.getpid()}",
-                                        [addresses[t] for t in wanted])
+                                        [addresses[t] for t in wanted],
+                                        labels=network.POD_LABELS.get(source))
         out = subprocess.run(command, input=network.PROBE, capture_output=True, text=True,
                              check=False)
         by_address = network.parse_probe(out.stdout)
@@ -1378,6 +1452,11 @@ def main(argv):
         command = check_console_command(env, smoke_python_image(pins),
                                         f"check-console-{os.getpid()}")
         return subprocess.run(command, input=script, text=True, check=False).returncode
+    if argv[1:] == ["rebuild-replica"]:
+        problems, notes = rebuild_replica(release.load_env(ROOT, os.environ))
+        for line in notes + problems:
+            print(line, flush=True)
+        return 1 if problems else 0
     if argv[1:] == ["check-polaris-pg"]:
         namespace = os.environ.get("NS_CATALOG_POLARIS") or "catalog-polaris"
         answers = [json.loads(subprocess.run(c, capture_output=True, text=True,

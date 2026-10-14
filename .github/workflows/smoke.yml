@@ -5,8 +5,9 @@
 # Plugin (ADR-043), the gate's Secrets (ADR-006), the
 # stand-ins for other teams' services (ADR-031), the latest release tag installed from its
 # checkout and this commit's release over it (ADR-051), or with `fresh` this commit's alone;
-# then the running Cluster polaris-pg is checked against its values, its three instances on
-# three nodes (ADR-016), the stand-ins answer as Polaris needs them to (ADR-026), Polaris runs
+# then one replica of polaris-pg is deleted with its volume and rejoins through CNPG's join pod
+# under the network policies (ADR-048), the running Cluster polaris-pg is checked against its
+# values, its three instances on three nodes (ADR-016), the stand-ins answer as Polaris needs them to (ADR-026), Polaris runs
 # as its values say and gives root a token every replica accepts (ADR-016, ADR-026), PyIceberg
 # as an ordinary principal writes a table into a catalog on the S3 endpoint and reads it back
 # while the policy refuses what it is not granted (ADR-026, ADR-031), a backup of polaris-pg
@@ -91,6 +92,11 @@ jobs:
           else
             python3 gates/gate.py install | tee -a "$GITHUB_STEP_SUMMARY"
           fi
+
+      - name: A replica deleted with its volume rejoins through CNPG's join pod under the network policies (ADR-048)
+        run: |
+          set -euo pipefail
+          python3 gates/gate.py rebuild-replica | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: The running Cluster polaris-pg matches its values (ADR-016)
         run: |

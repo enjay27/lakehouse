@@ -1,4 +1,4 @@
-# install/release.py passes every value from .env (ADR-044 §2). values.schema.json refuses
+# install/release.py passes every value from .env (ADR-048 §2). values.schema.json refuses
 # unknown keys, so a misspelt value fails instead of being ignored (ADR-016).
 
 # One namespace label per caller class in other teams' namespaces, as {key, value}, parsed from

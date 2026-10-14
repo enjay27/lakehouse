@@ -66,7 +66,7 @@ class Pins(unittest.TestCase):
                 self.assertTrue(pin["source"])
 
     def test_the_network_policy_schema_is_the_gates_kubernetes_version_at_a_commit(self):
-        # ADR-044 §4: kubeconform validates the policies against it in the static gate.
+        # ADR-048 §4: kubeconform validates the policies against it in the static gate.
         pins = gate.load_pins(os.path.join(HERE, "pins.json"))
         pin = pins["kubernetes_schemas"]["networkpolicy"]
         version = pins["node_image"]["image"].split(":")[1].split("@")[0]
@@ -246,7 +246,7 @@ class Commands(unittest.TestCase):
 class Install(unittest.TestCase):
     ROOT = os.path.dirname(HERE)
     THIS = ["python3", os.path.join(os.path.dirname(HERE), "install", "release.py")]
-    # ADR-044 §5: the gate-only allow policies, just before this commit's release.
+    # ADR-048 §5: the gate-only allow policies, just before this commit's release.
     GATE_POLICIES = ["python3", os.path.join(HERE, "gate.py"), "gate-policies"]
 
     def test_with_a_release_installs_it_from_its_tag_then_this_commit(self):
@@ -377,7 +377,7 @@ class GateEnv(unittest.TestCase):
         self.assertEqual(env["POLARIS_DB_HOST"], "recorder.si.svc.cluster.local")
 
     def test_each_caller_class_gets_the_gates_namespace_label(self):
-        # ADR-044 §6: check-network gives these labels to its source namespaces.
+        # ADR-048 §6: check-network gives these labels to its source namespaces.
         env = gate.init_env.parse(gate.gate_env(TEMPLATE, gen=lambda name: "x"))
         self.assertEqual({var: env[var] for var in gate.release.CALLER_VARS.values()}, {
             "POLARIS_GATEWAY_NAMESPACE_LABEL": "lakehouse-gate/caller=gateway",
@@ -485,6 +485,116 @@ class PolarisPg(unittest.TestCase):
         self.assertIn("--all", commands[0])
         self.assertIn("cluster/polaris-pg", commands[1])
         self.assertIn("cnpg.io/cluster=polaris-pg,cnpg.io/podRole=instance", commands[2])
+
+
+def rebuilding(primary="polaris-pg-1", ready=3, condition="True"):
+    return {"spec": {"instances": 3},
+            "status": {"currentPrimary": primary, "readyInstances": ready,
+                       "conditions": [{"type": "Ready", "status": condition}]}}
+
+
+def jobs(*names, uid="1"):
+    return {"items": [{"metadata": {"name": n, "uid": f"{n}-{uid}"}} for n in names]}
+
+
+class RebuildReplica(unittest.TestCase):
+    """ADR-048 §7: a replica's PVC and pod deleted; CNPG rebuilds it with a join pod."""
+
+    def test_it_picks_a_replica_never_the_primary(self):
+        self.assertEqual(gate.rebuild_target(rebuilding("polaris-pg-1"), pods("a", "b", "c")),
+                         "polaris-pg-2")
+        self.assertEqual(gate.rebuild_target(rebuilding("polaris-pg-2"), pods("a", "b", "c")),
+                         "polaris-pg-1")
+
+    def test_with_no_replica_there_is_nothing_to_rebuild(self):
+        self.assertIsNone(gate.rebuild_target(rebuilding("polaris-pg-1"), pods("a")))
+
+    def test_it_deletes_the_pvc_without_waiting_then_the_pod_in_polaris_namespace(self):
+        pvc, pod = gate.rebuild_commands("catalog-polaris", "polaris-pg-2")
+        for argv in (pvc, pod):
+            self.assertEqual(argv[:5], ["kubectl", "--context", gate.CONTEXT, "-n",
+                                        "catalog-polaris"])
+        self.assertEqual(pvc[5:], ["delete", "pvc", "polaris-pg-2", "--wait=false"])
+        self.assertEqual(pod[5:], ["delete", "pod", "polaris-pg-2"])
+
+    def test_it_reads_polaris_pgs_join_jobs(self):
+        argv = gate.join_jobs_command("catalog-polaris")
+        self.assertEqual(argv[argv.index("-n") + 1], "catalog-polaris")
+        self.assertIn("cnpg.io/cluster=polaris-pg,cnpg.io/jobRole=join", argv)
+
+    def test_rebuilt_needs_a_new_join_and_the_cluster_ready_with_every_instance(self):
+        self.assertTrue(gate.rebuilt(rebuilding(), {"polaris-pg-4-join"}))
+        self.assertFalse(gate.rebuilt(rebuilding(), set()))
+        self.assertFalse(gate.rebuilt(rebuilding(ready=2), {"polaris-pg-4-join"}))
+        self.assertFalse(gate.rebuilt(rebuilding(condition="False"), {"polaris-pg-4-join"}))
+
+    def answers(self, after):
+        """gate.output's answers: the Cluster, its instances and the join Jobs before the
+        deletion, then (join Jobs, Cluster) for each poll in `after`."""
+        before = [json.dumps(rebuilding()), json.dumps(pods("a", "b", "c")),
+                  json.dumps(jobs("polaris-pg-2-join", "polaris-pg-3-join"))]
+        return before + [json.dumps(x) for pair in after for x in pair]
+
+    def run_rebuild(self, after, timeout=900):
+        ran, other = [], []
+        clock = iter(range(0, 100000, 3))
+        with mock.patch.object(gate, "output", side_effect=self.answers(after)), \
+                mock.patch.object(gate, "run", side_effect=ran.append), \
+                mock.patch.object(gate.subprocess, "run",
+                                  side_effect=lambda argv, **kw: other.append(argv)), \
+                mock.patch.object(gate.time, "monotonic", side_effect=lambda: next(clock)), \
+                mock.patch.object(gate.time, "sleep"), \
+                mock.patch.object(gate, "REBUILD_TIMEOUT", timeout):
+            problems, notes = gate.rebuild_replica({"NS_CATALOG_POLARIS": "catalog-polaris"})
+        return problems, notes, ran, other
+
+    def test_it_passes_once_a_new_join_ran_and_the_cluster_is_ready_again(self):
+        old = jobs("polaris-pg-2-join", "polaris-pg-3-join")
+        new = jobs("polaris-pg-2-join", "polaris-pg-3-join", "polaris-pg-4-join")
+        problems, notes, ran, other = self.run_rebuild([
+            (old, rebuilding()),            # the operator has not acted yet
+            (new, rebuilding(ready=2)),     # the join runs
+            (old, rebuilding()),            # CNPG removed the finished Job: seen all the same
+        ])
+        self.assertEqual(problems, [])
+        self.assertEqual(ran, gate.rebuild_commands("catalog-polaris", "polaris-pg-2"))
+        self.assertIn("polaris-pg-4-join", "\n".join(notes))
+        self.assertEqual(other, [])
+
+    def test_a_ready_cluster_without_a_new_join_fails_and_prints_the_join_pods_log(self):
+        old = jobs("polaris-pg-2-join", "polaris-pg-3-join")
+        problems, _, _, other = self.run_rebuild([(old, rebuilding())] * 3, timeout=6)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("polaris-pg", problems[0])
+        (logs,) = other
+        self.assertIn("logs", logs)
+        self.assertIn("cnpg.io/cluster=polaris-pg,cnpg.io/jobRole=join", logs)
+
+    def test_a_join_job_made_again_under_an_old_name_counts_as_new(self):
+        problems, notes, _, _ = self.run_rebuild([
+            (jobs("polaris-pg-2-join", "polaris-pg-3-join", uid="2"), rebuilding())])
+        self.assertEqual(problems, [])
+
+    def test_a_join_that_never_gets_the_cluster_ready_fails(self):
+        new = jobs("polaris-pg-2-join", "polaris-pg-3-join", "polaris-pg-4-join")
+        problems, _, _, _ = self.run_rebuild([(new, rebuilding(ready=2))] * 3, timeout=6)
+        self.assertEqual(len(problems), 1)
+
+    def test_with_no_replica_it_deletes_nothing(self):
+        with mock.patch.object(gate, "output", side_effect=[
+                    json.dumps(rebuilding()), json.dumps(pods("a"))]), \
+                mock.patch.object(gate, "run") as ran:
+            problems, _ = gate.rebuild_replica({"NS_CATALOG_POLARIS": "catalog-polaris"})
+        self.assertEqual(len(problems), 1)
+        ran.assert_not_called()
+
+    def test_main_runs_it_and_the_usage_names_it(self):
+        self.assertIn("| rebuild-replica |", gate.__doc__.strip().splitlines()[-1])
+        with mock.patch.object(gate, "rebuild_replica", return_value=([], ["ok"])) as rebuild, \
+                mock.patch.object(gate.release, "load_env", return_value={}), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(gate.main(["gate.py", "rebuild-replica"]), 0)
+        rebuild.assert_called_once()
 
 
 POLARIS_ENV = {"NS_CATALOG_POLARIS": "catalog-polaris", "POLARIS_DB_HOST": "recorder.standins.svc",

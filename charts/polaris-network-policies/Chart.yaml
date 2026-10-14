@@ -1,5 +1,5 @@
-# Polaris's network policies (ADR-044): every pod in NS_CATALOG_POLARIS is denied ingress by
-# default, and one policy allows each rule of ADR-044 §3. Installed by install/release.py first
+# Polaris's network policies (ADR-048): every pod in NS_CATALOG_POLARIS is denied ingress by
+# default, and one policy allows each rule of ADR-048 §3. Installed by install/release.py first
 # in step 1, before polaris-pg (ADR-045). Callers in other teams' namespaces are selected by the
 # namespace labels from .env; this repository's and the operator's namespaces by name.
 apiVersion: v2

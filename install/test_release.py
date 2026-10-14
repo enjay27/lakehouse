@@ -355,7 +355,7 @@ NETPOL_ENV = {**POLARIS_ENV,
 
 
 class NetworkPolicies(unittest.TestCase):
-    """ADR-044, first in step 1 (ADR-045)."""
+    """ADR-048, first in step 1 (ADR-045)."""
 
     def step(self, calls, env=NETPOL_ENV, dry_run=False):
         return release.network_policies(env, calls, dry_run=dry_run)
@@ -889,7 +889,7 @@ class Bootstrap(unittest.TestCase):
                          {"name": "polaris-root", "key": "clientSecret"})
 
     def test_the_pod_carries_the_label_polaris_pgs_policy_allows(self):
-        # ADR-044 §3: only pods labelled as its clients reach polaris-pg.
+        # ADR-048 §3: only pods labelled as its clients reach polaris-pg.
         calls = FakeBootstrap()
         self.step(calls)
         self.assertIn(f"--labels={release.PG_CLIENT_LABEL}=true", self.run_call(calls))

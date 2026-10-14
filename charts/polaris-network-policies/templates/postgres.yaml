@@ -1,5 +1,6 @@
 # polaris-pg's instances, 5432: pods of this namespace labelled as its clients (Polaris, the
-# realm bootstrap), and the other instances, which replicate from each other (ADR-044 §3).
+# realm bootstrap), the other instances, which replicate from each other, and CNPG's join pods,
+# which clone the primary to make a new replica (ADR-048 §3).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -21,9 +22,12 @@ spec:
               lakehouse/polaris-pg-client: "true"
         - podSelector:
             {{- include "polaris-network-policies.instances" . | nindent 12 }}
+        - podSelector:
+            matchLabels:
+              cnpg.io/jobRole: join
 ---
 # The CNPG operator reads each instance's status on 8000 and connects on 5432; backups through
-# the plugin start through the status port too (ADR-043, ADR-044 §3).
+# the plugin start through the status port too (ADR-043, ADR-048 §3).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

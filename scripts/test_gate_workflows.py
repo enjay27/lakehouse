@@ -185,6 +185,25 @@ class SmokeFresh(unittest.TestCase):
                          "startsWith(github.ref, 'refs/heads/gate/smoke-fresh/') }}")
 
 
+class RebuildReplica(unittest.TestCase):
+    """Smoke rebuilds a replica right after the install, before check-polaris-pg (ADR-048 §7)."""
+
+    def test_the_step_sits_between_the_install_and_check_polaris_pg(self):
+        steps = read_workflow(os.path.join(WORKFLOWS, "smoke.yml"))["jobs"]["smoke"]["steps"]
+        runs = [s.get("run", "") for s in steps]
+        install = next(i for i, r in enumerate(runs) if "gate.py install" in r)
+        rebuild = next(i for i, r in enumerate(runs) if "gate.py rebuild-replica" in r)
+        check = next(i for i, r in enumerate(runs) if "gate.py check-polaris-pg" in r)
+        self.assertEqual((rebuild, check), (install + 1, install + 2))
+
+    def test_only_smoke_runs_it(self):
+        for name, workflow in workflows().items():
+            if name != "smoke.yml":
+                for job in (workflow.get("jobs") or {}).values():
+                    for step in job.get("steps") or []:
+                        self.assertNotIn("rebuild-replica", step.get("run", ""), name)
+
+
 class DeleteWorkflow(unittest.TestCase):
     def setUp(self):
         self.workflow = read_workflow(os.path.join(WORKFLOWS, DELETE))
