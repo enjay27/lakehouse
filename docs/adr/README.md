@@ -106,6 +106,7 @@ flowchart LR
 | [055](055-main-is-re-tested-after-claudes-merges-and-weekly-and-a-red-run-on-main-opens-an-issue.md) | `main` is re-tested after Claude's merges and weekly, and a red run on `main` opens an issue | Accepted |
 | [056](056-polaris-pg-commits-wait-for-one-of-two-standbys-writes-stop-rather-than-lose-a-confirmed-one.md) | polaris-pg's commits wait for one of its two standbys; writes stop rather than lose a confirmed one | Amended by ADR-057 |
 | [057](057-adr-056s-proof-compares-the-chart-with-itself-before-the-change-synchronous-commits-cost-s1-about-4-s.md) | ADR-056's proof compares the chart with itself before the change; synchronous commits cost S1 about 4 s | Accepted |
+| [058](058-the-primary-and-a-standby-lost-together-are-measured-and-failoverquorum-enters-the-chart-if-it-keeps-a-lagging-standby-from-losing-writes.md) | The primary and a standby lost together are measured, and failoverQuorum enters the chart if it keeps a lagging standby from losing writes | Proposed |
 
 ## Not ADRs
 
