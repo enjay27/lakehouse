@@ -227,7 +227,10 @@ source does not matter for operation. What follows is the list they cover.
   `docs/contracts/`; a release ships no `ServiceMonitor`. The smoke gate's Prometheus
   stand-in loads the contract's scrape file and `check-metrics` requires every pod up and
   the contract's series.
-- Before Datahub (Kade, 2026-10-12): failover (#31) next.
+- Before Datahub (Kade, 2026-10-12): failover (#31). ADR-047 measures it first:
+  `failover.yml` on `gate/failover/<task>` runs the CNPG setups C0 to C2 under S1 to S3 with
+  a pgjdbc probe (`gates/failover/`). C3a, C3b and C4 wait on the target's PG-HA and Pgpool
+  versions (#31); results are committed once C3a reproduces the target. Tuning follows.
 - **Gate:** dry-run and smoke. **Linux:** the release installed on a test cluster.
 
 ### P3: Datahub
