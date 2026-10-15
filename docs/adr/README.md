@@ -104,6 +104,7 @@ flowchart LR
 | [053](053-release-candidates-are-stress-tested-with-k6-on-the-release-gate-and-one-polariss-capacity-is-measured-on-a-linux-test-server.md) | Release candidates are stress-tested with k6 on the release gate, and one Polaris's capacity is measured on a Linux test server | Amended by ADR-054 |
 | [054](054-the-stress-test-runs-only-when-kade-starts-it-not-in-the-release-gate.md) | The stress test runs only when Kade starts it, not in the release gate | Accepted |
 | [055](055-main-is-re-tested-after-claudes-merges-and-weekly-and-a-red-run-on-main-opens-an-issue.md) | `main` is re-tested after Claude's merges and weekly, and a red run on `main` opens an issue | Accepted |
+| [056](056-polaris-pg-commits-wait-for-one-of-two-standbys-writes-stop-rather-than-lose-a-confirmed-one.md) | polaris-pg's commits wait for one of its two standbys; writes stop rather than lose a confirmed one | Proposed |
 
 ## Not ADRs
 
