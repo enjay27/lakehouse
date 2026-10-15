@@ -1,6 +1,7 @@
 """Tests for failover/driver.py's checks on the running cluster (ADR-047 §5).
 Run: python3 -m unittest discover -s gates"""
 
+import json
 import os
 import sys
 import unittest
@@ -50,6 +51,39 @@ class C1Applied(unittest.TestCase):
         with mock.patch.object(driver, "instances", return_value=pods(self.want + 1)), \
                 mock.patch.object(driver, "call", side_effect=AssertionError("no psql")):
             self.assertFalse(driver.c1_applied(ENV))
+
+
+def answers(standbys='ANY 1 ("polaris-pg-2","polaris-pg-3")\n', quorum=None):
+    """call() as the cluster answers: psql's synchronous standbys, the FailoverQuorum."""
+    def call(argv, stdin=None):
+        if "psql" in argv:
+            return 0, standbys
+        if "failoverquorum/polaris-pg" in argv:
+            if quorum is None:
+                return 1, 'Error from server (NotFound): failoverquorums "polaris-pg" not found'
+            return 0, json.dumps({"status": quorum})
+        raise AssertionError(argv)
+    return call
+
+
+class C1qApplied(C1Applied):
+    """C1q is applied once the primary also reports its failover quorum (ADR-056 §4)."""
+
+    def test_c1_needs_no_failover_quorum(self):
+        with mock.patch.object(driver, "call", side_effect=answers()):
+            self.assertTrue(driver.c1_applied(ENV, "C1"))
+
+    def test_not_applied_before_the_primary_reports_its_quorum(self):
+        with mock.patch.object(driver, "call", side_effect=answers()):
+            self.assertFalse(driver.c1_applied(ENV, "C1q"))
+        with mock.patch.object(driver, "call", side_effect=answers(quorum={})):
+            self.assertFalse(driver.c1_applied(ENV, "C1q"))
+
+    def test_applied_once_the_quorum_is_any_one(self):
+        quorum = {"method": "ANY", "standbyNumber": 1, "primary": "polaris-pg-1",
+                  "standbyNames": ["polaris-pg-2", "polaris-pg-3"]}
+        with mock.patch.object(driver, "call", side_effect=answers(quorum=quorum)):
+            self.assertTrue(driver.c1_applied(ENV, "C1q"))
 
 
 if __name__ == "__main__":

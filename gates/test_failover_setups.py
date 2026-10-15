@@ -25,7 +25,9 @@ def query(url):
 class Setups(unittest.TestCase):
     def test_the_cnpg_setups_of_this_pr(self):
         self.assertEqual(setups.SETUPS, ("C0", "C1", "C2"))
+        self.assertEqual(setups.VARIANTS, ("C1q",))
         self.assertEqual(setups.SCENARIOS, ("S1", "S2", "S3"))
+        setups.check("C1q", "S3")
         with self.assertRaises(ValueError):
             setups.check("C3a", "S1")
         with self.assertRaises(ValueError):
@@ -44,6 +46,17 @@ class Setups(unittest.TestCase):
         readiness = spec["probes"]["readiness"]
         self.assertLessEqual(readiness["periodSeconds"] * readiness["failureThreshold"], 5)
         self.assertNotIn("liveness", spec["probes"])  # the isolation check stays as CNPG's
+
+    def test_c1q_is_c1_with_a_failover_quorum(self):
+        # ADR-056 §4: failoverQuorum is measured as a C1 variant before any release has it.
+        c1, c1q = setups.cluster_patch("C1")["spec"], setups.cluster_patch("C1q")["spec"]
+        self.assertIs(c1q["postgresql"]["synchronous"]["failoverQuorum"], True)
+        self.assertNotIn("failoverQuorum", c1["postgresql"]["synchronous"])
+        without = json.loads(json.dumps(c1q))
+        del without["postgresql"]["synchronous"]["failoverQuorum"]
+        self.assertEqual(without, c1)
+        self.assertEqual(setups.jdbc_url("C1q"), setups.jdbc_url("C1"))
+        self.assertIsNone(setups.pooler("C1q", NS))
 
     def test_c2_is_c1_with_a_session_pooler_on_the_control_plane(self):
         self.assertEqual(setups.cluster_patch("C2"), setups.cluster_patch("C1"))
@@ -230,6 +243,13 @@ class Matrix(unittest.TestCase):
             {"name": "C2", "setup": "C2", "grace": "", "scenarios": "S1,S3"}])
         self.assertEqual(setups.matrix("C0", "S1", True), [
             {"name": "C0", "setup": "C0", "grace": "", "scenarios": "S1"}])
+
+    def test_a_variant_runs_only_when_named(self):
+        self.assertNotIn("C1q", [j["setup"] for j in setups.matrix("", "", True)])
+        self.assertEqual(setups.matrix("C1q", "", True), [
+            {"name": "C1q", "setup": "C1q", "grace": "", "scenarios": "S1,S2,S3"}])
+        self.assertEqual([j["name"] for j in setups.matrix("C1q,C1", "S1", False)],
+                         ["C1", "C1q"])
 
     def test_unknown_inputs_are_refused(self):
         with self.assertRaises(ValueError):

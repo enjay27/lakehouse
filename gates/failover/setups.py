@@ -6,6 +6,9 @@ never run here.
   inputs to the measurement, not a decision (ADR-000 rule 11); the results name them.
 - **C2** is C1 with CNPG's PgBouncer `Pooler`, in session mode, so pgjdbc's prepared
   statements work as they do without it.
+- **C1q** is C1 with CNPG's `failoverQuorum`: a standby is promoted only when the standbys
+  CNPG reaches must include one holding every synchronously confirmed commit. A variant,
+  run only when named, measured before any release has it (ADR-056 §4).
 - C3a, C3b and C4 need the target's PG-HA and Pgpool versions (#31) and come in their own PR.
 
 Failures: S1 deletes the primary pod, S2 kills its postmaster, S3 pauses the kind node that
@@ -28,6 +31,8 @@ import network  # noqa: E402
 import release  # noqa: E402
 
 SETUPS = ("C0", "C1", "C2")
+# Variants run only when named, so that "all setups" stays ADR-047 §2's (ADR-056 §4).
+VARIANTS = ("C1q",)
 SCENARIOS = ("S1", "S2", "S3")
 CONTROL_PLANE = f"{gate.CLUSTER}-control-plane"
 HOSTNAME = "kubernetes.io/hostname"
@@ -54,6 +59,9 @@ C1_CLUSTER = {
     "postgresql": {"synchronous": {"method": "any", "number": 1,
                                    "dataDurability": "required"}},
 }
+# C1q: C1, and CNPG promotes only a standby it can show holds every synchronous commit.
+C1Q_CLUSTER = {**C1_CLUSTER, "postgresql": {"synchronous": {
+    **C1_CLUSTER["postgresql"]["synchronous"], "failoverQuorum": True}}}
 # C1, the client's side: pgjdbc gives up on a connect after 2 s, on a login after 3 s and on
 # a read after 5 s, and TCP keepalives are on. Without them a socket to a lost node waits for
 # TCP's own timeout.
@@ -62,8 +70,9 @@ C1_CLIENT = {"connectTimeout": "2", "socketTimeout": "5", "loginTimeout": "3",
 
 
 def check(setup, scenario=None):
-    if setup not in SETUPS:
-        raise ValueError(f"{setup}: not a setup of this harness ({', '.join(SETUPS)})")
+    if setup not in SETUPS + VARIANTS:
+        raise ValueError(f"{setup}: not a setup of this harness "
+                         f"({', '.join(SETUPS + VARIANTS)})")
     if scenario is not None and scenario not in SCENARIOS:
         raise ValueError(f"{scenario}: not a failure ({', '.join(SCENARIOS)})")
 
@@ -77,7 +86,7 @@ def matrix(setups_csv, scenarios_csv, grace_job):
         for scenario in failures:
             check(setup, scenario)
     jobs = [{"name": s, "setup": s, "grace": "", "scenarios": ",".join(failures)}
-            for s in SETUPS if s in chosen]
+            for s in SETUPS + VARIANTS if s in chosen]
     if grace_job and "C1" in chosen and "S3" in failures:
         jobs.append({"name": f"C1-grace{GRACE_S}", "setup": "C1", "grace": str(GRACE_S),
                      "scenarios": "S3"})
@@ -87,7 +96,9 @@ def matrix(setups_csv, scenarios_csv, grace_job):
 def cluster_patch(setup):
     """The merge patch on the `Cluster` polaris-pg, or None for the chart as released."""
     check(setup)
-    return None if setup == "C0" else {"spec": C1_CLUSTER}
+    if setup == "C0":
+        return None
+    return {"spec": C1Q_CLUSTER if setup == "C1q" else C1_CLUSTER}
 
 
 def pooler(setup, namespace):
