@@ -1014,7 +1014,8 @@ POLARIS_VALUES = {
         "polaris.authorization.type": "opa",
         "polaris.authorization.opa.policy-uri": POLARIS_ENV["POLARIS_OPA_URL"],
         "quarkus.datasource.jdbc.url":
-            "jdbc:postgresql://recorder.standins.svc:5432/polaris?sslmode=require"},
+            "jdbc:postgresql://recorder.standins.svc:5432/polaris?sslmode=require",
+        "quarkus.datasource.jdbc.additional-jdbc-properties.socketTimeout": "10"},
 }
 
 
@@ -1024,7 +1025,8 @@ def polaris_properties(**changes):
              "polaris.authorization.opa.policy-uri": POLARIS_ENV["POLARIS_OPA_URL"],
              "quarkus.datasource.jdbc.url":
                  "jdbc:postgresql://recorder.standins.svc:5432/polaris?sslmode=require",
-             "polaris.authentication.token-broker.type": "symmetric-key", **changes}
+             "polaris.authentication.token-broker.type": "symmetric-key",
+             "quarkus.datasource.jdbc.additional-jdbc-properties.socketTimeout": "10", **changes}
     text = "\n".join(f"{k}={v}" for k, v in props.items())
     return {"data": {"application.properties": text}}
 
@@ -1062,6 +1064,7 @@ class Polaris(unittest.TestCase):
         self.assertEqual(problems, [])
         text = "\n".join(notes)
         for part in ("2 replicas ready on 2 nodes (a, b)", POLARIS_IMAGE, "relational-jdbc",
+                     "driver socketTimeout=10",
                      "symmetric-key", "opa", POLARIS_ENV["POLARIS_OPA_URL"],
                      "S3 key from Secret polaris-s3"):
             self.assertIn(part, text)
@@ -1088,7 +1091,9 @@ class Polaris(unittest.TestCase):
                            ("polaris.authorization.type", "internal"),
                            ("polaris.authorization.opa.policy-uri", "http://elsewhere/v1"),
                            ("quarkus.datasource.jdbc.url", "jdbc:postgresql://x:5432/polaris"),
-                           ("polaris.authentication.token-broker.type", "rsa-key-pair")):
+                           ("polaris.authentication.token-broker.type", "rsa-key-pair"),
+                           ("quarkus.datasource.jdbc.additional-jdbc-properties.socketTimeout",
+                            "0")):
             with self.subTest(key=key):
                 problems, _ = self.problems(configmap=polaris_properties(**{key: other}))
                 self.assertIn(key, "\n".join(problems))

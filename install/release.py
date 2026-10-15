@@ -413,6 +413,18 @@ def jdbc_url(env):
     return f"jdbc:postgresql://{host}:5432/{POLARIS_DATABASE}?sslmode=require"
 
 
+# The Quarkus keys whose values Polaris passes to pgjdbc on every connection (ADR-047 §8).
+JDBC_PROPERTIES_PREFIX = "quarkus.datasource.jdbc.additional-jdbc-properties."
+_JDBC_PROPERTY = re.compile(r'^\s+' + re.escape(JDBC_PROPERTIES_PREFIX) + r'(\w+):\s*"([^"]*)"\s*$')
+
+
+def polaris_jdbc_properties(path=POLARIS_VALUES):
+    """pgjdbc's properties from values-lakehouse.yaml's advancedConfig, read line by line
+    without a YAML parser, for the failover harness's probe to connect as Polaris does."""
+    with open(path) as f:
+        return dict(m.groups() for m in map(_JDBC_PROPERTY.match, f) if m)
+
+
 def console_enabled(env):
     return env.get("POLARIS_CONSOLE_ENABLED", "") == "true"
 

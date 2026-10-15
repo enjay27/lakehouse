@@ -171,6 +171,22 @@ class Rendered(unittest.TestCase):
             self.assertIn(key, secret_keys(release.POLARIS_DB_SECRET))
         self.assertNotIn("quarkus.datasource.jdbc.url", env)
 
+    def test_pgjdbc_gives_up_on_a_lost_node_within_seconds(self):
+        # ADR-047 §8: connect 2 s and login 3 s as C1 measured, socket 10 s (Kade, 2026-10-15).
+        prefix = release.JDBC_PROPERTIES_PREFIX
+        self.assertEqual({k[len(prefix):]: v for k, v in self.props.items()
+                          if k.startswith(prefix)},
+                         {"connectTimeout": "2", "loginTimeout": "3", "socketTimeout": "10",
+                          "tcpKeepAlive": "true"})
+
+    def test_release_reads_the_same_driver_properties_as_helm(self):
+        with open(release.POLARIS_VALUES) as f:
+            advanced = yaml.safe_load(f)["advancedConfig"]
+        prefix = release.JDBC_PROPERTIES_PREFIX
+        self.assertEqual(release.polaris_jdbc_properties(),
+                         {k[len(prefix):]: str(v) for k, v in advanced.items()
+                          if k.startswith(prefix)})
+
     def test_the_jdbc_url_names_the_host_from_env_with_tls_required(self):
         self.assertEqual(self.props["quarkus.datasource.jdbc.url"],
                          "jdbc:postgresql://recorder.standins.svc.cluster.local:5432/polaris"

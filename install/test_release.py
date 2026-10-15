@@ -1046,6 +1046,26 @@ class FakePolaris:
         raise AssertionError(f"unexpected call {argv}")
 
 
+class JdbcProperties(unittest.TestCase):
+    """pgjdbc's client timeouts, read from values-lakehouse.yaml without a YAML parser
+    (ADR-047 §8); charts/test_polaris.py checks the reading against PyYAML's."""
+
+    def test_the_timeouts_polaris_passes_to_every_connection(self):
+        self.assertEqual(release.polaris_jdbc_properties(), {
+            "connectTimeout": "2", "loginTimeout": "3", "socketTimeout": "10",
+            "tcpKeepAlive": "true"})
+
+    def test_only_the_driver_properties_of_advanced_config_are_read(self):
+        text = ('advancedConfig:\n'
+                '  quarkus.log.file.enabled: "true"\n'
+                '  # quarkus.datasource.jdbc.additional-jdbc-properties.commented: "1"\n'
+                '  quarkus.datasource.jdbc.additional-jdbc-properties.socketTimeout: "7"\n')
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml") as f:
+            f.write(text)
+            f.flush()
+            self.assertEqual(release.polaris_jdbc_properties(f.name), {"socketTimeout": "7"})
+
+
 class Polaris(unittest.TestCase):
     def step(self, calls, env=BOOTSTRAP_ENV, dry_run=False):
         return release.polaris(env, calls, dry_run=dry_run)
