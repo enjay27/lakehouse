@@ -16,6 +16,10 @@ WORKFLOWS = os.path.join(ROOT, ".github", "workflows")
 DELETE = "delete-gate-branch.yml"
 DELETE_USES = f"./.github/workflows/{DELETE}"
 GUARD = "always() && startsWith(github.ref, 'refs/heads/gate/')"
+MAIN_STATUS = "main-status.yml"
+MAIN_STATUS_USES = f"./.github/workflows/{MAIN_STATUS}"
+MAIN_GUARD = ("always() && github.ref == 'refs/heads/main' && "
+              "(github.event_name == 'schedule' || github.event_name == 'workflow_run')")
 
 
 def _scalar(text):
@@ -151,7 +155,7 @@ class GateWorkflows(unittest.TestCase):
     def test_no_other_gate_job_can_write(self):
         for name, workflow in gate_workflows().items():
             for job_name, job in workflow["jobs"].items():
-                if job.get("uses") == DELETE_USES:
+                if job.get("uses") in (DELETE_USES, MAIN_STATUS_USES):
                     continue
                 with self.subTest(workflow=name, job=job_name):
                     self.assertNotIn("write", (job.get("permissions") or {}).values())
@@ -166,6 +170,72 @@ class GateWorkflows(unittest.TestCase):
                     with self.subTest(workflow=name, job=job_name):
                         self.assertEqual((job.get("permissions") or {}).get("contents"),
                                          "write")
+
+
+class MainStatus(unittest.TestCase):
+    """main is re-tested after Claude's merges and weekly, and a red run on main is an issue
+    (ADR-055)."""
+
+    def setUp(self):
+        self.static = read_workflow(os.path.join(WORKFLOWS, "static.yml"))
+
+    def test_static_also_runs_after_auto_merge_and_weekly(self):
+        on = self.static["on"]
+        self.assertEqual(on["workflow_run"], {"workflows": ["Auto-merge"],
+                                              "types": ["completed"]})
+        self.assertEqual(len(on["schedule"]), 1)
+        self.assertTrue(on["schedule"][0]["cron"].endswith(" * * 1"), "weekly, on Mondays")
+        self.assertEqual(on["push"]["branches"], ["main", "claude/**"])
+
+    def test_static_skips_a_head_of_main_that_already_passed(self):
+        jobs = self.static["jobs"]
+        (check,) = [n for n, j in jobs.items()
+                    if "head_sha=" in "\n".join(s.get("run", "") for s in j.get("steps") or [])]
+        self.assertEqual(jobs[check]["permissions"], {"actions": "read"})
+        self.assertEqual(jobs["static"]["needs"], check)
+        self.assertEqual(jobs["static"]["if"], f"needs.{check}.outputs.skip != 'true'")
+
+    def test_static_and_smoke_report_on_main_last(self):
+        for name in ("static.yml", "smoke.yml"):
+            with self.subTest(workflow=name):
+                jobs = read_workflow(os.path.join(WORKFLOWS, name))["jobs"]
+                calling = [j for j, job in jobs.items() if job.get("uses") == MAIN_STATUS_USES]
+                self.assertEqual(len(calling), 1, "one job calls main-status.yml")
+                job = jobs[calling[0]]
+                self.assertEqual(job.get("if"), MAIN_GUARD)
+                self.assertEqual(job.get("permissions"), {"issues": "write"})
+                others = sorted(j for j, o in jobs.items()
+                                if j != calling[0] and o.get("uses") != DELETE_USES)
+                self.assertEqual(sorted(job.get("needs") or []), others)
+                self.assertIn("result", job.get("with") or {})
+
+    def test_a_workflow_calling_one_that_reports_grants_issues_write(self):
+        reporting = {f"./.github/workflows/{n}" for n, w in workflows().items()
+                     if any(j.get("uses") == MAIN_STATUS_USES
+                            for j in (w.get("jobs") or {}).values())}
+        self.assertLessEqual({"./.github/workflows/smoke.yml"}, reporting)
+        for name, workflow in workflows().items():
+            for job_name, job in (workflow.get("jobs") or {}).items():
+                if job.get("uses") in reporting:
+                    with self.subTest(workflow=name, job=job_name):
+                        self.assertEqual((job.get("permissions") or {}).get("issues"), "write")
+
+    def test_main_status_is_only_called_and_writes_issues_only(self):
+        workflow = read_workflow(os.path.join(WORKFLOWS, MAIN_STATUS))
+        self.assertEqual(list(workflow["on"]), ["workflow_call"])
+        self.assertEqual(workflow["permissions"], {})
+        (job,) = workflow["jobs"].values()
+        self.assertEqual(job["permissions"], {"issues": "write"})
+        self.assertFalse(any("actions/checkout" in str(s.get("uses", "")) for s in job["steps"]))
+
+    def test_main_status_opens_comments_on_and_closes_one_issue(self):
+        (job,) = read_workflow(os.path.join(WORKFLOWS, MAIN_STATUS))["jobs"].values()
+        script = "\n".join(s.get("run", "") for s in job["steps"])
+        self.assertIn('title="main is red: $WORKFLOW"', script)
+        for command in ("gh issue create", "gh issue comment", "gh issue close"):
+            self.assertIn(command, script)
+        self.assertIn("failure)", script)
+        self.assertIn("success)", script)
 
 
 class SmokeFresh(unittest.TestCase):

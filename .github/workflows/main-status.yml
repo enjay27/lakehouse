@@ -1,0 +1,59 @@
+# Records a run on main as an issue (ADR-055 §2): a failure opens "main is red: <workflow>", or
+# comments on it while it is open; a success closes it. Anything else (cancelled, skipped)
+# records nothing. static.yml and smoke.yml call it as their last job, only for their runs on
+# main from a schedule or a workflow_run; a push to main is Kade's own merge, which he watches.
+# In a called workflow, github.workflow, github.sha and github.run_id are the caller's.
+name: Main status
+
+on:
+  workflow_call:
+    inputs:
+      result:
+        description: The caller's result to record (success, failure, cancelled, skipped).
+        type: string
+        required: true
+
+permissions: {}
+
+jobs:
+  status:
+    name: main status
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Open, comment on or close the issue for this workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          WORKFLOW: ${{ github.workflow }}
+          RESULT: ${{ inputs.result }}
+          SHA: ${{ github.sha }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="main is red: $WORKFLOW"
+          number=$(gh issue list --repo "$REPO" --state open --search "in:title $title" \
+            --json number,title | jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty')
+          case "$RESULT" in
+            failure)
+              body="$WORKFLOW failed on main at $SHA: $RUN (ADR-055)."
+              if [ -n "$number" ]; then
+                gh issue comment "$number" --repo "$REPO" --body "$body"
+              else
+                gh issue create --repo "$REPO" --title "$title" --body "$body"
+              fi
+              ;;
+            success)
+              if [ -n "$number" ]; then
+                gh issue close "$number" --repo "$REPO" --reason completed \
+                  --comment "$WORKFLOW passed on main at $SHA: $RUN."
+              else
+                echo "$WORKFLOW passed on main; no open issue to close."
+              fi
+              ;;
+            *)
+              echo "$WORKFLOW ended $RESULT on main: nothing to record."
+              ;;
+          esac

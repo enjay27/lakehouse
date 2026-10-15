@@ -34,7 +34,7 @@ storage, observability, SSO and the catalog gateway are other teams' services, r
 | `charts/`, `images/` | Local charts: `polaris-postgres` with its backups (ADR-010, ADR-043); `polaris-network-policies`, ingress to Polaris's namespace (ADR-048, ADR-046); `polaris`, upstream's 1.6.0, and `polaris-console`, polaris-tools at a pinned commit, each unchanged with our `values-lakehouse.yaml` (ADR-009, ADR-028); `images/polaris-console` builds the console on the gate from that commit with our lockfile; `polaris-log-batch` and `images/polaris-log-batch`, the log batch's CronJob and image, its contract in `docs/contracts/` (ADR-036); tests render each chart, check its values schema, run kubeconform on CNPG's CRD and the pinned NetworkPolicy schema (ADR-016) |
 | `install/` | `release.py` installs a release in ADR-045's order (step 0 the CNPG and plugin preconditions; step 1 Polaris's network policies, its PostgreSQL, the S3 and policy endpoints answering, the realm bootstrap, Polaris; step 2 the log batch, whose failure stops the install (ADR-037), then the console when enabled, never blocking); `release_tag.py` names tags, reads the release gate, writes notes (ADR-033) |
 | `scripts/init_env.py` | init-env: `.env` with credentials per clone; `--apply-secrets` (ADR-006) |
-| `.github/workflows/` | `static.yml`, `gate-check.yml` (ADR-039), `dry-run.yml`, `smoke.yml` (ADR-050), `log-batch.yml`, `create-fixtures.yml` (ADR-040), `failover.yml` (ADR-047), `auto-merge.yml` (ADR-022), `branch-cleanup.yml` (ADR-032), `delete-gate-branch.yml` (ADR-049), `release-gate.yml`, `release.yml` (ADR-033, ADR-042), `labels.yml` |
+| `.github/workflows/` | `static.yml`, `gate-check.yml` (ADR-039), `dry-run.yml`, `smoke.yml` (ADR-050), `log-batch.yml`, `create-fixtures.yml` (ADR-040), `failover.yml` (ADR-047), `auto-merge.yml` (ADR-022), `branch-cleanup.yml` (ADR-032), `delete-gate-branch.yml` (ADR-049), `main-status.yml` (ADR-055), `release-gate.yml`, `release.yml` (ADR-033, ADR-042), `labels.yml` |
 | `.github/labels.json` | The state labels, synced by `labels.yml` (ADR-003) |
 | `.env.template` | Every per-environment variable, credentials empty (ADR-002) |
 
@@ -48,7 +48,7 @@ storage, observability, SSO and the catalog gateway are other teams' services, r
 | `CLAUDE.md`, `.claude/` | `python3 scripts/claude_md_check.py` |
 | `init_env.py --apply-secrets` | Needs a Linux test cluster: label the issue `cmd:verify-needs-linux` |
 
-CI runs these as the **static** gate on every push to `claude/**` and every PR (ADR-050). **gate-check**
+CI runs these as the **static** gate on every push to `claude/**` and every PR (ADR-050), and on `main` after Claude's merges and weekly; a red run of static or smoke there opens `main is red` (ADR-055). **gate-check**
 (ADR-039, every PR into `main`): `charts/`, `images/`, `install/`, `gates/` or the gate workflows need
 passing dry-run and smoke runs on the head; batch or fixture spec files, a log-batch (ADR-040 §5).
 `install/`, `scripts/init_env.py` or a file added to or removed from `charts/` also need smoke-fresh,

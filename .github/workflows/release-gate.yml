@@ -10,6 +10,8 @@
 # auto-merge acts only on claude/* heads into main (ADR-022).
 # A called workflow's jobs get at most what the calling job grants. The gates' own jobs ask for
 # contents: read; only their delete job asks for write, and it skips a PR's ref (ADR-049).
+# smoke.yml's main-status job asks for issues: write and skips any ref but main (ADR-055), but
+# GitHub refuses to start a called workflow whose jobs ask for more than the caller grants.
 name: Release gate
 
 on:
@@ -53,6 +55,7 @@ jobs:
       fresh: false
     permissions:
       contents: write
+      issues: write
 
   smoke-fresh:
     name: smoke fresh
@@ -62,3 +65,4 @@ jobs:
       fresh: true
     permissions:
       contents: write
+      issues: write
