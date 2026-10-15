@@ -77,8 +77,8 @@
                   the join pods' logs (ADR-048 §7). Gate only: it deletes a volume.
   check-polaris-pg
                   compares the running `Cluster` polaris-pg with the values its helm release
-                  was installed with, and checks its instances run on different nodes
-                  (ADR-016).
+                  was installed with, its shutdown timeout and synchronous replication among
+                  them (ADR-056), and checks its instances run on different nodes (ADR-016).
   check-polaris   compares the running Polaris (its Deployment, pods and ConfigMap) with the
                   values its helm release was installed with and with `.env`, checks its
                   replicas run on different nodes (ADR-016), then runs gates/check_polaris.sh
@@ -797,7 +797,11 @@ def polaris_pg_problems(values, cluster, pods):
             ("instances", spec["instances"], values["instances"]),
             ("image", spec["imageName"], values["image"]),
             ("podAntiAffinityType", spec["affinity"]["podAntiAffinityType"],
-             values["podAntiAffinityType"])):
+             values["podAntiAffinityType"]),
+            ("smartShutdownTimeout", spec.get("smartShutdownTimeout"),
+             values["smartShutdownTimeout"]),
+            ("synchronous", polaris_pg_sync(spec.get("postgresql", {}).get("synchronous")),
+             polaris_pg_sync(values["synchronous"], values["instances"]))):
         if running != wanted:
             problems.append(f"{field}: {running} running, {wanted} in the values")
     ready = cluster.get("status", {}).get("readyInstances", 0)
@@ -808,9 +812,20 @@ def polaris_pg_problems(values, cluster, pods):
         problems.append(f"{len(pods['items'])} instances on {len(nodes)} nodes: "
                         + ", ".join(str(n) for n in nodes))
     anti = spec["affinity"]["podAntiAffinityType"]
+    sync = polaris_pg_sync(spec.get("postgresql", {}).get("synchronous"))
+    replication = "synchronous " + " ".join(str(v) for v in sync) if sync else "asynchronous"
     return problems, [f"Cluster {release.POLARIS_PG}: {ready} instances ready on "
                       f"{len(nodes)} nodes ({', '.join(str(n) for n in nodes)}), image "
-                      f"{spec['imageName']}, anti-affinity {anti}."]
+                      f"{spec['imageName']}, anti-affinity {anti}, replication {replication}."]
+
+
+def polaris_pg_sync(block, instances=None):
+    """(method, number, durability) of a `synchronous` block, or None for asynchronous. From the
+    values (`instances` given), what the chart renders: only with 3 or more (ADR-056 §3)."""
+    if block is None or (instances is not None and instances < 3):
+        return None
+    method = "any" if instances is not None else block.get("method")
+    return (method, block.get("number"), block.get("dataDurability"))
 
 
 def polaris_commands(namespace):

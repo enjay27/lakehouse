@@ -806,13 +806,19 @@ class GateEnv(unittest.TestCase):
 
 
 IMAGE = "ghcr.io/cloudnative-pg/postgresql:16.15-1-minimal-trixie@sha256:" + "a" * 64
-VALUES = {"instances": 3, "image": IMAGE, "podAntiAffinityType": "required"}
+SYNC = {"number": 1, "dataDurability": "required"}
+VALUES = {"instances": 3, "image": IMAGE, "podAntiAffinityType": "required",
+          "smartShutdownTimeout": 0, "synchronous": SYNC}
+# What CNPG keeps of the chart's block, with a field it fills in itself.
+RUNNING_SYNC = {"method": "any", **SYNC, "maxStandbyNamesFromCluster": 2}
 
 
-def cluster(instances=3, image=IMAGE, ready=3, anti="required"):
-    return {"spec": {"instances": instances, "imageName": image,
-                     "affinity": {"podAntiAffinityType": anti}},
-            "status": {"readyInstances": ready}}
+def cluster(instances=3, image=IMAGE, ready=3, anti="required", shutdown=0, sync=RUNNING_SYNC):
+    spec = {"instances": instances, "imageName": image, "smartShutdownTimeout": shutdown,
+            "affinity": {"podAntiAffinityType": anti}}
+    if sync is not None:
+        spec["postgresql"] = {"synchronous": sync}
+    return {"spec": spec, "status": {"readyInstances": ready}}
 
 
 def pods(*nodes):
@@ -827,6 +833,7 @@ class PolarisPg(unittest.TestCase):
         problems, notes = gate.polaris_pg_problems(VALUES, cluster(), pods("a", "b", "c"))
         self.assertEqual(problems, [])
         self.assertIn("3 nodes", "\n".join(notes))
+        self.assertIn("synchronous any 1 required", "\n".join(notes))
 
     def test_a_different_instance_count_is_found(self):
         problems, _ = gate.polaris_pg_problems(VALUES, cluster(instances=1, ready=1), pods("a"))
@@ -845,6 +852,30 @@ class PolarisPg(unittest.TestCase):
         problems, _ = gate.polaris_pg_problems(VALUES, cluster(anti="preferred"),
                                                pods("a", "b", "c"))
         self.assertIn("podAntiAffinityType", "\n".join(problems))
+
+    def test_a_different_shutdown_timeout_is_found(self):
+        problems, _ = gate.polaris_pg_problems(VALUES, cluster(shutdown=180), pods("a", "b", "c"))
+        self.assertIn("smartShutdownTimeout", "\n".join(problems))
+
+    def test_asynchronous_replication_with_three_instances_is_found(self):
+        # ADR-056 §1.
+        problems, _ = gate.polaris_pg_problems(VALUES, cluster(sync=None), pods("a", "b", "c"))
+        self.assertIn("synchronous", "\n".join(problems))
+
+    def test_a_different_durability_is_found(self):
+        running = {**RUNNING_SYNC, "dataDurability": "preferred"}
+        problems, _ = gate.polaris_pg_problems(VALUES, cluster(sync=running), pods("a", "b", "c"))
+        self.assertIn("synchronous", "\n".join(problems))
+
+    def test_one_instance_runs_asynchronously(self):
+        # ADR-056 §3.
+        values = {**VALUES, "instances": 1}
+        problems, notes = gate.polaris_pg_problems(values, cluster(instances=1, ready=1, sync=None),
+                                                   pods("a"))
+        self.assertEqual(problems, [])
+        self.assertIn("asynchronous", "\n".join(notes))
+        problems, _ = gate.polaris_pg_problems(values, cluster(instances=1, ready=1), pods("a"))
+        self.assertIn("synchronous", "\n".join(problems))
 
     def test_two_instances_on_one_node_are_found(self):
         problems, _ = gate.polaris_pg_problems(VALUES, cluster(), pods("a", "a", "c"))

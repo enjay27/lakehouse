@@ -139,6 +139,24 @@ class Rendered(unittest.TestCase):
         spec = by_kind(render("smartShutdownTimeout=5"))["Cluster"]["spec"]
         self.assertEqual(spec["smartShutdownTimeout"], 5)
 
+    def test_commits_wait_for_any_one_standby_and_block_without_one(self):
+        # ADR-056 §1, §2: CNPG's default is asynchronous replication.
+        self.assertNotIn("postgresql", CNPG_DEFAULTS)
+        self.assertEqual(self.spec["postgresql"]["synchronous"],
+                         {"method": "any", "number": 1, "dataDurability": "required"})
+
+    def test_fewer_than_three_instances_stay_asynchronous(self):
+        # ADR-056 §3: one standby restarting would stop every write.
+        for n in (1, 2):
+            spec = by_kind(render(f"instances={n}"))["Cluster"]["spec"]
+            self.assertNotIn("postgresql", spec, f"instances={n}")
+
+    def test_the_synchronous_values_are_values(self):
+        spec = by_kind(render("synchronous.number=2",
+                              "synchronous.dataDurability=preferred"))["Cluster"]["spec"]
+        self.assertEqual(spec["postgresql"]["synchronous"],
+                         {"method": "any", "number": 2, "dataDurability": "preferred"})
+
     def test_the_instance_count_is_a_value(self):
         self.assertEqual(by_kind(render("instances=1"))["Cluster"]["spec"]["instances"], 1)
 
@@ -207,6 +225,12 @@ class ValuesSchema(unittest.TestCase):
     def test_a_negative_or_textual_shutdown_timeout_is_refused(self):
         self.assertRefused("smartShutdownTimeout=-1")
         self.assertRefused("smartShutdownTimeout=soon")
+
+    def test_a_synchronous_count_below_one_is_refused(self):
+        self.assertRefused("synchronous.number=0")
+
+    def test_an_unknown_data_durability_is_refused(self):
+        self.assertRefused("synchronous.dataDurability=sometimes")
 
     def test_an_image_without_a_digest_is_refused(self):
         self.assertRefused("image=ghcr.io/cloudnative-pg/postgresql:16")
