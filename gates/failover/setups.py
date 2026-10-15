@@ -1,7 +1,7 @@
 """What each failover setup and failure is (ADR-047 §2, §3, §5). Pure: commands and objects,
 never run here.
 
-- **C0** is `charts/polaris-postgres` as a release installs it, with CNPG's defaults.
+- **C0** is `charts/polaris-postgres` as a release installs it, its tuning values included.
 - **C1** is C0 tuned: the `Cluster` patch below and pgjdbc's client timeouts. Its values are
   inputs to the measurement, not a decision (ADR-000 rule 11); the results name them.
 - **C2** is C1 with CNPG's PgBouncer `Pooler`, in session mode, so pgjdbc's prepared
