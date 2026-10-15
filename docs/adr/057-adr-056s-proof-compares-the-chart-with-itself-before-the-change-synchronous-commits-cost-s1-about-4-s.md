@@ -1,6 +1,6 @@
 # ADR-057: ADR-056's proof compares the chart with itself before the change; synchronous commits cost S1 about 4 s
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-15
 - **Related:** ADR-047, ADR-056
 
