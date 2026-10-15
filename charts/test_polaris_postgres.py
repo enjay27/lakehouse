@@ -31,7 +31,7 @@ import release  # noqa: E402
 CHART = os.path.join(HERE, "polaris-postgres")
 NAMESPACE = "catalog-polaris"
 # CNPG's own defaults for the fields this chart sets (CNPG 1.30 API reference).
-CNPG_DEFAULTS = {"instances": 1, "podAntiAffinityType": "preferred"}
+CNPG_DEFAULTS = {"instances": 1, "podAntiAffinityType": "preferred", "smartShutdownTimeout": 180}
 # What install/release.py passes from .env (ADR-043 §2), as helm lint reads it in static.yml;
 # the chart has no default for them.
 LINT_VALUES = os.path.join(CHART, "ci", "lint-values.yaml")
@@ -131,6 +131,14 @@ class Rendered(unittest.TestCase):
         spec = by_kind(render("storage.storageClass=fast"))["Cluster"]["spec"]
         self.assertEqual(spec["storage"], {"size": "10Gi", "storageClass": "fast"})
 
+    def test_a_deleted_primary_shuts_down_fast_instead_of_waiting_180_s(self):
+        # ADR-047 §8: C0's S1 outage was ~185 s, CNPG's 180 s smart shutdown plus promotion.
+        self.assertEqual(self.spec["smartShutdownTimeout"], 0)
+        self.assertNotEqual(self.spec["smartShutdownTimeout"],
+                            CNPG_DEFAULTS["smartShutdownTimeout"])
+        spec = by_kind(render("smartShutdownTimeout=5"))["Cluster"]["spec"]
+        self.assertEqual(spec["smartShutdownTimeout"], 5)
+
     def test_the_instance_count_is_a_value(self):
         self.assertEqual(by_kind(render("instances=1"))["Cluster"]["spec"]["instances"], 1)
 
@@ -195,6 +203,10 @@ class ValuesSchema(unittest.TestCase):
 
     def test_an_unknown_anti_affinity_type_is_refused(self):
         self.assertRefused("podAntiAffinityType=sometimes")
+
+    def test_a_negative_or_textual_shutdown_timeout_is_refused(self):
+        self.assertRefused("smartShutdownTimeout=-1")
+        self.assertRefused("smartShutdownTimeout=soon")
 
     def test_an_image_without_a_digest_is_refused(self):
         self.assertRefused("image=ghcr.io/cloudnative-pg/postgresql:16")

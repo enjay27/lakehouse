@@ -15,6 +15,7 @@ spec:
     enablePodAntiAffinity: true
     podAntiAffinityType: {{ .Values.podAntiAffinityType }}
     topologyKey: kubernetes.io/hostname
+  smartShutdownTimeout: {{ .Values.smartShutdownTimeout }}
   bootstrap:
     initdb:
       database: {{ .Values.database }}
