@@ -226,9 +226,19 @@ jobs:
           kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_POLARIS" logs -l app.kubernetes.io/name=polaris-log-batch --tail=40 --prefix || true
           kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_POLARIS" logs -l app.kubernetes.io/name=fluent-bit-standin --tail=40 --prefix || true
 
+  main-status:
+    # The nightly run on main opens or closes "main is red: Smoke" (ADR-055 §2).
+    needs: [smoke]
+    if: always() && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_run')
+    permissions:
+      issues: write
+    uses: ./.github/workflows/main-status.yml
+    with:
+      result: ${{ needs.smoke.result }}
+
   delete-gate-branch:
     # The run's gate branch goes when the run ends, pass, fail or cancelled (ADR-049).
-    needs: [smoke]
+    needs: [smoke, main-status]
     if: always() && startsWith(github.ref, 'refs/heads/gate/')
     permissions:
       contents: write

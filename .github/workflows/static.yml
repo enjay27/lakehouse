@@ -5,7 +5,10 @@
 # use (ADR-016, ADR-010), with helm and kubeconform from gates/pins.json and PyYAML pinned by
 # hash; the ADR check (ADR-000), the repository check (ADR-002, ADR-006), the CLAUDE.md limits
 # and whitespace errors over the whole tree. Runs on every push to claude/** and main, and on
-# every PR.
+# every PR. On main it also runs after each successful Auto-merge run, whose merges start no
+# push run, skipping a head that already passed, and weekly (ADR-055 §1). That run is the third
+# workflow_run level, so nothing may chain after it. A failed or passing run on main from either
+# trigger opens or closes "main is red: Static" (main-status.yml, ADR-055 §2).
 # auto-merge.yml lists this workflow by its name, "Static" (ADR-022).
 name: Static
 
@@ -13,6 +16,11 @@ on:
   push:
     branches: [main, "claude/**"]
   pull_request:
+  workflow_run:
+    workflows: ["Auto-merge"]
+    types: [completed]
+  schedule:
+    - cron: "23 4 * * 1"
 
 permissions: {}
 
@@ -21,8 +29,43 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  already-passed:
+    name: main's head already passed
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read  # this workflow's runs on main's head commit
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+    steps:
+      - name: After Auto-merge, stop if main's head already has a passing Static run
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          skip=false
+          if [ "$EVENT" = workflow_run ]; then
+            if [ "$CONCLUSION" != success ]; then
+              skip=true
+            else
+              passed=$(gh api "repos/$REPO/actions/workflows/static.yml/runs?head_sha=$SHA&status=success&per_page=1" --jq .total_count)
+              if [ "$passed" -gt 0 ]; then
+                skip=true
+              fi
+            fi
+          fi
+          echo "skip=$skip" >> "$GITHUB_OUTPUT"
+          echo "$EVENT on $SHA: skip=$skip"
+
   static:
     name: static
+    needs: already-passed
+    if: needs.already-passed.outputs.skip != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -67,3 +110,13 @@ jobs:
         run: python3 scripts/claude_md_check.py
       - name: Whitespace errors
         run: git diff --check "$(git hash-object -t tree /dev/null)" HEAD
+
+  main-status:
+    # A run on main from a schedule or Auto-merge opens or closes "main is red" (ADR-055 §2).
+    needs: [already-passed, static]
+    if: always() && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_run')
+    permissions:
+      issues: write
+    uses: ./.github/workflows/main-status.yml
+    with:
+      result: ${{ needs.static.result }}
