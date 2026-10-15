@@ -233,7 +233,8 @@ source does not matter for operation. What follows is the list they cover.
   versions (#31); results are committed once C3a reproduces the target. Tuning follows
   (ADR-047 §8): first `smartShutdownTimeout: 0` in `charts/polaris-postgres`, for C0's
   ~185 s outage when the primary pod is deleted; then synchronous replication (ADR-056), for
-  the confirmed writes C0 lost on a node loss.
+  the confirmed writes C0 lost on a node loss; then pgjdbc's connect, login and socket
+  timeouts in Polaris's values (#165), so a pooled connection no longer waits out a node loss.
 - **Gate:** dry-run and smoke. **Linux:** the release installed on a test cluster.
 
 ### P3: Datahub
