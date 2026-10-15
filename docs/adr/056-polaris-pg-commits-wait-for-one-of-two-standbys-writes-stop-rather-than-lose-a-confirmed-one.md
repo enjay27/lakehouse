@@ -1,6 +1,6 @@
 # ADR-056: polaris-pg's commits wait for one of its two standbys; writes stop rather than lose a confirmed one
 
-- **Status:** Accepted
+- **Status:** Amended by ADR-057
 - **Date:** 2026-10-15
 - **Related:** ADR-008, ADR-010, ADR-047, ADR-054
 
