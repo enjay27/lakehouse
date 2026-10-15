@@ -115,8 +115,11 @@ def pooler(setup, namespace):
 
 
 def _polaris_params():
-    """The query of Polaris's own JDBC URL (install/release.py)."""
-    return release.jdbc_url({}).split("?", 1)[1]
+    """What Polaris connects with: its JDBC URL's query (install/release.py) and the driver
+    properties its values pass to every connection, in order."""
+    query = release.jdbc_url({}).split("?", 1)[1]
+    params = dict(p.split("=", 1) for p in query.split("&"))
+    return {**params, **release.polaris_jdbc_properties()}
 
 
 def jdbc_url(setup):
@@ -124,8 +127,9 @@ def jdbc_url(setup):
     host = POOLER if setup == "C2" else release.POLARIS_PG_SERVICE
     params = _polaris_params()
     if setup != "C0":
-        params += "".join(f"&{k}={v}" for k, v in C1_CLIENT.items())
-    return f"jdbc:postgresql://{host}:5432/{PROBE_DATABASE}?{params}"
+        params.update(C1_CLIENT)
+    query = "&".join(f"{k}={v}" for k, v in params.items())
+    return f"jdbc:postgresql://{host}:5432/{PROBE_DATABASE}?{query}"
 
 
 def settings(setup, grace_s=None):

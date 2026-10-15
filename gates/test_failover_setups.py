@@ -74,15 +74,16 @@ class Setups(unittest.TestCase):
                          {"kubernetes.io/hostname": setups.CONTROL_PLANE})
 
     def test_c0_connects_as_polaris_does_and_c1_adds_client_timeouts(self):
-        polaris = query(release.jdbc_url({}))
+        # Polaris's URL and the driver properties its values pass to every connection.
+        polaris = {**query(release.jdbc_url({})), **release.polaris_jdbc_properties()}
+        self.assertEqual(polaris["socketTimeout"], "10")
         c0 = setups.jdbc_url("C0")
         self.assertTrue(c0.startswith("jdbc:postgresql://polaris-pg-rw:5432/failover_probe?"))
         self.assertEqual(query(c0), polaris)
+        self.assertEqual(c0.count("socketTimeout="), 1)
         c1 = query(setups.jdbc_url("C1"))
-        self.assertEqual({k: c1[k] for k in polaris}, polaris)
-        for timeout in ("connectTimeout", "socketTimeout", "loginTimeout"):
-            self.assertGreater(int(c1[timeout]), 0)
-        self.assertEqual(c1["tcpKeepAlive"], "true")
+        self.assertEqual(c1, {**polaris, **setups.C1_CLIENT})
+        self.assertEqual(c1["socketTimeout"], "5")
         self.assertTrue(setups.jdbc_url("C2").startswith(
             "jdbc:postgresql://polaris-pg-pooler-rw:5432/failover_probe?"))
         self.assertEqual(query(setups.jdbc_url("C2")), c1)

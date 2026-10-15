@@ -952,19 +952,24 @@ def polaris_problems(values, deployment, pods, configmap, env):
             ("polaris.authorization.type", advanced["polaris.authorization.type"]),
             ("polaris.authorization.opa.policy-uri",
              advanced["polaris.authorization.opa.policy-uri"]),
-            ("quarkus.datasource.jdbc.url", advanced["quarkus.datasource.jdbc.url"])):
+            ("quarkus.datasource.jdbc.url", advanced["quarkus.datasource.jdbc.url"]),
+            *((k, v) for k, v in advanced.items()
+              if k.startswith(release.JDBC_PROPERTIES_PREFIX))):
         if props.get(key) != want:
             problems.append(f"{key}: {props.get(key)} running, {want} in the values")
     for key, want in (("quarkus.datasource.jdbc.url", release.jdbc_url(env)),
                       ("polaris.authorization.opa.policy-uri", env["POLARIS_OPA_URL"])):
         if advanced[key] != want:
             problems.append(f"{key}: {advanced[key]} in the values, {want} from .env")
+    prefix = release.JDBC_PROPERTIES_PREFIX
+    driver = " ".join(f"{k[len(prefix):]}={v}" for k, v in sorted(props.items())
+                      if k.startswith(prefix))
     return problems, [
         f"Deployment {release.POLARIS}: {ready} replicas ready on {len(nodes)} nodes "
         f"({', '.join(str(n) for n in nodes)}), image {image}.",
         f"Polaris settings: S3 key from Secret polaris-s3, persistence "
         f"{props.get('polaris.persistence.type')}, database "
-        f"{props.get('quarkus.datasource.jdbc.url')}, tokens "
+        f"{props.get('quarkus.datasource.jdbc.url')} with driver {driver or 'defaults'}, tokens "
         f"{props.get('polaris.authentication.token-broker.type')}, authorization "
         f"{props.get('polaris.authorization.type')} at "
         f"{props.get('polaris.authorization.opa.policy-uri')}."]

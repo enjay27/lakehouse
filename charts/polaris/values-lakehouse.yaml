@@ -108,6 +108,16 @@ authentication:
 # Key names: docs/contracts/polaris-opa-input.md.
 advancedConfig:
   polaris.authorization.type: opa
+  # pgjdbc's client timeouts in seconds, passed to every new connection (ADR-047 §8). Without
+  # them a connection to a lost node waits for TCP's own timeout: failover.yml's C0 kept its
+  # pooled connection down for the whole 120 s node pause (#31). Connect 2 s and login 3 s as
+  # C1 measured; socket 10 s where C1 had 5 s, because a query or commit running longer fails,
+  # and synchronous commits wait on a standby under load (Kade, 2026-10-15). Tuning values
+  # (ADR-000 rule 11); install/release.py reads these lines for the failover harness.
+  quarkus.datasource.jdbc.additional-jdbc-properties.connectTimeout: "2"
+  quarkus.datasource.jdbc.additional-jdbc-properties.loginTimeout: "3"
+  quarkus.datasource.jdbc.additional-jdbc-properties.socketTimeout: "10"
+  quarkus.datasource.jdbc.additional-jdbc-properties.tcpKeepAlive: "true"
   # The file appender (ADR-036); the batch reads these names (images/polaris-log-batch).
   quarkus.log.file.enabled: "true"
   quarkus.log.file.path: "/deployments/logs/polaris-${HOSTNAME}.log"
