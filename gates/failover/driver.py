@@ -138,17 +138,33 @@ def instances(env):
                                    "cnpg.io/podRole=instance", "-o", "json")))
 
 
-def c1_applied(env):
+def c1_applied(env, setup="C1"):
     """C1's settings on the running objects (ADR-016): every instance's readiness probe, and
-    the primary's synchronous standbys. The patch restarts the instances, so a primary that
-    does not answer yet is not applied yet."""
+    the primary's synchronous standbys; for C1q also the failover quorum the primary reports.
+    The patch restarts the instances, so a primary that does not answer yet is not applied
+    yet."""
     want = setups.C1_CLUSTER["probes"]["readiness"]["periodSeconds"]
     for pod in instances(env)["items"]:
         probe = next(c for c in pod["spec"]["containers"] if c["name"] == "postgres")
         if probe.get("readinessProbe", {}).get("periodSeconds") != want:
             return False
     code, out = call(psql_command(env, "SHOW synchronous_standby_names"))
-    return code == 0 and out.strip().startswith("ANY 1 ")
+    if code != 0 or not out.strip().startswith("ANY 1 "):
+        return False
+    sync = setups.cluster_patch(setup)["spec"]["postgresql"]["synchronous"]
+    return not sync.get("failoverQuorum") or quorum_applied(env, sync["number"])
+
+
+def quorum_applied(env, number):
+    """CNPG's FailoverQuorum for polaris-pg, which the primary's instance manager updates:
+    quorum-based (`any`) over `number` standbys."""
+    code, out = call(kubectl(env["NS_CATALOG_POLARIS"], "get",
+                             f"failoverquorum/{release.POLARIS_PG}", "-o", "json"))
+    if code != 0:
+        return False
+    status = json.loads(out).get("status", {})
+    return (str(status.get("method", "")).lower() == "any"
+            and status.get("standbyNumber") == number)
 
 
 def settle(env):
@@ -177,7 +193,7 @@ def install(setup):
         must(kubectl(ns, "patch", f"cluster/{release.POLARIS_PG}", "--type", "merge", "-p",
                      json.dumps(patch)))
         end = time.monotonic() + release.SETTLE_TIMEOUT
-        while not c1_applied(env):
+        while not c1_applied(env, setup):
             if time.monotonic() > end:
                 sys.exit(f"{setup}'s settings did not reach the running instances")
             time.sleep(CHECK_S)
@@ -372,9 +388,9 @@ def main(argv):
     p = sub.add_parser("up")
     p.add_argument("--grace", type=int)
     p = sub.add_parser("install")
-    p.add_argument("setup", choices=setups.SETUPS)
+    p.add_argument("setup", choices=setups.SETUPS + setups.VARIANTS)
     p = sub.add_parser("run")
-    p.add_argument("setup", choices=setups.SETUPS)
+    p.add_argument("setup", choices=setups.SETUPS + setups.VARIANTS)
     p.add_argument("--out", required=True)
     p.add_argument("--scenarios", default=",".join(setups.SCENARIOS))
     p.add_argument("--runs", type=int, default=5)
