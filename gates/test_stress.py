@@ -299,6 +299,64 @@ class Correctness(unittest.TestCase):
                          ["polaris-0 is gone, polaris-1 is new: a pod was replaced"])
 
 
+SINCE = "2026-10-16T12:00:00Z"
+
+
+def event(pod, message, last, count=1, reason="Unhealthy"):
+    return {"involvedObject": {"kind": "Pod", "name": pod}, "reason": reason,
+            "message": message, "count": count, "lastTimestamp": last}
+
+
+class PolarisPg(unittest.TestCase):
+    """What polaris-pg did under load: its primary and its readiness probe's failures, reported
+    and not judged (ADR-054 §2): a failover under load restarts no container."""
+
+    def test_the_seed_records_the_primary_and_when(self):
+        cluster = {"status": {"currentPrimary": "polaris-pg-1"}}
+        self.assertEqual(driver.pg_before(cluster, SINCE),
+                         {"primary": "polaris-pg-1", "since": SINCE})
+
+    def test_readiness_failures_of_instances_since_the_seed_are_counted(self):
+        events = {"items": [
+            event("polaris-pg-1", "Readiness probe failed: HTTP probe failed",
+                  "2026-10-16T12:05:00Z", 3),
+            event("polaris-pg-2", "Readiness probe failed: timeout", "2026-10-16T12:30:00Z"),
+            event("polaris-pg-2", "Readiness probe failed: timeout", "2026-10-16T11:59:59Z", 7),
+            event("polaris-pg-3", "Liveness probe failed: timeout", "2026-10-16T12:05:00Z"),
+            event("polaris-pg-1-initdb-x", "Readiness probe failed", "2026-10-16T12:05:00Z"),
+            event("polaris-7d9f-abcde", "Readiness probe failed", "2026-10-16T12:05:00Z"),
+            event("polaris-pg-3", "Started container postgres", "2026-10-16T12:05:00Z",
+                  reason="Started")]}
+        watch = driver.pg_watch({"primary": "polaris-pg-1", "since": SINCE},
+                                {"status": {"currentPrimary": "polaris-pg-1"}}, events)
+        self.assertEqual(watch, {"primary_before": "polaris-pg-1",
+                                 "primary_after": "polaris-pg-1",
+                                 "readiness_failures": {"polaris-pg-1": 3, "polaris-pg-2": 1}})
+
+    def test_a_new_primary_is_reported(self):
+        watch = driver.pg_watch({"primary": "polaris-pg-1", "since": SINCE},
+                                {"status": {"currentPrimary": "polaris-pg-2"}}, {"items": []})
+        self.assertEqual(driver.pg_line(watch),
+                         "polaris-pg: the primary changed from polaris-pg-1 to polaris-pg-2; "
+                         "no readiness probe failure")
+
+    def test_a_steady_primary_and_its_failures_are_one_line(self):
+        watch = {"primary_before": "polaris-pg-1", "primary_after": "polaris-pg-1",
+                 "readiness_failures": {"polaris-pg-1": 3, "polaris-pg-2": 1}}
+        self.assertEqual(driver.pg_line(watch),
+                         "polaris-pg: polaris-pg-1 primary throughout; 4 readiness probe "
+                         "failure(s): polaris-pg-1 3, polaris-pg-2 1")
+
+    def test_a_run_without_the_record_says_so(self):
+        self.assertEqual(driver.pg_line(None), "polaris-pg: not recorded")
+
+    def test_the_events_are_read_in_polaris_namespace_for_pods(self):
+        argv = driver.pg_events_command(ENV)
+        self.assertEqual(argv[1:5], ["--context", "kind-lakehouse-gate", "-n",
+                                     "catalog-polaris"])
+        self.assertIn("--field-selector=involvedObject.kind=Pod,reason=Unhealthy", argv)
+
+
 class Hold(unittest.TestCase):
     def test_the_hold_runs_the_mixed_profile_at_70_percent_of_its_knee(self):
         self.assertEqual(driver.hold_rate(CONFIG, 250), 175)
@@ -337,7 +395,11 @@ class Report(unittest.TestCase):
             steps = [self.step(100, True), self.step(150, False, ["opa"])]
             self.write(out, "profiles/mixed.json", {"steps": steps, **driver.verdict(steps)})
             self.write(out, "hold.json", self.step(70, True))
-            self.write(out, "verify.json", {"problems": [], "commits": {"ok": 1}})
+            self.write(out, "verify.json", {"problems": [], "commits": {"ok": 1},
+                                            "polaris_pg": {
+                                                "primary_before": "polaris-pg-1",
+                                                "primary_after": "polaris-pg-1",
+                                                "readiness_failures": {}}})
             text = io.StringIO()
             with contextlib.redirect_stdout(text):
                 self.assertEqual(driver.report(out, driver.gate.load_pins()), 0)
@@ -348,6 +410,8 @@ class Report(unittest.TestCase):
         self.assertIn("| mixed | 100 | 2 | opa |", text.getvalue())
         self.assertIn("Hold at 70 req/s for 10 s", text.getvalue())
         self.assertIn("Correctness: no fault", text.getvalue())
+        self.assertIn("polaris-pg: polaris-pg-1 primary throughout; no readiness probe failure",
+                      text.getvalue())
 
     def test_a_run_that_was_never_verified_says_so(self):
         with tempfile.TemporaryDirectory() as out:
