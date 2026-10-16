@@ -86,6 +86,23 @@ class C1qApplied(C1Applied):
             self.assertTrue(driver.c1_applied(ENV, "C1q"))
 
 
+class QuorumNumber(unittest.TestCase):
+    """C0 waits for the failover quorum the chart turns on (ADR-058 §3), read from the
+    running Cluster."""
+
+    @staticmethod
+    def cluster(**sync):
+        return {"spec": {"postgresql": {"synchronous": {"method": "any", "number": 1, **sync}}}}
+
+    def test_the_number_when_the_cluster_has_a_failover_quorum(self):
+        self.assertEqual(driver.quorum_number(self.cluster(failoverQuorum=True)), 1)
+
+    def test_none_without_one(self):
+        self.assertIsNone(driver.quorum_number(self.cluster()))
+        self.assertIsNone(driver.quorum_number(self.cluster(failoverQuorum=False)))
+        self.assertIsNone(driver.quorum_number({"spec": {}}))
+
+
 
 class FellBehind(unittest.TestCase):
     """S5 counts only if the survivor fell behind the standby lost with the primary

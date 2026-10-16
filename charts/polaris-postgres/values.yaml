@@ -29,6 +29,11 @@ smartShutdownTimeout: 0
 synchronous:
   number: 1
   dataDurability: required
+  # CNPG promotes a standby only when the standbys it reaches must include one holding every
+  # confirmed commit (ADR-058 §3). When the primary and a standby are lost together, writes wait
+  # for one to come back instead. In failover.yml's S5, C1 without it lost 512 confirmed writes
+  # over five runs and C1q with it none (#173). A forced `kubectl cnpg promote` still can.
+  failoverQuorum: true
 
 storage:
   size: 10Gi

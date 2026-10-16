@@ -17,12 +17,14 @@ spec:
     topologyKey: kubernetes.io/hostname
   smartShutdownTimeout: {{ .Values.smartShutdownTimeout }}
   {{- if ge (int .Values.instances) 3 }}
-  # Commits wait for any one standby (ADR-056); with fewer instances, asynchronous.
+  # Commits wait for any one standby (ADR-056), and promotion for a standby holding them
+  # (ADR-058); with fewer instances, asynchronous.
   postgresql:
     synchronous:
       method: any
       number: {{ .Values.synchronous.number }}
       dataDurability: {{ .Values.synchronous.dataDurability }}
+      failoverQuorum: {{ .Values.synchronous.failoverQuorum }}
   {{- end }}
   bootstrap:
     initdb:

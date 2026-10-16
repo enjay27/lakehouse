@@ -172,6 +172,12 @@ def quorum_applied(env, number):
             and status.get("standbyNumber") == number)
 
 
+def quorum_number(cluster):
+    """`number` of a Cluster whose synchronous block turns on failoverQuorum, else None."""
+    sync = cluster["spec"].get("postgresql", {}).get("synchronous", {})
+    return sync["number"] if sync.get("failoverQuorum") else None
+
+
 def settle(env):
     problem = release.settle(call, env["KUBE_CONTEXT"], env["NS_CATALOG_POLARIS"])
     if problem:
@@ -203,6 +209,17 @@ def install(setup):
                 sys.exit(f"{setup}'s settings did not reach the running instances")
             time.sleep(CHECK_S)
         print(f"{setup}: the Cluster patch runs on every instance.")
+    else:
+        # The chart's failoverQuorum (ADR-058 §3) counts once the primary reports it.
+        number = quorum_number(json.loads(must(kubectl(
+            ns, "get", f"cluster/{release.POLARIS_PG}", "-o", "json"))))
+        end = time.monotonic() + release.SETTLE_TIMEOUT
+        while number and not quorum_applied(env, number):
+            if time.monotonic() > end:
+                sys.exit(f"{setup}: the primary reports no failover quorum")
+            time.sleep(CHECK_S)
+        if number:
+            print(f"{setup}: the chart's failover quorum is reported.")
     settle(env)
     pooler = setups.pooler(setup, ns)
     if pooler:
