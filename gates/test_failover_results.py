@@ -271,6 +271,17 @@ class NodeLosses(unittest.TestCase):
         self.assertIsNone(results.aggregate([results.summarize(run_record())])[
             ("C0", "S1", "pooled")]["at_risk_total"])
 
+    def test_standbys_that_did_not_stream_again_are_listed(self):
+        record = s5_record()
+        record["not_rejoined"] = ["polaris-pg-2"]
+        runs = [results.summarize(record), results.summarize(run_record())]
+        self.assertEqual(runs[0]["not_rejoined"], ["polaris-pg-2"])
+        self.assertEqual(runs[1]["not_rejoined"], [])
+        self.assertEqual(results.not_rejoined(runs), [
+            "C1-S5-1: polaris-pg-2 did not stream from the primary again; rebuilt"])
+        text = results.markdown(results.aggregate(runs), (), results.not_rejoined(runs))
+        self.assertIn("After C1-S5-1: polaris-pg-2 did not stream", text)
+
     def test_markdown_lists_the_writes_at_risk_and_the_invalid_runs(self):
         runs = [results.summarize(s5_record(1, lost_seq=595)),
                 results.summarize(s5_record(2, valid=False))]

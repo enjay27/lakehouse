@@ -55,6 +55,8 @@ RUN_TIMEOUT_S = 900
 POLL_S = 1
 CHECK_S = 5
 SWITCHOVER_TIMEOUT_S = 300
+# How long a standby has to stream from the primary again after a run before it is rebuilt.
+STREAM_TIMEOUT_S = 120
 
 
 def now_ms():
@@ -288,6 +290,34 @@ def fell_behind(env, standby, survivor):
     return True, None, lsns
 
 
+def missing_standbys(env, timeout_s=STREAM_TIMEOUT_S):
+    """The standbys not streaming from the primary after `timeout_s` seconds. A readiness
+    probe passes on a standby that answers without replicating, so CNPG can call the
+    Cluster healthy while one is missing (C1-S5-1, failover 38846398547)."""
+    end = time.monotonic() + timeout_s
+    while True:
+        names = [p["metadata"]["name"] for p in instances(env)["items"]]
+        code, out = call(psql_command(env, setups.STREAMING_QUERY))
+        missing = setups.not_streaming(names, primary_of(env), out if code == 0 else "")
+        if not missing or time.monotonic() > end:
+            return missing
+        time.sleep(CHECK_S)
+
+
+def rebuild(env, names):
+    """Each standby in `names` deleted with its volume, as gate.py rebuild-replica does, so
+    that CNPG clones the primary into a new one; then every standby streams again."""
+    ns = env["NS_CATALOG_POLARIS"]
+    for name in names:
+        for argv in gate.rebuild_commands(ns, name):
+            must(argv)
+        print(f"{name} did not stream from the primary: deleted with its volume.", flush=True)
+    settle(env)
+    missing = missing_standbys(env)
+    if missing:
+        sys.exit(f"{', '.join(missing)} not streaming from the primary after the rebuild")
+
+
 def place_primary(env):
     """Before S3 to S5: the primary onto a worker, as `kubectl cnpg promote` would move it."""
     ns = env["NS_CATALOG_POLARIS"]
@@ -315,6 +345,9 @@ def probe_logs(ns, name):
 def one_run(env, state, scenario, n, node_down_s):
     ns, setup = env["NS_CATALOG_POLARIS"], state["setup"]
     settle(env)
+    missing = missing_standbys(env)
+    if missing:
+        rebuild(env, missing)
     if scenario in setups.NODE_LOSSES:
         place_primary(env)
     primary = primary_of(env)
@@ -393,6 +426,10 @@ def one_run(env, state, scenario, n, node_down_s):
     settle(env)
     rows = [line.split(",") for line in
             psql(env, setups.rows_query(run_id), setups.PROBE_DATABASE).split()]
+    not_rejoined = missing_standbys(env)
+    if not_rejoined:
+        print(f"{run_id}: {', '.join(not_rejoined)} did not stream again", flush=True)
+        rebuild(env, not_rejoined)
     since = dt.datetime.fromtimestamp(t0 / 1000, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     code, operator_log = call(kubectl(env["NS_CNPG_SYSTEM"], "logs", "-l",
                                       release.OPERATOR_LABEL, "--tail=-1",
@@ -400,6 +437,7 @@ def one_run(env, state, scenario, n, node_down_s):
     return {"setup": setup, "scenario": scenario, "run": n, "run_id": run_id, "t0": t0,
             "old_primary": primary, "node": node, "nodes": nodes,
             "survivor": placed["survivor"] if placed else None, "cut": cut,
+            "not_rejoined": not_rejoined,
             "valid": valid, "invalid_reason": reason,
             "node_down_s": node_down_s if scenario in setups.NODE_LOSSES else None,
             "timed_out": timed_out, "observations": poller.observations,
@@ -428,7 +466,8 @@ def run(setup, scenarios, runs, node_down_s, out):
             summaries.append(summary)
             print(json.dumps({k: summary[k] for k in ("setup", "scenario", "run", "events_s",
                                                       "modes")}), flush=True)
-    print(results.markdown(results.aggregate(summaries), results.invalid(summaries)))
+    print(results.markdown(results.aggregate(summaries), results.invalid(summaries),
+                           results.not_rejoined(summaries)))
 
 
 def report(directory):
@@ -436,7 +475,8 @@ def report(directory):
     for path in sorted(glob.glob(os.path.join(directory, "**", "*.json"), recursive=True)):
         with open(path, encoding="utf-8") as f:
             summaries.append(results.summarize(json.load(f)))
-    print(results.markdown(results.aggregate(summaries), results.invalid(summaries)))
+    print(results.markdown(results.aggregate(summaries), results.invalid(summaries),
+                           results.not_rejoined(summaries)))
 
 
 def main(argv):

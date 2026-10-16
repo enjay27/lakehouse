@@ -225,6 +225,18 @@ class Commands(unittest.TestCase):
         with self.assertRaises(ValueError):
             setups.standby_flush_query("x' OR '1'='1")
 
+    def test_the_standbys_not_streaming_from_the_primary(self):
+        self.assertEqual(setups.STREAMING_QUERY,
+                         "SELECT application_name FROM pg_stat_replication "
+                         "WHERE state = 'streaming'")
+        names = ["polaris-pg-1", "polaris-pg-2", "polaris-pg-3"]
+        self.assertEqual(setups.not_streaming(names, "polaris-pg-1", "polaris-pg-3\n"),
+                         ["polaris-pg-2"])
+        self.assertEqual(setups.not_streaming(names, "polaris-pg-1",
+                                              "polaris-pg-2\npolaris-pg-3\n"), [])
+        self.assertEqual(setups.not_streaming(names, "polaris-pg-1", ""),
+                         ["polaris-pg-2", "polaris-pg-3"])
+
     def test_switchover_patches_the_status_as_cnpgs_promote_does(self):
         patch = setups.switchover_patch("polaris-pg-3", "2026-10-13T05:00:00.000000Z")
         self.assertEqual(patch, {"status": {

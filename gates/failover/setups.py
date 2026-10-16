@@ -44,6 +44,8 @@ NODE_LOSSES = ("S3", "S4", "S5")
 # S5: how long the survivor is cut off from the primary before both workers are paused.
 CUT_S = 10
 RECEIVED_QUERY = "SELECT pg_last_wal_receive_lsn()"
+STREAMING_QUERY = ("SELECT application_name FROM pg_stat_replication "
+                   "WHERE state = 'streaming'")
 CONTROL_PLANE = f"{gate.CLUSTER}-control-plane"
 HOSTNAME = "kubernetes.io/hostname"
 PROBE_DIR = os.path.join(HERE, "probe")
@@ -277,6 +279,12 @@ def switchover_target(pods, primary):
         if name != primary and pod["spec"].get("nodeName") != CONTROL_PLANE and _ready(pod):
             return name
     raise ValueError(f"no ready standby on a worker to take over from {primary}")
+
+
+def not_streaming(names, primary, streaming):
+    """The instances in `names`, but the primary, absent from STREAMING_QUERY's output."""
+    up = set(streaming.split())
+    return sorted(n for n in names if n != primary and n not in up)
 
 
 def placement(pods, primary):

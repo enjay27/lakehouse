@@ -15,6 +15,8 @@ time is epoch milliseconds, read on the runner, the one clock of the kind cluste
 - **S5's writes at risk** (ADR-058 §2): commits that returned after the survivor was cut off
   and before both workers were paused. Only the standby paused with the primary holds them.
 - **An invalid run** (S5 whose survivor did not fall behind) is listed, not counted.
+- **A standby that did not stream from the primary again** after a run is listed, and the
+  driver rebuilt it before the next run.
 """
 
 import datetime as dt
@@ -180,6 +182,7 @@ def summarize(run):
             "run_id": run.get("run_id", f"{run['setup']}-{run['scenario']}-{run['run']}"),
             "valid": run.get("valid", True), "invalid_reason": run.get("invalid_reason"),
             "nodes": run.get("nodes"), "survivor": run.get("survivor"), "cut": run.get("cut"),
+            "not_rejoined": run.get("not_rejoined") or [],
             "node_down_s": run.get("node_down_s"), "old_primary": run["old_primary"],
             "new_primary": found["new_primary"], "settings": run.get("settings", {}),
             "events_s": {"detected": _seconds(found["detected"], t0),
@@ -222,7 +225,13 @@ def invalid(summaries):
     return [f"{s['run_id']}: {s['invalid_reason']}" for s in summaries if not s["valid"]]
 
 
-def markdown(table, not_counted=()):
+def not_rejoined(summaries):
+    """`run: standbys` for each run after which a standby did not stream again."""
+    return [f"{s['run_id']}: {', '.join(s['not_rejoined'])} did not stream from the primary "
+            "again; rebuilt" for s in summaries if s["not_rejoined"]]
+
+
+def markdown(table, not_counted=(), rebuilt=()):
     lines = ["| Setup | Failure | Mode | Runs | Outage median (s) | Outage worst (s) | "
              "All recovered | Failed writes, median | Confirmed and lost, total | "
              "Commit p50 (ms) | Commit p99, worst (ms) |",
@@ -241,4 +250,6 @@ def markdown(table, not_counted=()):
                   f"{row['lost_total']} |" for (setup, scenario, mode), row in risky]
     if not_counted:
         lines += [""] + [f"Not counted: {line}" for line in not_counted]
+    if rebuilt:
+        lines += [""] + [f"After {line}" for line in rebuilt]
     return "\n".join(lines) + "\n"
