@@ -266,7 +266,8 @@ class Verify(unittest.TestCase):
         self.assertEqual(code, 0, out)
         found = result(out)["tables"]
         self.assertEqual(found["ns00.t00"], {"snapshots": 4, "new": ["1002", "1003"],
-                                             "duplicates": []})
+                                             "duplicates": [],
+                                             "metadata_bytes": len(polaris.body("ns00.t00"))})
         self.assertEqual(found["ns00.t01"]["duplicates"], ["1000"])
         for secret in [*ENV.values(), STRESS_SECRET]:
             self.assertNotIn(secret, out)

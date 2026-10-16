@@ -27,8 +27,9 @@ seed:
    commit; that it accepts one it never checks is confirmed by the first run.
 
 verify: loads every table of tables.json as gate_stress and lists, per table, how many
-snapshots it has, the ids of those newer than the seed (sequence number above the seeded one)
-and any id listed twice.
+snapshots it has, the ids of those newer than the seed (sequence number above the seeded one),
+any id listed twice, and the load's length in bytes: the scenario's commits only add
+snapshots, so tables grow over a run.
 
 Progress goes out as `ok`/`FAIL` lines, credentials masked; the result as one line starting
 with RESULT, holding no credential. Exits 1 when anything failed.
@@ -265,7 +266,8 @@ def verify(argv, seeded, env, http=urllib_http, out=sys.stdout):
         if status != 200:
             report.bad(f"loading {t['name']}: HTTP {status}")
             continue
-        found[t["name"]] = snapshots_after(json.loads(raw)["metadata"], t["sequence"])
+        found[t["name"]] = {**snapshots_after(json.loads(raw)["metadata"], t["sequence"]),
+                            "metadata_bytes": len(raw)}
     if report.failed:
         return 1
     report.ok(f"{len(found)} tables loaded, "

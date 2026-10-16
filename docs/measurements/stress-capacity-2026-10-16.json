@@ -1,0 +1,940 @@
+{
+ "commit": "75ae56b9c89e8ed61a29f3357000b4f9906450aa",
+ "config": {
+  "_comment": "Tuning values for the stress scenario (ADR-053; ADR-000 rule 11). Every number is a placeholder until calibration, a run recorded in docs/measurements/, gives evidence for it; each change names its evidence in the PR that makes it. Read by gates/stress/driver.py, seed.py and scenario.js.",
+  "commit_retries": 4,
+  "etag_ttl_s": 300,
+  "hold": {
+   "_comment": "After the ramps, the mixed profile at fraction of its knee (ADR-053 \u00a75, ADR-054 \u00a71), Polaris's heap, GC and worker queue sampled every sample_seconds while it runs (ADR-053 \u00a77).",
+   "fraction": 0.8,
+   "profile": "mixed",
+   "sample_seconds": 60,
+   "seconds": 7200
+  },
+  "hot": {
+   "_comment": "The first tables are the hot set: commits from the arrival rate never go there; writers_per_table writers per table commit in a loop with pause_ms between commits, so commits collide and the 409 path runs. They run whenever a profile commits. pause_ms was 2000 until Tier D's attempt 5 on 2026-10-16 (#174): the hot set then sent about 19 commits/s whatever the profile's rate, and one Polaris replica's mixed profile failed its first step at 25 req/s.",
+   "pause_ms": 10000,
+   "tables": 10,
+   "writers_per_table": 4
+  },
+  "k6": {
+   "_comment": "The k6 pod's CPU limit (ADR-053 \u00a72), the VUs the arrival rate may use and each request's timeout.",
+   "cpu": "2",
+   "max_vus": 2000,
+   "pre_vus": 200,
+   "timeout": "10s"
+  },
+  "pass": {
+   "_comment": "A step passes when k6 dropped at most 5% of the requests offered, at most 0.1% failed (409s on the hot set not counted) and each kind's p99 is within its cap (ADR-053 \u00a74).",
+   "answered_min": 0.95,
+   "error_max": 0.001,
+   "p99_ms": {
+    "commit": 5000,
+    "conditional_load": 500,
+    "config": 500,
+    "full_load": 3000,
+    "head_table": 500,
+    "list_namespaces": 500,
+    "list_tables": 500,
+    "token": 1000
+   }
+  },
+  "profiles": {
+   "_comment": "Each profile's request mix (shares sum to 1) and its step ramp: start, start + step, ... for max_steps steps of step_seconds each. The mixed profile's shares are ADR-053's assumption until the target's metrics give the real ones (#142).",
+   "commits": {
+    "max_steps": 30,
+    "shares": {
+     "commit": 1.0
+    },
+    "start": 5,
+    "step": 5
+   },
+   "mixed": {
+    "max_steps": 30,
+    "shares": {
+     "commit": 0.05,
+     "conditional_load": 0.85,
+     "config": 0.02,
+     "head_table": 0.02,
+     "list_namespaces": 0.02,
+     "list_tables": 0.02,
+     "token": 0.02
+    },
+    "start": 25,
+    "step": 25
+   },
+   "queries-conditional": {
+    "max_steps": 30,
+    "shares": {
+     "conditional_load": 0.9,
+     "config": 0.02,
+     "head_table": 0.02,
+     "list_namespaces": 0.02,
+     "list_tables": 0.02,
+     "token": 0.02
+    },
+    "start": 25,
+    "step": 25
+   },
+   "queries-full": {
+    "max_steps": 30,
+    "shares": {
+     "config": 0.02,
+     "full_load": 0.9,
+     "head_table": 0.02,
+     "list_namespaces": 0.02,
+     "list_tables": 0.02,
+     "token": 0.02
+    },
+    "start": 25,
+    "step": 25
+   }
+  },
+  "seed": {
+   "_comment": "100 tables in 10 namespaces, each grown to a load of about 1 MB by batches of add-snapshot updates (ADR-053 \u00a73). Each table keeps only its last previous_versions_max metadata files, so the runner's disk stays bounded: a deviation from the target's defaults.",
+   "batch": 500,
+   "max_batches": 20,
+   "metadata_bytes": 1000000,
+   "namespaces": 10,
+   "previous_versions_max": 5,
+   "tables_per_namespace": 10
+  },
+  "settle": {
+   "_comment": "Before each ramp and the hold, Polaris's pods must be Ready with no restart for seconds, within timeout_seconds: a ramp's last step can overload Polaris until its liveness probe restarts it, and the next ramp would measure the restart (#174, #179).",
+   "seconds": 60,
+   "timeout_seconds": 900
+  },
+  "standin_cpu": {
+   "_comment": "The CPU limit of each stand-in Polaris reaches directly on a stress install (ADR-053 \u00a74): a knee reached while one of them is throttled is that stand-in's, not Polaris's.",
+   "opa": "2",
+   "seaweedfs": "2"
+  },
+  "step_seconds": 120,
+  "throttle_max": 0.05
+ },
+ "hold": {
+  "answered": 1.0,
+  "commits": {
+   "commit": {
+    "conflict": 0,
+    "failed": 0,
+    "ok": 7150,
+    "unknown": 0
+   },
+   "commit_hot": {
+    "conflict": 0,
+    "failed": 0,
+    "ok": 28454,
+    "unknown": 0
+   }
+  },
+  "cpu_seconds": {
+   "k6": 745.81,
+   "opa": 159.71,
+   "polaris": 5501.21,
+   "polaris-pg": 423.4,
+   "seaweedfs": 1352.87
+  },
+  "cpu_seconds_by_pod": {
+   "polaris-pg-1": 280.48,
+   "polaris-pg-2": 72.52,
+   "polaris-pg-3": 70.4
+  },
+  "dropped": 0,
+  "ended": "2026-10-16T23:26:59Z",
+  "error_rate": 0.0,
+  "errors": 0,
+  "latency_ms": {
+   "commit": {
+    "count": 14302,
+    "max": 1755.781322,
+    "p50": 39.0781145,
+    "p95": 56.82423969999999,
+    "p99": 114.16362129999997
+   },
+   "commit_hot": {
+    "count": 57996,
+    "max": 2442.293578,
+    "p50": 57.1343715,
+    "p95": 137.693225,
+    "p99": 370.54597575000105
+   },
+   "conditional_load": {
+    "count": 122297,
+    "max": 1628.661888,
+    "p50": 15.350932,
+    "p95": 28.682424,
+    "p99": 80.6840167599998
+   },
+   "config": {
+    "count": 2887,
+    "max": 334.201066,
+    "p50": 2.315806,
+    "p95": 4.140358199999997,
+    "p99": 12.135462159999857
+   },
+   "head_table": {
+    "count": 2951,
+    "max": 642.959491,
+    "p50": 12.415016,
+    "p95": 24.765599,
+    "p99": 81.445637
+   },
+   "list_namespaces": {
+    "count": 2909,
+    "max": 334.008509,
+    "p50": 3.361835,
+    "p95": 5.514907599999999,
+    "p99": 11.497356280000012
+   },
+   "list_tables": {
+    "count": 2912,
+    "max": 323.334217,
+    "p50": 3.3979115,
+    "p95": 5.9309918999999995,
+    "p99": 14.154274569999878
+   },
+   "token": {
+    "count": 2895,
+    "max": 358.568184,
+    "p50": 1.742626,
+    "p95": 2.997293399999991,
+    "p99": 7.484898539999999
+   }
+  },
+  "name": "hold",
+  "p99_ms": {
+   "commit": 114.16362129999997,
+   "commit_hot": 370.54597575000105,
+   "conditional_load": 80.6840167599998,
+   "config": 12.135462159999857,
+   "head_table": 81.445637,
+   "list_namespaces": 11.497356280000012,
+   "list_tables": 14.154274569999878,
+   "token": 7.484898539999999
+  },
+  "passed": true,
+  "primary": "polaris-pg-1",
+  "rate": 20,
+  "reasons": [],
+  "requests": 209149,
+  "restarts": [],
+  "seconds": 7200,
+  "server": {
+   "GET /api/catalog/v1/config 200": {
+    "count": 2887,
+    "mean_ms": 2.4
+   },
+   "GET /api/catalog/v1/{prefix}/namespaces 200": {
+    "count": 2909,
+    "mean_ms": 3.4
+   },
+   "GET /api/catalog/v1/{prefix}/namespaces/{namespace}/tables 200": {
+    "count": 2912,
+    "mean_ms": 3.2
+   },
+   "GET /api/catalog/v1/{prefix}/namespaces/{namespace}/tables/{table} 200": {
+    "count": 151173,
+    "mean_ms": 21.4
+   },
+   "GET /api/catalog/v1/{prefix}/namespaces/{namespace}/tables/{table} 304": {
+    "count": 7273,
+    "mean_ms": 3.4
+   },
+   "HEAD /api/catalog/v1/{prefix}/namespaces/{namespace}/tables/{table} 204": {
+    "count": 2951,
+    "mean_ms": 14.1
+   },
+   "POST /api/catalog/v1/oauth/tokens 200": {
+    "count": 3617,
+    "mean_ms": 1.9
+   },
+   "POST /api/catalog/v1/{prefix}/namespaces/{namespace}/tables/{table} 200": {
+    "count": 35604,
+    "mean_ms": 77.6
+   },
+   "POST /api/catalog/v1/{prefix}/namespaces/{namespace}/tables/{table} 409": {
+    "count": 545,
+    "mean_ms": 269.9
+   },
+   "POST /api/management/v1/principals/{principalName}/rotate 200": {
+    "count": 1,
+    "mean_ms": 9.4
+   }
+  },
+  "server_errors": 0,
+  "started": "2026-10-16T21:26:47Z",
+  "throttle": {
+   "k6": 0.0,
+   "opa": 0.0,
+   "seaweedfs": 0.0
+  },
+  "throttled": []
+ },
+ "hold_series": {
+  "failed_samples": 0,
+  "gc": {
+   "longest": 0.404,
+   "pauses": 169247.0,
+   "seconds": 616.198
+  },
+  "heap_after_gc": {
+   "first": 234558224.0,
+   "last": 113241144.0,
+   "max": 234558224.0
+  },
+  "heap_max": 6871842816.0,
+  "heap_used_max": 4560151792.0,
+  "memory": {
+   "k6": {
+    "first": 386174976.0,
+    "last": 607678464.0,
+    "max": 612065280.0
+   },
+   "opa": {
+    "first": 16572416.0,
+    "last": 16416768.0,
+    "max": 17068032.0
+   },
+   "polaris": {
+    "first": 4910686208.0,
+    "last": 5424640000.0,
+    "max": 5734088704.0
+   },
+   "polaris-pg": {
+    "first": 336609280.0,
+    "last": 269914112.0,
+    "max": 338898944.0
+   },
+   "seaweedfs": {
+    "first": 993058816.0,
+    "last": 1346416640.0,
+    "max": 1391296512.0
+   }
+  },
+  "samples": 120,
+  "worker_queue_max": 0.0,
+  "worker_rejected": 0.0
+ },
+ "k6": "grafana/k6:2.3.0@sha256:9c2dee7f8ed74d317e4027c06a10f169b625638189de8d4555d0b3486a5aeb34",
+ "overlay": "gates/stress/capacity.json",
+ "polaris": "1.6.0",
+ "polaris_size": {
+  "heap_max_bytes": 6869745664.0,
+  "replicas": 1,
+  "resources": {
+   "limits": {
+    "cpu": "4",
+    "memory": "8Gi"
+   },
+   "requests": {
+    "cpu": "4",
+    "memory": "8Gi"
+   }
+  }
+ },
+ "profiles": {
+  "commits": {
+   "cpu_per_request": {
+    "polaris": 0.0190596,
+    "polaris-pg": 0.0019028,
+    "polaris-pg primary": 0.0013608
+   },
+   "knee": 40,
+   "limited_by": [],
+   "reached": true,
+   "steps": [
+    {
+     "answered": 1.0,
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "commit": 283.0414142499998,
+      "commit_hot": 983.2231586799999
+     },
+     "passed": true,
+     "rate": 5,
+     "reasons": [],
+     "requests": 2298,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "commit": 155.25297775999823,
+      "commit_hot": 520.4538022300036
+     },
+     "passed": true,
+     "rate": 10,
+     "reasons": [],
+     "requests": 3486,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "commit": 379.01624835999934,
+      "commit_hot": 818.3516755200019
+     },
+     "passed": true,
+     "rate": 15,
+     "reasons": [],
+     "requests": 4692,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "commit": 258.00770925000245,
+      "commit_hot": 674.41306223
+     },
+     "passed": true,
+     "rate": 20,
+     "reasons": [],
+     "requests": 5906,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "commit": 1026.0251798400006,
+      "commit_hot": 1557.3447896900002
+     },
+     "passed": true,
+     "rate": 25,
+     "reasons": [],
+     "requests": 7230,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "commit": 610.4269377400005,
+      "commit_hot": 1187.523187340001
+     },
+     "passed": true,
+     "rate": 30,
+     "reasons": [],
+     "requests": 8430,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "error_rate": 0.000588235294117647,
+     "errors": 6,
+     "p99_ms": {
+      "commit": 1518.8925551699983,
+      "commit_hot": 2712.3092079000003
+     },
+     "passed": true,
+     "rate": 35,
+     "reasons": [],
+     "requests": 10200,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "commit": 515.7584334200004,
+      "commit_hot": 1086.819269450002
+     },
+     "passed": true,
+     "rate": 40,
+     "reasons": [],
+     "requests": 10942,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 0.9562962962962963,
+     "error_rate": 0.024839457723867284,
+     "errors": 557,
+     "p99_ms": {
+      "commit": 2975.6521920300006,
+      "commit_hot": 2991.122196290001
+     },
+     "passed": false,
+     "rate": 45,
+     "reasons": [
+      "errors 2.48% > 0.1%"
+     ],
+     "requests": 22424,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    }
+   ],
+   "valid": true
+  },
+  "mixed": {
+   "cpu_per_request": {
+    "polaris": 0.0168271,
+    "polaris-pg": 0.0016678,
+    "polaris-pg primary": 0.0011135
+   },
+   "knee": 25,
+   "limited_by": [],
+   "reached": true,
+   "steps": [
+    {
+     "answered": 1.0,
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "commit": 227.843469220002,
+      "commit_hot": 646.9781966499999,
+      "conditional_load": 160.47563195000197,
+      "config": 6.9077688000000235,
+      "head_table": 481.0879994000001,
+      "list_namespaces": 68.92779330000032,
+      "list_tables": 4.55751145,
+      "token": 39.11094055999995
+     },
+     "passed": true,
+     "rate": 25,
+     "reasons": [],
+     "requests": 4239,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 0.9988333333333334,
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "commit": 2041.5861270499738,
+      "commit_hot": 3527.448732910008,
+      "conditional_load": 3965.7469643599993,
+      "config": 673.8200431000002,
+      "head_table": 3393.666539269978,
+      "list_namespaces": 1555.596802950004,
+      "list_tables": 930.0193887499984,
+      "token": 264.3060084900008
+     },
+     "passed": false,
+     "rate": 50,
+     "reasons": [
+      "conditional_load p99 3965.7 ms > 500 ms",
+      "config p99 673.8 ms > 500 ms",
+      "head_table p99 3393.7 ms > 500 ms",
+      "list_namespaces p99 1555.6 ms > 500 ms",
+      "list_tables p99 930 ms > 500 ms"
+     ],
+     "requests": 7503,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    }
+   ],
+   "valid": true
+  },
+  "queries-conditional": {
+   "cpu_per_request": {
+    "polaris": 0.0103167,
+    "polaris-pg": 0.0007247,
+    "polaris-pg primary": 0.00061
+   },
+   "knee": 125,
+   "limited_by": [],
+   "reached": true,
+   "steps": [
+    {
+     "answered": 1.0,
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "conditional_load": 16.00980351999999,
+      "config": 3.4865391199999993,
+      "head_table": 13.53947154,
+      "list_namespaces": 5.529810820000007,
+      "list_tables": 7.848521369999992,
+      "token": 3.2675876600000002
+     },
+     "passed": true,
+     "rate": 25,
+     "reasons": [],
+     "requests": 3001,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "conditional_load": 16.84018526,
+      "config": 4.976214960000002,
+      "head_table": 14.17878656,
+      "list_namespaces": 4.13292468,
+      "list_tables": 3.90463784,
+      "token": 2.2901253999999995
+     },
+     "passed": true,
+     "rate": 50,
+     "reasons": [],
+     "requests": 6000,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "conditional_load": 17.81202082,
+      "config": 2.9567755999999976,
+      "head_table": 14.64724408,
+      "list_namespaces": 3.5727963999999988,
+      "list_tables": 6.99612339999999,
+      "token": 31.60943588000104
+     },
+     "passed": true,
+     "rate": 75,
+     "reasons": [],
+     "requests": 9001,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "conditional_load": 19.274205279999983,
+      "config": 3.0531761200000016,
+      "head_table": 14.624966480000003,
+      "list_namespaces": 6.297079500000001,
+      "list_tables": 7.80788720000001,
+      "token": 3.9192255200000004
+     },
+     "passed": true,
+     "rate": 100,
+     "reasons": [],
+     "requests": 12001,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "conditional_load": 317.9740344499944,
+      "config": 39.14436276000162,
+      "head_table": 68.02887403999813,
+      "list_namespaces": 255.40968052000116,
+      "list_tables": 87.737545,
+      "token": 5.057715
+     },
+     "passed": true,
+     "rate": 125,
+     "reasons": [],
+     "requests": 15000,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0008,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "conditional_load": 689.7864768399992,
+      "config": 190.95103210000198,
+      "head_table": 683.1021119199988,
+      "list_namespaces": 225.32631613999922,
+      "list_tables": 338.0355500299992,
+      "token": 292.55061318000037
+     },
+     "passed": false,
+     "rate": 150,
+     "reasons": [
+      "conditional_load p99 689.8 ms > 500 ms",
+      "head_table p99 683.1 ms > 500 ms"
+     ],
+     "requests": 18001,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0009,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    }
+   ],
+   "valid": true
+  },
+  "queries-full": {
+   "cpu_per_request": {
+    "polaris": 0.0140411,
+    "polaris-pg": 0.0007666,
+    "polaris-pg primary": 0.0006553
+   },
+   "knee": 125,
+   "limited_by": [],
+   "reached": true,
+   "steps": [
+    {
+     "answered": 1.0,
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "config": 7.224191199999999,
+      "full_load": 30.764241699999996,
+      "head_table": 22.402551399999997,
+      "list_namespaces": 5.123315820000005,
+      "list_tables": 6.3369732,
+      "token": 3.9385585999999906
+     },
+     "passed": true,
+     "rate": 25,
+     "reasons": [],
+     "requests": 3001,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "config": 4.864682680000001,
+      "full_load": 30.465392800000043,
+      "head_table": 17.77908468,
+      "list_namespaces": 4.9096917,
+      "list_tables": 7.068250769999997,
+      "token": 4.326880579999998
+     },
+     "passed": true,
+     "rate": 50,
+     "reasons": [],
+     "requests": 6001,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "config": 4.2046972500000015,
+      "full_load": 39.743313189997906,
+      "head_table": 13.832815340000009,
+      "list_namespaces": 29.90243657999978,
+      "list_tables": 6.226025799999994,
+      "token": 45.09400203999691
+     },
+     "passed": true,
+     "rate": 75,
+     "reasons": [],
+     "requests": 9001,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "config": 3.284338120000002,
+      "full_load": 430.7199583999987,
+      "head_table": 191.6848956999964,
+      "list_namespaces": 135.89778686999986,
+      "list_tables": 21.83909299999981,
+      "token": 37.227738599999725
+     },
+     "passed": true,
+     "rate": 100,
+     "reasons": [],
+     "requests": 12001,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "config": 3.7003534399999913,
+      "full_load": 14.849394940000002,
+      "head_table": 11.10670552,
+      "list_namespaces": 4.5678862700000025,
+      "list_tables": 4.99498136,
+      "token": 4.09564888
+     },
+     "passed": true,
+     "rate": 125,
+     "reasons": [],
+     "requests": 15001,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "config": 231.84574880999932,
+      "full_load": 977.99115814,
+      "head_table": 974.8148352100002,
+      "list_namespaces": 633.763961,
+      "list_tables": 468.4267079399996,
+      "token": 277.6152571099999
+     },
+     "passed": false,
+     "rate": 150,
+     "reasons": [
+      "head_table p99 974.8 ms > 500 ms",
+      "list_namespaces p99 633.8 ms > 500 ms"
+     ],
+     "requests": 18001,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    }
+   ],
+   "valid": true
+  }
+ },
+ "sizing": {
+  "polaris_pg_primary_cores": 13.4,
+  "polaris_replicas": 480,
+  "target_rps": 12000
+ },
+ "verify": {
+  "commits": {
+   "found": 85319,
+   "ok": 85319,
+   "unknown": 0
+  },
+  "metadata": {
+   "after": {
+    "hot": {
+     "max": 3229293,
+     "min": 2557010
+    },
+    "ordinary": {
+     "max": 1306823,
+     "min": 1270026
+    }
+   },
+   "seeded": {
+    "max": 1134409,
+    "min": 1127267
+   }
+  },
+  "polaris_pg": {
+   "primary_after": "polaris-pg-1",
+   "primary_before": "polaris-pg-1",
+   "readiness_failures": {
+    "polaris-pg-1": 2,
+    "polaris-pg-3": 3
+   }
+  },
+  "problems": [
+   "commits at 35 req/s: 6 failed request(s), 0 of them 5xx"
+  ]
+ }
+}

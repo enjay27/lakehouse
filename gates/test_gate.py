@@ -1840,6 +1840,53 @@ class Standins(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertRegex(cpu, r"^[1-9][0-9]*m?$")
 
+    def overlay(self, d, data):
+        path = os.path.join(d, "overlay.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        return {"STRESS_OVERLAY": path}
+
+    def test_without_an_overlay_the_stress_config_is_config_json(self):
+        with open(gate.STRESS_CONFIG, encoding="utf-8") as f:
+            self.assertEqual(gate.stress_config({}), json.load(f))
+
+    def test_an_overlay_changes_only_the_tuning_values_it_names(self):
+        # ADR-053 §1, §7: Tier D runs Tier A's scenario; only the rates, the step lengths, the
+        # hold and the sizes differ.
+        with tempfile.TemporaryDirectory() as d:
+            config = gate.stress_config(self.overlay(d, {
+                "_comment": "Tier D", "step_seconds": 120,
+                "profiles": {"mixed": {"start": 250, "step": 250}},
+                "hold": {"fraction": 0.8, "seconds": 7200}, "standin_cpu": {"opa": "2"},
+                "k6": {"max_vus": 2000}}))
+        base = gate.stress_config({})
+        self.assertEqual(config["step_seconds"], 120)
+        self.assertEqual(config["profiles"]["mixed"], {**base["profiles"]["mixed"],
+                                                       "start": 250, "step": 250})
+        self.assertEqual(config["profiles"]["commits"], base["profiles"]["commits"])
+        self.assertEqual(config["hold"], {**base["hold"], "fraction": 0.8, "seconds": 7200})
+        self.assertEqual(config["standin_cpu"], {**base["standin_cpu"], "opa": "2"})
+        self.assertEqual(config["k6"], {**base["k6"], "max_vus": 2000})
+        self.assertEqual(config["_comment"], base["_comment"])
+        for key in ("pass", "seed", "hot", "commit_retries", "etag_ttl_s", "throttle_max"):
+            self.assertEqual(config[key], base[key])
+
+    def test_an_overlay_that_touches_the_scenario_is_refused(self):
+        for bad in ({"pass": {"error_max": 0.1}}, {"seed": {"batch": 1}},
+                    {"profiles": {"mixed": {"shares": {"commit": 1.0}}}},
+                    {"profiles": {"new": {"start": 1}}}, {"k6": {"cpu": "4"}},
+                    {"standin_cpu": {"polaris": "4"}}, {"hold": {"profile": "commits"}},
+                    {"step_seconds": "120"}, {"hold": 1}):
+            with self.subTest(overlay=bad), tempfile.TemporaryDirectory() as d:
+                with self.assertRaises(ValueError):
+                    gate.stress_config(self.overlay(d, bad))
+
+    def test_direct_stand_ins_take_their_cpu_limits_from_the_overlay_too(self):
+        with tempfile.TemporaryDirectory() as d:
+            limits = gate.stress_standin_cpu(environ=self.overlay(d, {"standin_cpu": {
+                "seaweedfs": "3"}}))
+        self.assertEqual(limits["seaweedfs"], "3")
+
     def test_the_stress_config_says_its_numbers_are_placeholders_until_calibration(self):
         with open(gate.STRESS_CONFIG, encoding="utf-8") as f:
             config = json.load(f)

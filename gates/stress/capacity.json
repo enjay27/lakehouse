@@ -1,0 +1,27 @@
+{
+  "_comment": "Tier D's overlay on config.json (ADR-053 §7): one Polaris replica on a Linux test server, run by hand from docs/runbooks/stress-capacity.md with STRESS_OVERLAY=gates/stress/capacity.json. It changes only what gate.STRESS_OVERLAY_KEYS allows, so the scenario stays Tier A's. Every number is a first guess for a server of 8 cores and 16 threads until a run recorded in docs/measurements/ gives evidence for it; each change names its evidence in the PR that makes it.",
+  "step_seconds": 120,
+  "profiles": {
+    "_comment": "Each ramp sized to end within an hour at worst, its step the knee's resolution. Attempt 4 on 2026-10-16 (#174): queries-conditional failed its first step at 500 req/s and queries-full's knee was 300, so every ramp starts low, in steps of 5 for commits and 25 for the rest.",
+    "commits": {"start": 5, "step": 5, "max_steps": 30},
+    "queries-conditional": {"start": 25, "step": 25, "max_steps": 30},
+    "queries-full": {"start": 25, "step": 25, "max_steps": 30},
+    "mixed": {"start": 25, "step": 25, "max_steps": 30}
+  },
+  "hold": {
+    "_comment": "The mixed profile at 80% of its knee for 2 hours, the length of one of the target's peak windows (ADR-053 §7).",
+    "fraction": 0.8,
+    "seconds": 7200,
+    "sample_seconds": 60
+  },
+  "standin_cpu": {
+    "_comment": "Room for one Polaris replica's rate; a knee reached while either is throttled is still the stand-in's (ADR-053 §4).",
+    "seaweedfs": "2",
+    "opa": "2"
+  },
+  "k6": {
+    "_comment": "k6 keeps its 2 CPUs (ADR-053 §7); more VUs so that a slower Polaris at a higher rate is not cut short by k6's own cap.",
+    "pre_vus": 200,
+    "max_vus": 2000
+  }
+}

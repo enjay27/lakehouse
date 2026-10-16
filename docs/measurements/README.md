@@ -1,7 +1,7 @@
 # Measurements
 
-Numbers this repository has measured, each with its evidence (ADR-003). None has been
-committed yet.
+Numbers this repository has measured, each with its evidence (ADR-003). The first is
+`stress-capacity-2026-10-16.md`, one Polaris replica's capacity (Tier D, #174).
 
 ## The rule
 
