@@ -108,6 +108,7 @@ flowchart LR
 | [057](057-adr-056s-proof-compares-the-chart-with-itself-before-the-change-synchronous-commits-cost-s1-about-4-s.md) | ADR-056's proof compares the chart with itself before the change; synchronous commits cost S1 about 4 s | Accepted |
 | [058](058-the-primary-and-a-standby-lost-together-are-measured-and-failoverquorum-enters-the-chart-if-it-keeps-a-lagging-standby-from-losing-writes.md) | The primary and a standby lost together are measured, and failoverQuorum enters the chart if it keeps a lagging standby from losing writes | Accepted |
 | [059](059-auto-merge-also-leaves-adrs-and-agent-rules-to-kade.md) | Auto-merge also leaves ADRs and agent rules to Kade | Accepted |
+| [060](060-polaris-pgs-backups-sign-for-s3-region-from-the-backup-secret.md) | polaris-pg's backups sign for `S3_REGION`, read from the backup Secret | Proposed |
 
 ## Not ADRs
 
