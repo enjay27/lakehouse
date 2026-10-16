@@ -40,8 +40,8 @@
                   must have happened and ones that must not (ADR-034). Prints counts, never a body.
   install [--fresh] [--dry-run]
                   installs the latest release HEAD contains (released_tags) from a checkout of
-                  its tag, with the gate's `.env` copied into it, then this commit's release
-                  over it (ADR-051); with no tag, or with
+                  its tag, with the gate's `.env` copied into it, runs `seed` over it, then
+                  this commit's release over it (ADR-051); with no tag, or with
                   --fresh, only this commit's release. With --dry-run, this commit's release is
                   a server-side dry-run over the installed one (ADR-038). Prints which it did,
                   then the image pulls since it started, from the kubelet's Pulled events:
@@ -53,6 +53,23 @@
                   CNPG Clusters, which outlive the initdb and join Jobs CNPG deletes, and of
                   release.py's endpoint-check and bootstrap pods and log claim (#125). A
                   measurement that fails says so and never fails it.
+  seed            writes known data through the last release's Polaris before the upgrade
+                  (ADR-051 §2): gates/seed.py in a short-lived pod on the pinned Python image,
+                  mounted with iceberg/smoke.py and its hashed requirements from the ConfigMap
+                  migration-seed, as root and as gate_seed (principals, roles, grants, a
+                  catalog, nested namespaces, tables over two snapshots and a schema change, a
+                  view, a policy attached three ways), then gates/db_counts.sh in a pod on
+                  Polaris's PostgreSQL image counts each table of polaris_schema and reads the
+                  schema version, as Polaris, straight to polaris-pg. What seed.py read back
+                  and the counts are kept on the runner in SEED_RECORD, never printed: they
+                  hold the seeded principals' credentials. `install` runs it between the two
+                  releases, only when it upgrades for real.
+  check-migration after the upgrade (ADR-051 §3): seed.py, given the record on stdin, reads
+                  every seeded object back with every recorded field and value (a field the
+                  new version adds is listed), gets each seeded principal a token, reads each
+                  table at each recorded snapshot and appends; then no table of polaris_schema
+                  may have fewer rows than recorded, and the schema version before and after is
+                  printed. Without a record, a fresh install: it says so and passes.
   rebuild-replica deletes one replica of polaris-pg, never the primary: its PVC without waiting,
                   then its pod. CNPG makes a new instance through a join pod that clones the
                   primary under the network policies; it passes once a new join Job ran and the
@@ -60,8 +77,8 @@
                   the join pods' logs (ADR-048 §7). Gate only: it deletes a volume.
   check-polaris-pg
                   compares the running `Cluster` polaris-pg with the values its helm release
-                  was installed with, and checks its instances run on different nodes
-                  (ADR-016).
+                  was installed with, its shutdown timeout and synchronous replication among
+                  them (ADR-056), and checks its instances run on different nodes (ADR-016).
   check-polaris   compares the running Polaris (its Deployment, pods and ConfigMap) with the
                   values its helm release was installed with and with `.env`, checks its
                   replicas run on different nodes (ADR-016), then runs gates/check_polaris.sh
@@ -134,7 +151,7 @@
 Every kubectl and helm call names the gate's context, and a namespace where the object has
 one. Nothing here reaches any cluster but the kind cluster it creates (ADR-017).
 
-Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | rebuild-replica | check-polaris-pg | check-polaris | console-image [--build|--load] | batch-image | check-logs | check-console | check-iceberg | check-restore | gate-policies | check-network | check-metrics
+Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | seed | check-migration | rebuild-replica | check-polaris-pg | check-polaris | console-image [--build|--load] | batch-image | check-logs | check-console | check-iceberg | check-restore | gate-policies | check-network | check-metrics
 """
 
 import concurrent.futures
@@ -163,10 +180,12 @@ import metrics  # noqa: E402
 import network  # noqa: E402
 import release  # noqa: E402
 import release_tag  # noqa: E402
+import seed  # noqa: E402
 import standins  # noqa: E402
 import traffic  # noqa: E402
 
 CLUSTER = "lakehouse-gate"
+KIND_CONFIG = os.path.join(HERE, "kind.yaml")
 CONTEXT = f"kind-{CLUSTER}"
 TOOLS = ("kind", "kubectl", "helm", "kubeconform")
 # The binary inside each tool's archive; the others are plain binaries.
@@ -291,10 +310,11 @@ def plugin_manifest(text, namespace):
     return text
 
 
-def up_commands(pins, chart_path, namespace, manifests):
-    """(argv, stdin) in order: the cluster, the control-plane taken off NoSchedule, the shared
-    class next to kind's `standard` (the provisioner restarted to read it), CNPG, then
-    cert-manager and the plugin from `manifests` (name to text), each waited for."""
+def up_commands(pins, chart_path, namespace, manifests, kind_config=KIND_CONFIG):
+    """(argv, stdin) in order: the cluster from `kind_config`, the control-plane taken off
+    NoSchedule, the shared class next to kind's `standard` (the provisioner restarted to read
+    it), CNPG, then cert-manager and the plugin from `manifests` (name to text), each waited
+    for."""
     config = {"nodePathMap": [],
               "storageClassConfigs": {"standard": {"nodePathMap": STANDARD_NODE_PATHS},
                                       SHARED_CLASS: {"sharedFileSystemPath": SHARED_NODE_DIR}}}
@@ -304,7 +324,7 @@ def up_commands(pins, chart_path, namespace, manifests):
              "-f", "-"]
     return [
         (["kind", "create", "cluster", "--name", CLUSTER,
-          "--config", os.path.join(HERE, "kind.yaml"),
+          "--config", kind_config,
           "--image", pins["node_image"]["image"], "--wait", "180s"], None),
         (["kubectl", "--context", CONTEXT, "taint", "nodes", f"{CLUSTER}-control-plane",
           "node-role.kubernetes.io/control-plane:NoSchedule-"], None),
@@ -532,6 +552,9 @@ def install_plan(previous, previous_dir, fresh, dry_run=False):
         # release.py reads .env from its own checkout, and a tag's worktree has none.
         ["cp", "-p", os.path.join(ROOT, ".env"), os.path.join(previous_dir, ".env")],
         ["python3", os.path.join(previous_dir, "install", "release.py")],
+        # ADR-051 §2: data written through the last release, for check-migration to read back.
+        # The dry-run's upgrade changes no data, so it seeds nothing (§4).
+        *([] if dry_run else [["python3", os.path.join(HERE, "gate.py"), "seed"]]),
         *this,
     ], f"Upgrade: {previous} installed from its tag, then this commit over it{then} (ADR-051)."
 
@@ -774,7 +797,11 @@ def polaris_pg_problems(values, cluster, pods):
             ("instances", spec["instances"], values["instances"]),
             ("image", spec["imageName"], values["image"]),
             ("podAntiAffinityType", spec["affinity"]["podAntiAffinityType"],
-             values["podAntiAffinityType"])):
+             values["podAntiAffinityType"]),
+            ("smartShutdownTimeout", spec.get("smartShutdownTimeout"),
+             values["smartShutdownTimeout"]),
+            ("synchronous", polaris_pg_sync(spec.get("postgresql", {}).get("synchronous")),
+             polaris_pg_sync(values["synchronous"], values["instances"]))):
         if running != wanted:
             problems.append(f"{field}: {running} running, {wanted} in the values")
     ready = cluster.get("status", {}).get("readyInstances", 0)
@@ -785,9 +812,20 @@ def polaris_pg_problems(values, cluster, pods):
         problems.append(f"{len(pods['items'])} instances on {len(nodes)} nodes: "
                         + ", ".join(str(n) for n in nodes))
     anti = spec["affinity"]["podAntiAffinityType"]
+    sync = polaris_pg_sync(spec.get("postgresql", {}).get("synchronous"))
+    replication = "synchronous " + " ".join(str(v) for v in sync) if sync else "asynchronous"
     return problems, [f"Cluster {release.POLARIS_PG}: {ready} instances ready on "
                       f"{len(nodes)} nodes ({', '.join(str(n) for n in nodes)}), image "
-                      f"{spec['imageName']}, anti-affinity {anti}."]
+                      f"{spec['imageName']}, anti-affinity {anti}, replication {replication}."]
+
+
+def polaris_pg_sync(block, instances=None):
+    """(method, number, durability) of a `synchronous` block, or None for asynchronous. From the
+    values (`instances` given), what the chart renders: only with 3 or more (ADR-056 §3)."""
+    if block is None or (instances is not None and instances < 3):
+        return None
+    method = "any" if instances is not None else block.get("method")
+    return (method, block.get("number"), block.get("dataDurability"))
 
 
 def polaris_commands(namespace):
@@ -914,19 +952,24 @@ def polaris_problems(values, deployment, pods, configmap, env):
             ("polaris.authorization.type", advanced["polaris.authorization.type"]),
             ("polaris.authorization.opa.policy-uri",
              advanced["polaris.authorization.opa.policy-uri"]),
-            ("quarkus.datasource.jdbc.url", advanced["quarkus.datasource.jdbc.url"])):
+            ("quarkus.datasource.jdbc.url", advanced["quarkus.datasource.jdbc.url"]),
+            *((k, v) for k, v in advanced.items()
+              if k.startswith(release.JDBC_PROPERTIES_PREFIX))):
         if props.get(key) != want:
             problems.append(f"{key}: {props.get(key)} running, {want} in the values")
     for key, want in (("quarkus.datasource.jdbc.url", release.jdbc_url(env)),
                       ("polaris.authorization.opa.policy-uri", env["POLARIS_OPA_URL"])):
         if advanced[key] != want:
             problems.append(f"{key}: {advanced[key]} in the values, {want} from .env")
+    prefix = release.JDBC_PROPERTIES_PREFIX
+    driver = " ".join(f"{k[len(prefix):]}={v}" for k, v in sorted(props.items())
+                      if k.startswith(prefix))
     return problems, [
         f"Deployment {release.POLARIS}: {ready} replicas ready on {len(nodes)} nodes "
         f"({', '.join(str(n) for n in nodes)}), image {image}.",
         f"Polaris settings: S3 key from Secret polaris-s3, persistence "
         f"{props.get('polaris.persistence.type')}, database "
-        f"{props.get('quarkus.datasource.jdbc.url')}, tokens "
+        f"{props.get('quarkus.datasource.jdbc.url')} with driver {driver or 'defaults'}, tokens "
         f"{props.get('polaris.authentication.token-broker.type')}, authorization "
         f"{props.get('polaris.authorization.type')} at "
         f"{props.get('polaris.authorization.opa.policy-uri')}."]
@@ -999,6 +1042,161 @@ def check_iceberg_commands(env, image, name):
          ICEBERG_CATALOG, env["S3_ENDPOINT"], env["S3_REGION"],
          env["POLARIS_WAREHOUSE_BUCKET"]],
     ]
+
+
+# What `seed` wrote and counted, kept on the runner for check-migration (ADR-051 §2): it holds
+# the seeded principals' credentials, so it is never printed.
+SEED_RECORD = "/tmp/lakehouse-gate-seed.json"
+
+
+def seed_configmap(env, files):
+    """gates/seed.py, iceberg/smoke.py, whose helpers it uses, and their hashed requirements."""
+    return {"apiVersion": "v1", "kind": "ConfigMap",
+            "metadata": {"name": "migration-seed", "namespace": env["NS_CATALOG_POLARIS"]},
+            "data": files}
+
+
+def seed_pod_command(env, image, name, mode):
+    """The pod that installs PyIceberg by hash and runs seed.py MODE with root's credentials
+    and the smoke S3 key; `check` reads the record on stdin."""
+    creds = [{"name": var, "valueFrom": {"secretKeyRef": {"name": secret, "key": key}}}
+             for var, secret, key in (
+                 ("ROOT_CLIENT_ID", release.POLARIS_ROOT_SECRET, "clientId"),
+                 ("ROOT_CLIENT_SECRET", release.POLARIS_ROOT_SECRET, "clientSecret"),
+                 ("S3_ACCESS_KEY_ID", "smoke-s3", "accessKeyId"),
+                 ("S3_SECRET_ACCESS_KEY", "smoke-s3", "secretAccessKey"))]
+    settings = [{"name": var, "value": value} for var, value in (
+        ("PYTHONUNBUFFERED", "1"), ("PIP_DISABLE_PIP_VERSION_CHECK", "1"),
+        ("PIP_NO_CACHE_DIR", "1"), ("PIP_ROOT_USER_ACTION", "ignore"))]
+    container = {"name": name, "image": image, "env": creds + settings,
+                 "volumeMounts": [{"name": "code", "mountPath": "/seed", "readOnly": True}]}
+    if mode == "check":
+        container.update(stdin=True, stdinOnce=True)
+    overrides = {"spec": {"containers": [container],
+                          "volumes": [{"name": "code", "configMap": {"name": "migration-seed"}}]}}
+    install = ("pip install --quiet --require-hashes --only-binary :all: "
+               "-r /seed/requirements.txt && exec python3 /seed/seed.py \"$@\"")
+    return ["kubectl", "--context", CONTEXT, "-n", env["NS_CATALOG_POLARIS"], "run", name,
+            CHECK_POD_LABEL, f"--image={image}", "--restart=Never", "--rm",
+            "-i" if mode == "check" else "--attach", "--quiet", "--pod-running-timeout=3m",
+            "--override-type=strategic", "--overrides", json.dumps(overrides),
+            "--command", "--", "sh", "-c", install, "seed", mode,
+            f"http://{release.POLARIS}:{POLARIS_API_PORT}", release.POLARIS_REALM,
+            env["S3_ENDPOINT"], env["S3_REGION"], env["POLARIS_WAREHOUSE_BUCKET"]]
+
+
+def db_counts_command(env, image, database, name):
+    """The pod that runs db_counts.sh (on stdin) as Polaris against polaris-pg directly."""
+    creds = [{"name": var, "valueFrom": {"secretKeyRef": {"name": release.POLARIS_DB_SECRET,
+                                                          "key": key}}}
+             for var, key in (("PGUSER", "username"), ("PGPASSWORD", "password"))]
+    overrides = {"spec": {"containers": [{"name": name, "image": image, "env": creds,
+                                          "stdin": True, "stdinOnce": True}]}}
+    return ["kubectl", "--context", CONTEXT, "-n", env["NS_CATALOG_POLARIS"], "run", name,
+            CHECK_POD_LABEL, f"--image={image}", "--restart=Never", "--rm", "-i", "--quiet",
+            "--pod-running-timeout=3m", "--override-type=strategic",
+            "--overrides", json.dumps(overrides),
+            "--command", "--", "sh", "-s", "--", f"{release.POLARIS_PG}-rw", database]
+
+
+def parse_counts(text):
+    """db_counts.sh's lines: each table's rows and the schema version."""
+    counts, version = {}, None
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) == 3 and parts[0] == "table":
+            counts[parts[1]] = int(parts[2])
+        elif len(parts) == 2 and parts[0] == "version":
+            version = int(parts[1])
+    return {"counts": counts, "version": version}
+
+
+def db_problems(before, after):
+    """(problems, notes): a table of polaris_schema with fewer rows than recorded fails; the
+    schema version is reported, a change not failed by itself (ADR-051 §3)."""
+    problems = []
+    for table, rows in before["counts"].items():
+        now = after["counts"].get(table)
+        if now is None:
+            problems.append(f"polaris_schema.{table}: gone, {rows} rows recorded before the "
+                            "upgrade")
+        elif now < rows:
+            problems.append(f"polaris_schema.{table}: {now} rows, {rows} recorded before the "
+                            "upgrade")
+    version = f"Schema version: {before['version']} before the upgrade, {after['version']} after"
+    notes = [f"polaris_schema: {len(before['counts'])} tables, "
+             f"{sum(before['counts'].values())} rows before the upgrade, "
+             f"{sum(after['counts'].values())} after.",
+             version + ("." if before["version"] == after["version"] else
+                        ": a change is reported, not failed (ADR-051 §3).")]
+    return problems, notes
+
+
+def _seed_pod_files():
+    files = {}
+    for name, path in (("seed.py", os.path.join(HERE, "seed.py")),
+                       ("smoke.py", os.path.join(HERE, "iceberg", "smoke.py")),
+                       ("requirements.txt", os.path.join(HERE, "iceberg", "requirements.txt"))):
+        with open(path, encoding="utf-8") as f:
+            files[name] = f.read()
+    return files
+
+
+def _apply_seed_configmap(env):
+    apply = ["kubectl", "--context", CONTEXT, "-n", env["NS_CATALOG_POLARIS"], "apply",
+             "--server-side", "--field-manager=gate", "-f", "-"]
+    print("+ " + " ".join(apply) + "  (the ConfigMap migration-seed on stdin)", flush=True)
+    subprocess.run(apply, input=json.dumps(seed_configmap(env, _seed_pod_files())), text=True,
+                   check=True)
+
+
+def _db_counts(env, name):
+    with open(os.path.join(HERE, "db_counts.sh"), encoding="utf-8") as f:
+        script = f.read()
+    pg = polaris_pg_values()
+    return parse_counts(output(db_counts_command(env, pg["image"], pg["database"], name),
+                               script))
+
+
+def seed_gate(env, pins, path=SEED_RECORD):
+    """`seed`: see the module's docstring. Returns (problems, notes)."""
+    pid = os.getpid()
+    _apply_seed_configmap(env)
+    done = subprocess.run(seed_pod_command(env, smoke_python_image(pins), f"seed-{pid}", "seed"),
+                          capture_output=True, text=True, check=False)
+    for line in done.stdout.splitlines():
+        if not line.startswith(seed.RECORD_PREFIX):
+            print(line, flush=True)
+    print(done.stderr, end="", file=sys.stderr, flush=True)
+    if done.returncode:
+        return ["the seed failed: see its lines above"], []
+    record = seed.read_record(done.stdout)
+    if record is None:
+        return ["the seed wrote no record"], []
+    db = _db_counts(env, f"db-counts-{pid}")
+    with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w",
+              encoding="utf-8") as f:
+        json.dump({"api": record, "db": db}, f)
+    return [], [f"Seeded through the last release: {len(record['objects'])} objects recorded, "
+                f"{len(db['counts'])} tables of polaris_schema counted, schema version "
+                f"{db['version']} (ADR-051 §2)."]
+
+
+def check_migration(env, pins, path=SEED_RECORD):
+    """`check-migration`: see the module's docstring. Returns (problems, notes)."""
+    if not os.path.exists(path):
+        return [], ["Nothing was seeded: a fresh install, nothing to check (ADR-051 §3)."]
+    with open(path, encoding="utf-8") as f:
+        kept = json.load(f)
+    pid = os.getpid()
+    _apply_seed_configmap(env)
+    problems = []
+    if subprocess.run(seed_pod_command(env, smoke_python_image(pins), f"check-migration-{pid}",
+                                       "check"),
+                      input=json.dumps(kept["api"]), text=True, check=False).returncode:
+        problems.append("the seeded objects did not all read back: see the lines above")
+    more_problems, notes = db_problems(kept["db"], _db_counts(env, f"db-counts-{pid}"))
+    return problems + more_problems, notes
 
 
 # The restore the smoke gate proves (ADR-043 §4): its Cluster, sized for the gate only.
@@ -1754,25 +1952,32 @@ def check_logs(env, pins):
                          listings[1], records)
 
 
+def up(pins, kind_config=KIND_CONFIG):
+    """`up`: see the module's docstring. The failover driver passes its own `kind_config`
+    (ADR-047 §3)."""
+    namespace = os.environ.get("NS_CNPG_SYSTEM") or "cnpg-system"
+    chart = pins["cnpg_chart"]
+    with tempfile.TemporaryDirectory() as d:
+        chart_path = os.path.join(d, os.path.basename(chart["url"]))
+        with open(chart_path, "wb") as f:
+            f.write(fetch(chart["url"], chart["sha256"]))
+        manifests = {name: fetch(pin["url"], pin["sha256"]).decode("utf-8")
+                     for name, pin in pins["manifests"].items()}
+        plugin_manifest(manifests["barman_cloud_plugin"], namespace)
+        os.makedirs(SHARED_HOST_DIR, exist_ok=True)
+        os.chmod(SHARED_HOST_DIR, 0o777)
+        for command, stdin in up_commands(pins, chart_path, namespace, manifests,
+                                          kind_config):
+            run(command, stdin)
+
+
 def main(argv):
     pins = load_pins()
     if len(argv) >= 3 and argv[1] == "tools":
         tools(pins, argv[2], argv[3:] or TOOLS)
         return 0
     if len(argv) == 2 and argv[1] == "up":
-        namespace = os.environ.get("NS_CNPG_SYSTEM") or "cnpg-system"
-        chart = pins["cnpg_chart"]
-        with tempfile.TemporaryDirectory() as d:
-            chart_path = os.path.join(d, os.path.basename(chart["url"]))
-            with open(chart_path, "wb") as f:
-                f.write(fetch(chart["url"], chart["sha256"]))
-            manifests = {name: fetch(pin["url"], pin["sha256"]).decode("utf-8")
-                         for name, pin in pins["manifests"].items()}
-            plugin_manifest(manifests["barman_cloud_plugin"], namespace)
-            os.makedirs(SHARED_HOST_DIR, exist_ok=True)
-            os.chmod(SHARED_HOST_DIR, 0o777)
-            for command, stdin in up_commands(pins, chart_path, namespace, manifests):
-                run(command, stdin)
+        up(pins)
         return 0
     if argv[1:] in (["secrets"], ["secrets", "--direct"]):
         with open(os.path.join(ROOT, ".env.template"), encoding="utf-8") as f:
@@ -1934,6 +2139,12 @@ def main(argv):
         return 1 if problems else 0
     if argv[1:] == ["check-metrics"]:
         problems, notes = check_metrics(release.load_env(ROOT, os.environ), pins)
+        for line in notes + problems:
+            print(line, flush=True)
+        return 1 if problems else 0
+    if argv[1:] in (["seed"], ["check-migration"]):
+        step = seed_gate if argv[1] == "seed" else check_migration
+        problems, notes = step(release.load_env(ROOT, os.environ), pins)
         for line in notes + problems:
             print(line, flush=True)
         return 1 if problems else 0

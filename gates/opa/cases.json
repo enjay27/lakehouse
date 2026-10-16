@@ -993,6 +993,466 @@
           "request_id": "00000000-0000-0000-0000-000000000000"
         }
       }
+    },
+    {
+      "name": "gate_seed creates a table in gate_seed_catalog",
+      "allow": true,
+      "input": {
+        "actor": {
+          "principal": "gate_seed",
+          "roles": [
+            "seed_writer"
+          ]
+        },
+        "action": "CREATE_TABLE_DIRECT",
+        "resource": {
+          "targets": [
+            {
+              "type": "NAMESPACE",
+              "name": "inner",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                },
+                {
+                  "type": "CATALOG",
+                  "name": "gate_seed_catalog",
+                  "parents": []
+                },
+                {
+                  "type": "NAMESPACE",
+                  "name": "seed",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "gate_seed loads a table in gate_seed_catalog",
+      "allow": true,
+      "input": {
+        "actor": {
+          "principal": "gate_seed",
+          "roles": [
+            "seed_writer"
+          ]
+        },
+        "action": "LOAD_TABLE",
+        "resource": {
+          "targets": [
+            {
+              "type": "TABLE_LIKE",
+              "name": "events",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                },
+                {
+                  "type": "CATALOG",
+                  "name": "gate_seed_catalog",
+                  "parents": []
+                },
+                {
+                  "type": "NAMESPACE",
+                  "name": "seed",
+                  "parents": []
+                },
+                {
+                  "type": "NAMESPACE",
+                  "name": "inner",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "gate_seed adds a snapshot to a table in gate_seed_catalog",
+      "allow": true,
+      "input": {
+        "actor": {
+          "principal": "gate_seed",
+          "roles": [
+            "seed_writer"
+          ]
+        },
+        "action": "ADD_TABLE_SNAPSHOT",
+        "resource": {
+          "targets": [
+            {
+              "type": "TABLE_LIKE",
+              "name": "events",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                },
+                {
+                  "type": "CATALOG",
+                  "name": "gate_seed_catalog",
+                  "parents": []
+                },
+                {
+                  "type": "NAMESPACE",
+                  "name": "seed",
+                  "parents": []
+                },
+                {
+                  "type": "NAMESPACE",
+                  "name": "inner",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "gate_seed moves a table's snapshot ref in gate_seed_catalog",
+      "allow": true,
+      "input": {
+        "actor": {
+          "principal": "gate_seed",
+          "roles": [
+            "seed_writer"
+          ]
+        },
+        "action": "SET_TABLE_SNAPSHOT_REF",
+        "resource": {
+          "targets": [
+            {
+              "type": "TABLE_LIKE",
+              "name": "events",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                },
+                {
+                  "type": "CATALOG",
+                  "name": "gate_seed_catalog",
+                  "parents": []
+                },
+                {
+                  "type": "NAMESPACE",
+                  "name": "seed",
+                  "parents": []
+                },
+                {
+                  "type": "NAMESPACE",
+                  "name": "inner",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "gate_seed adds a schema to a table in gate_seed_catalog",
+      "allow": true,
+      "input": {
+        "actor": {
+          "principal": "gate_seed",
+          "roles": [
+            "seed_writer"
+          ]
+        },
+        "action": "ADD_TABLE_SCHEMA",
+        "resource": {
+          "targets": [
+            {
+              "type": "TABLE_LIKE",
+              "name": "events",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                },
+                {
+                  "type": "CATALOG",
+                  "name": "gate_seed_catalog",
+                  "parents": []
+                },
+                {
+                  "type": "NAMESPACE",
+                  "name": "seed",
+                  "parents": []
+                },
+                {
+                  "type": "NAMESPACE",
+                  "name": "inner",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "gate_seed sets a table's current schema in gate_seed_catalog",
+      "allow": true,
+      "input": {
+        "actor": {
+          "principal": "gate_seed",
+          "roles": [
+            "seed_writer"
+          ]
+        },
+        "action": "SET_TABLE_CURRENT_SCHEMA",
+        "resource": {
+          "targets": [
+            {
+              "type": "TABLE_LIKE",
+              "name": "events",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                },
+                {
+                  "type": "CATALOG",
+                  "name": "gate_seed_catalog",
+                  "parents": []
+                },
+                {
+                  "type": "NAMESPACE",
+                  "name": "seed",
+                  "parents": []
+                },
+                {
+                  "type": "NAMESPACE",
+                  "name": "inner",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "gate_seed creates a view in gate_seed_catalog",
+      "allow": true,
+      "input": {
+        "actor": {
+          "principal": "gate_seed",
+          "roles": [
+            "seed_writer"
+          ]
+        },
+        "action": "CREATE_VIEW",
+        "resource": {
+          "targets": [
+            {
+              "type": "NAMESPACE",
+              "name": "inner",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                },
+                {
+                  "type": "CATALOG",
+                  "name": "gate_seed_catalog",
+                  "parents": []
+                },
+                {
+                  "type": "NAMESPACE",
+                  "name": "seed",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "gate_seed loads a table in another catalog",
+      "allow": false,
+      "input": {
+        "actor": {
+          "principal": "gate_seed",
+          "roles": [
+            "seed_writer"
+          ]
+        },
+        "action": "LOAD_TABLE",
+        "resource": {
+          "targets": [
+            {
+              "type": "TABLE_LIKE",
+              "name": "events",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                },
+                {
+                  "type": "CATALOG",
+                  "name": "gate_catalog",
+                  "parents": []
+                },
+                {
+                  "type": "NAMESPACE",
+                  "name": "seed",
+                  "parents": []
+                },
+                {
+                  "type": "NAMESPACE",
+                  "name": "inner",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "gate_seed drops a table in gate_seed_catalog",
+      "allow": false,
+      "input": {
+        "actor": {
+          "principal": "gate_seed",
+          "roles": [
+            "seed_writer"
+          ]
+        },
+        "action": "DROP_TABLE_WITH_PURGE",
+        "resource": {
+          "targets": [
+            {
+              "type": "TABLE_LIKE",
+              "name": "events",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                },
+                {
+                  "type": "CATALOG",
+                  "name": "gate_seed_catalog",
+                  "parents": []
+                },
+                {
+                  "type": "NAMESPACE",
+                  "name": "seed",
+                  "parents": []
+                },
+                {
+                  "type": "NAMESPACE",
+                  "name": "inner",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "gate_seed creates a namespace in gate_seed_catalog",
+      "allow": false,
+      "input": {
+        "actor": {
+          "principal": "gate_seed",
+          "roles": [
+            "seed_writer"
+          ]
+        },
+        "action": "CREATE_NAMESPACE",
+        "resource": {
+          "targets": [
+            {
+              "type": "CATALOG",
+              "name": "gate_seed_catalog",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "gate_seed creates a catalog",
+      "allow": false,
+      "input": {
+        "actor": {
+          "principal": "gate_seed",
+          "roles": [
+            "seed_writer"
+          ]
+        },
+        "action": "CREATE_CATALOG",
+        "resource": {
+          "targets": [
+            {
+              "type": "ROOT",
+              "name": "root_container",
+              "parents": []
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
     }
   ]
 }

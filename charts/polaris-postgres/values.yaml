@@ -13,6 +13,23 @@ image: ghcr.io/cloudnative-pg/postgresql:16.15-202610050823-minimal-trixie@sha25
 # needs as many schedulable nodes as instances. CNPG's default is `preferred`.
 podAntiAffinityType: required
 
+# Seconds a stopping instance lets open sessions finish (PostgreSQL's smart shutdown) before
+# a fast one, which rolls open transactions back; committed writes are kept either way. While
+# it waits it refuses new connections, so a deleted primary is an outage for this long. 0 goes
+# straight to a fast shutdown: failover.yml's C0 under S1 took ~185 s with CNPG's default of
+# 180 and C1 8.4 s with 0 (#31). A tuning value (ADR-047 §8).
+smartShutdownTimeout: 0
+
+# Synchronous replication (ADR-056): a commit returns once `number` of the standbys have it,
+# whichever answer first (CNPG's `method: any`). `required`: commits wait while fewer standbys
+# are healthy, so writes stop rather than lose a confirmed one; `preferred` would go on without
+# them. Rendered only with 3 or more instances: with one standby, its restart would stop every
+# write, so 1 or 2 instances replicate asynchronously. failover.yml's C1 lost no confirmed write
+# with these, and C0 lost 25 and 29 without (#31). Tuning values (ADR-000 rule 11).
+synchronous:
+  number: 1
+  dataDurability: required
+
 storage:
   size: 10Gi
   # Empty: the cluster's default StorageClass.

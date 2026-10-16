@@ -81,10 +81,22 @@
       "source": "Docker Hub tag API digest and docker pull's RepoDigests agree, read 2026-10-11; 3.6.0 published 2026-05-15 (ADR-040)"
     }
   },
+  "failover": {
+    "jdk_image": {
+      "image": "eclipse-temurin:21.0.12_8-jdk-noble@sha256:4d271cd5e0624598cf563342f47281b09cb364bc13acbbd7251f49f83470018d",
+      "source": "Docker Hub tag API digest and docker pull's RepoDigests agree, read 2026-10-13; 21.0.12_8 published 2026-09-18, 21.0.12.1_1 under two weeks old; Java 21 as Polaris 1.6.0's image (ADR-047 \u00a75)"
+    },
+    "pgjdbc": {
+      "version": "42.7.11",
+      "url": "https://repo1.maven.org/maven2/org/postgresql/postgresql/42.7.11/postgresql-42.7.11.jar",
+      "sha256": "1981b31d3993c58702783c1cddf10a34e48c1f413d70ff1cb6def0a143484647",
+      "source": "the version Polaris 1.6.0's image ships (/deployments/lib/main); the jar's sha256 equals that copy's, and its sha1 Maven Central's, read 2026-10-13 (ADR-047 \u00a75)"
+    }
+  },
   "load_images": {
     "k6": {
       "image": "grafana/k6:2.3.0@sha256:9c2dee7f8ed74d317e4027c06a10f169b625638189de8d4555d0b3486a5aeb34",
-      "source": "Docker Hub index digest (docker-content-digest, recomputed), read 2026-10-14; 2.3.0 pushed 2026-09-21, the newest release at least two weeks old (1.8.2 of 2026-10-12 patches the 1.x line); Alpine 3.24.1 base with BusyBox's sleep and wget, which the driver uses (ADR-053 §2)"
+      "source": "Docker Hub index digest (docker-content-digest, recomputed), read 2026-10-14; 2.3.0 pushed 2026-09-21, the newest release at least two weeks old (1.8.2 of 2026-10-12 patches the 1.x line); Alpine 3.24.1 base with BusyBox's sleep and wget, which the driver uses (ADR-053 \u00a72)"
     }
   }
 }

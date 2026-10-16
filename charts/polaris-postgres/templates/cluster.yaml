@@ -15,6 +15,15 @@ spec:
     enablePodAntiAffinity: true
     podAntiAffinityType: {{ .Values.podAntiAffinityType }}
     topologyKey: kubernetes.io/hostname
+  smartShutdownTimeout: {{ .Values.smartShutdownTimeout }}
+  {{- if ge (int .Values.instances) 3 }}
+  # Commits wait for any one standby (ADR-056); with fewer instances, asynchronous.
+  postgresql:
+    synchronous:
+      method: any
+      number: {{ .Values.synchronous.number }}
+      dataDurability: {{ .Values.synchronous.dataDurability }}
+  {{- end }}
   bootstrap:
     initdb:
       database: {{ .Values.database }}

@@ -1,0 +1,160 @@
+# The failover measurement (ADR-047): runs on a push to gate/failover/<task> and by hand. A
+# measurement, not a gate: gate-check never requires it (ADR-039), and auto-merge.yml does not
+# list it. One job per setup, each on its own kind cluster built as smoke builds it (ADR-017)
+# with everything but polaris-pg's instances pinned to the control plane; the CNPG setups C0,
+# C1 and C2 (C3a, C3b and C4 come with the target's PG-HA and Pgpool versions, #31), and C1
+# under S3 on a cluster whose node grace period is lowered, which says what the cluster's own
+# setting would give. Each failure (S1 the primary pod deleted, S2 its postmaster killed, S3
+# its node paused) runs `runs` times with a pgjdbc probe writing every 100 ms
+# (gates/failover/). Each run's record is an artifact; the table goes to the job summary.
+# Results are committed to docs/measurements/ only once C3a reproduces the target (§7).
+# A push's gate branch is deleted when the run ends, pass, fail or cancelled (ADR-049).
+name: Failover
+
+on:
+  push:
+    branches: ["gate/failover/**"]
+  workflow_dispatch:
+    inputs:
+      setups:
+        description: Setups, comma-separated (empty for all of C0, C1, C2).
+        type: string
+        default: ""
+      scenarios:
+        description: Failures, comma-separated (empty for all of S1, S2, S3).
+        type: string
+        default: ""
+      runs:
+        description: Runs of each failure.
+        type: number
+        default: 5
+      node_down:
+        description: Seconds S3 keeps the node paused.
+        type: number
+        default: 120
+      grace_job:
+        description: Also run C1 under S3 with the node grace period lowered.
+        type: boolean
+        default: true
+
+permissions: {}
+
+concurrency:
+  group: failover-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: The jobs, from the inputs
+        id: matrix
+        env:
+          SETUPS: ${{ inputs.setups }}
+          SCENARIOS: ${{ inputs.scenarios }}
+          GRACE_JOB: ${{ github.event_name == 'push' || inputs.grace_job }}
+        run: |
+          set -euo pipefail
+          matrix=$(python3 gates/failover/driver.py matrix --setups "$SETUPS" --scenarios "$SCENARIOS" --grace-job "$GRACE_JOB")
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "$matrix"
+
+  measure:
+    name: ${{ matrix.name }}
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      KUBE_CONTEXT: kind-lakehouse-gate
+      NS_CNPG_SYSTEM: cnpg-system
+      NS_CATALOG_POLARIS: catalog-polaris
+      NS_STANDINS: standins
+      NAME: ${{ matrix.name }}
+      SETUP: ${{ matrix.setup }}
+      GRACE: ${{ matrix.grace }}
+      FAILURES: ${{ matrix.scenarios }}
+      RUNS: ${{ inputs.runs || 5 }}
+      NODE_DOWN: ${{ inputs.node_down || 120 }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Tools at pinned versions
+        run: |
+          python3 gates/gate.py tools "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: kind and the CNPG operator, everything pinned to the control plane (ADR-047 §3)
+        run: |
+          set -euo pipefail
+          if [ -n "$GRACE" ]; then
+            python3 gates/failover/driver.py up --grace "$GRACE"
+          else
+            python3 gates/failover/driver.py up
+          fi
+
+      - name: The gate's Secrets (ADR-006)
+        run: python3 gates/gate.py secrets
+
+      - name: The stand-ins (gate only, ADR-031)
+        run: python3 gates/gate.py standins
+
+      - name: polaris-pg as a release installs it, the setup, the probe's image (ADR-047 §2, §5)
+        run: python3 gates/failover/driver.py install "$SETUP"
+
+      - name: Each failure, with the probe writing every 100 ms (ADR-047 §3, §4)
+        run: |
+          set -euo pipefail
+          python3 gates/failover/driver.py run "$SETUP" --out "$RUNNER_TEMP/failover" \
+            --scenarios "$FAILURES" --runs "$RUNS" --node-down "$NODE_DOWN" | tee "$RUNNER_TEMP/run.log"
+          {
+            echo "### $NAME: $RUNS runs of $FAILURES, S3's node down ${NODE_DOWN} s"
+            echo
+            python3 gates/failover/driver.py report "$RUNNER_TEMP/failover"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Each run's record
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: failover-${{ matrix.name }}
+          path: ${{ runner.temp }}/failover
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: State of the cluster on failure
+        if: failure()
+        run: |
+          docker ps -a || true
+          kubectl --context "$KUBE_CONTEXT" get nodes -o wide || true
+          kubectl --context "$KUBE_CONTEXT" get pods -A -o wide || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_POLARIS" get cluster,pooler,pods,pvc -o wide || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_POLARIS" get cluster/polaris-pg -o jsonpath='{.status}' || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_POLARIS" get events --sort-by=.lastTimestamp || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_CNPG_SYSTEM" logs -l app.kubernetes.io/name=cloudnative-pg --tail=80 || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_POLARIS" logs -l cnpg.io/cluster=polaris-pg --tail=40 --prefix || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_POLARIS" logs -l lakehouse-gate/check=true --tail=40 --prefix || true
+
+  delete-gate-branch:
+    # The run's gate branch goes when the run ends, pass, fail or cancelled (ADR-049).
+    needs: [plan, measure]
+    if: always() && startsWith(github.ref, 'refs/heads/gate/')
+    permissions:
+      contents: write
+    uses: ./.github/workflows/delete-gate-branch.yml

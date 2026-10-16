@@ -152,6 +152,13 @@ class Commands(unittest.TestCase):
         self.assertEqual(create[create.index("--image") + 1], self.PINS["node_image"]["image"])
         self.assertTrue(create[create.index("--config") + 1].endswith("gates/kind.yaml"))
 
+    def test_up_takes_another_kind_config_for_the_failover_measurement(self):
+        steps = gate.up_commands(self.PINS, "/tmp/chart.tgz", "cnpg-system", self.MANIFESTS,
+                                 kind_config="/tmp/failover-kind.yaml")
+        create = steps[0][0]
+        self.assertEqual(create[create.index("--config") + 1], "/tmp/failover-kind.yaml")
+        self.assertEqual(steps[1:], self.commands()[1:])
+
     def test_up_installs_cnpg_from_the_chart_archive_and_waits(self):
         steps = self.commands()
         helm, stdin = steps[self.helm_index(steps)]
@@ -250,8 +257,10 @@ class Install(unittest.TestCase):
     # ADR-048 §5: the gate-only allow policies, before the first release that installs for
     # real: the last release has network policies of its own since platform-2026.10.14.
     GATE_POLICIES = ["python3", os.path.join(HERE, "gate.py"), "gate-policies"]
+    # ADR-051 §2: the seed, between the last release's install and this commit's.
+    SEED = ["python3", os.path.join(HERE, "gate.py"), "seed"]
 
-    def test_with_a_release_installs_it_from_its_tag_then_this_commit(self):
+    def test_with_a_release_installs_it_from_its_tag_seeds_it_then_this_commit(self):
         commands, summary = gate.install_plan("platform-2026.10.10", "/tmp/prev", fresh=False)
         self.assertEqual(commands, [
             self.GATE_POLICIES,
@@ -259,6 +268,7 @@ class Install(unittest.TestCase):
              "platform-2026.10.10"],
             ["cp", "-p", os.path.join(self.ROOT, ".env"), "/tmp/prev/.env"],
             ["python3", "/tmp/prev/install/release.py"],
+            self.SEED,
             self.THIS,
         ])
         self.assertIn("platform-2026.10.10", summary)
@@ -282,6 +292,16 @@ class Install(unittest.TestCase):
         commands, summary = gate.install_plan("platform-2026.10.10", "/tmp/prev", fresh=True)
         self.assertEqual(commands, [self.GATE_POLICIES, self.THIS])
         self.assertIn("Fresh install", summary)
+
+    def test_only_an_upgrade_that_installs_for_real_seeds(self):
+        # ADR-051 §4: the dry-run seeds nothing; a fresh install has nothing to upgrade.
+        for previous, fresh, dry_run in ((None, False, False), ("platform-2026.10.10", True,
+                                                                False),
+                                         ("platform-2026.10.10", False, True),
+                                         (None, False, True)):
+            with self.subTest(previous=previous, fresh=fresh, dry_run=dry_run):
+                commands, _ = gate.install_plan(previous, "/tmp/prev", fresh, dry_run)
+                self.assertNotIn(self.SEED, commands)
 
     def test_dry_run_installs_the_release_then_dry_runs_this_commit_over_it(self):
         commands, summary = gate.install_plan("platform-2026.10.10", "/tmp/prev", fresh=False,
@@ -565,6 +585,7 @@ class InstallTimeline(unittest.TestCase):
                 (["python3", this, "--dry-run"], "release.py (this commit) --dry-run"),
                 (["python3", os.path.join(gate.HERE, "gate.py"), "gate-policies"],
                  "gate.py gate-policies"),
+                (["python3", os.path.join(gate.HERE, "gate.py"), "seed"], "gate.py seed"),
                 (["git", "-C", gate.ROOT, "worktree", "add"], "git worktree add")):
             with self.subTest(label=label):
                 self.assertEqual(gate.command_label(command), label)
@@ -785,13 +806,19 @@ class GateEnv(unittest.TestCase):
 
 
 IMAGE = "ghcr.io/cloudnative-pg/postgresql:16.15-1-minimal-trixie@sha256:" + "a" * 64
-VALUES = {"instances": 3, "image": IMAGE, "podAntiAffinityType": "required"}
+SYNC = {"number": 1, "dataDurability": "required"}
+VALUES = {"instances": 3, "image": IMAGE, "podAntiAffinityType": "required",
+          "smartShutdownTimeout": 0, "synchronous": SYNC}
+# What CNPG keeps of the chart's block, with a field it fills in itself.
+RUNNING_SYNC = {"method": "any", **SYNC, "maxStandbyNamesFromCluster": 2}
 
 
-def cluster(instances=3, image=IMAGE, ready=3, anti="required"):
-    return {"spec": {"instances": instances, "imageName": image,
-                     "affinity": {"podAntiAffinityType": anti}},
-            "status": {"readyInstances": ready}}
+def cluster(instances=3, image=IMAGE, ready=3, anti="required", shutdown=0, sync=RUNNING_SYNC):
+    spec = {"instances": instances, "imageName": image, "smartShutdownTimeout": shutdown,
+            "affinity": {"podAntiAffinityType": anti}}
+    if sync is not None:
+        spec["postgresql"] = {"synchronous": sync}
+    return {"spec": spec, "status": {"readyInstances": ready}}
 
 
 def pods(*nodes):
@@ -806,6 +833,7 @@ class PolarisPg(unittest.TestCase):
         problems, notes = gate.polaris_pg_problems(VALUES, cluster(), pods("a", "b", "c"))
         self.assertEqual(problems, [])
         self.assertIn("3 nodes", "\n".join(notes))
+        self.assertIn("synchronous any 1 required", "\n".join(notes))
 
     def test_a_different_instance_count_is_found(self):
         problems, _ = gate.polaris_pg_problems(VALUES, cluster(instances=1, ready=1), pods("a"))
@@ -824,6 +852,30 @@ class PolarisPg(unittest.TestCase):
         problems, _ = gate.polaris_pg_problems(VALUES, cluster(anti="preferred"),
                                                pods("a", "b", "c"))
         self.assertIn("podAntiAffinityType", "\n".join(problems))
+
+    def test_a_different_shutdown_timeout_is_found(self):
+        problems, _ = gate.polaris_pg_problems(VALUES, cluster(shutdown=180), pods("a", "b", "c"))
+        self.assertIn("smartShutdownTimeout", "\n".join(problems))
+
+    def test_asynchronous_replication_with_three_instances_is_found(self):
+        # ADR-056 §1.
+        problems, _ = gate.polaris_pg_problems(VALUES, cluster(sync=None), pods("a", "b", "c"))
+        self.assertIn("synchronous", "\n".join(problems))
+
+    def test_a_different_durability_is_found(self):
+        running = {**RUNNING_SYNC, "dataDurability": "preferred"}
+        problems, _ = gate.polaris_pg_problems(VALUES, cluster(sync=running), pods("a", "b", "c"))
+        self.assertIn("synchronous", "\n".join(problems))
+
+    def test_one_instance_runs_asynchronously(self):
+        # ADR-056 §3.
+        values = {**VALUES, "instances": 1}
+        problems, notes = gate.polaris_pg_problems(values, cluster(instances=1, ready=1, sync=None),
+                                                   pods("a"))
+        self.assertEqual(problems, [])
+        self.assertIn("asynchronous", "\n".join(notes))
+        problems, _ = gate.polaris_pg_problems(values, cluster(instances=1, ready=1), pods("a"))
+        self.assertIn("synchronous", "\n".join(problems))
 
     def test_two_instances_on_one_node_are_found(self):
         problems, _ = gate.polaris_pg_problems(VALUES, cluster(), pods("a", "a", "c"))
@@ -962,7 +1014,8 @@ POLARIS_VALUES = {
         "polaris.authorization.type": "opa",
         "polaris.authorization.opa.policy-uri": POLARIS_ENV["POLARIS_OPA_URL"],
         "quarkus.datasource.jdbc.url":
-            "jdbc:postgresql://recorder.standins.svc:5432/polaris?sslmode=require"},
+            "jdbc:postgresql://recorder.standins.svc:5432/polaris?sslmode=require",
+        "quarkus.datasource.jdbc.additional-jdbc-properties.socketTimeout": "10"},
 }
 
 
@@ -972,7 +1025,8 @@ def polaris_properties(**changes):
              "polaris.authorization.opa.policy-uri": POLARIS_ENV["POLARIS_OPA_URL"],
              "quarkus.datasource.jdbc.url":
                  "jdbc:postgresql://recorder.standins.svc:5432/polaris?sslmode=require",
-             "polaris.authentication.token-broker.type": "symmetric-key", **changes}
+             "polaris.authentication.token-broker.type": "symmetric-key",
+             "quarkus.datasource.jdbc.additional-jdbc-properties.socketTimeout": "10", **changes}
     text = "\n".join(f"{k}={v}" for k, v in props.items())
     return {"data": {"application.properties": text}}
 
@@ -1010,6 +1064,7 @@ class Polaris(unittest.TestCase):
         self.assertEqual(problems, [])
         text = "\n".join(notes)
         for part in ("2 replicas ready on 2 nodes (a, b)", POLARIS_IMAGE, "relational-jdbc",
+                     "driver socketTimeout=10",
                      "symmetric-key", "opa", POLARIS_ENV["POLARIS_OPA_URL"],
                      "S3 key from Secret polaris-s3"):
             self.assertIn(part, text)
@@ -1036,7 +1091,9 @@ class Polaris(unittest.TestCase):
                            ("polaris.authorization.type", "internal"),
                            ("polaris.authorization.opa.policy-uri", "http://elsewhere/v1"),
                            ("quarkus.datasource.jdbc.url", "jdbc:postgresql://x:5432/polaris"),
-                           ("polaris.authentication.token-broker.type", "rsa-key-pair")):
+                           ("polaris.authentication.token-broker.type", "rsa-key-pair"),
+                           ("quarkus.datasource.jdbc.additional-jdbc-properties.socketTimeout",
+                            "0")):
             with self.subTest(key=key):
                 problems, _ = self.problems(configmap=polaris_properties(**{key: other}))
                 self.assertIn(key, "\n".join(problems))
@@ -1210,6 +1267,165 @@ class CheckIceberg(unittest.TestCase):
     def test_the_python_image_is_the_pinned_one_the_recorder_runs_on(self):
         self.assertEqual(gate.smoke_python_image(gate.load_pins()),
                          gate.load_pins()["standin_images"]["recorder"]["image"])
+
+
+class Migration(unittest.TestCase):
+    """ADR-051 §2, §3: the seed before the upgrade and check-migration after it."""
+
+    def pod(self, mode):
+        return gate.seed_pod_command(STANDIN_ENV, PYTHON, f"seed-{mode}-1", mode)
+
+    def test_the_configmap_holds_the_seed_smoke_py_and_the_requirements(self):
+        files = {"seed.py": "# seed\n", "smoke.py": "# smoke\n", "requirements.txt": "x\n"}
+        manifest = gate.seed_configmap(STANDIN_ENV, files)
+        self.assertEqual((manifest["kind"], manifest["metadata"]),
+                         ("ConfigMap", {"name": "migration-seed", "namespace": "catalog-polaris"}))
+        self.assertEqual(manifest["data"], files)
+
+    def test_both_pods_run_seed_py_on_the_pinned_python_with_credentials_from_secrets(self):
+        for mode in ("seed", "check"):
+            with self.subTest(mode=mode):
+                argv = self.pod(mode)
+                self.assertEqual(argv[:7], ["kubectl", "--context", gate.CONTEXT, "-n",
+                                            "catalog-polaris", "run", f"seed-{mode}-1"])
+                for flag in ("--rm", "--restart=Never", f"--image={PYTHON}", gate.CHECK_POD_LABEL):
+                    self.assertIn(flag, argv)
+                overrides = json.loads(argv[argv.index("--overrides") + 1])
+                (container,) = overrides["spec"]["containers"]
+                refs = {e["name"]: e["valueFrom"]["secretKeyRef"] for e in container["env"]
+                        if "valueFrom" in e}
+                self.assertEqual(refs, {
+                    "ROOT_CLIENT_ID": {"name": "polaris-root", "key": "clientId"},
+                    "ROOT_CLIENT_SECRET": {"name": "polaris-root", "key": "clientSecret"},
+                    "S3_ACCESS_KEY_ID": {"name": "smoke-s3", "key": "accessKeyId"},
+                    "S3_SECRET_ACCESS_KEY": {"name": "smoke-s3", "key": "secretAccessKey"}})
+                self.assertEqual(overrides["spec"]["volumes"],
+                                 [{"name": "code", "configMap": {"name": "migration-seed"}}])
+                tail = argv[argv.index("--command") + 2:]
+                for part in ("--require-hashes", "--only-binary :all:",
+                             "-r /seed/requirements.txt", "exec python3 /seed/seed.py"):
+                    self.assertIn(part, tail[2])
+                self.assertEqual(tail[3:], ["seed", mode, "http://polaris:8181", "POLARIS",
+                                            STANDIN_ENV["S3_ENDPOINT"], "us-east-1",
+                                            "polaris-warehouse"])
+
+    def test_only_the_check_reads_the_record_on_stdin(self):
+        seed_pod, check_pod = self.pod("seed"), self.pod("check")
+        self.assertIn("--attach", seed_pod)
+        self.assertNotIn("-i", seed_pod)
+        self.assertIn("-i", check_pod)
+        (container,) = json.loads(check_pod[check_pod.index("--overrides") + 1])["spec"][
+            "containers"]
+        self.assertEqual((container["stdin"], container["stdinOnce"]), (True, True))
+
+    def test_the_counts_are_read_as_polaris_from_polaris_pg_directly(self):
+        command = gate.db_counts_command(STANDIN_ENV, PG_IMAGE, "polaris", "db-counts-1")
+        self.assertEqual(command[:7], ["kubectl", "--context", gate.CONTEXT, "-n",
+                                       "catalog-polaris", "run", "db-counts-1"])
+        self.assertIn(gate.CHECK_POD_LABEL, command)
+        # Not through the recorder: the counts are the gate's, not Polaris's traffic.
+        self.assertEqual(command[command.index("--") + 1:],
+                         ["sh", "-s", "--", "polaris-pg-rw", "polaris"])
+        (c,) = json.loads(command[command.index("--overrides") + 1])["spec"]["containers"]
+        self.assertEqual([e["valueFrom"]["secretKeyRef"] for e in c["env"]],
+                         [{"name": "polaris-db", "key": "username"},
+                          {"name": "polaris-db", "key": "password"}])
+
+    def test_the_counts_script_reads_every_table_of_polaris_schema_and_the_version(self):
+        with open(os.path.join(HERE, "db_counts.sh"), encoding="utf-8") as f:
+            script = f.read()
+        self.assertIn("table_schema = 'polaris_schema'", script)
+        self.assertIn("polaris_schema.version", script)
+        self.assertIn("sslmode=require", script)
+
+    def test_counts_and_the_version_parse_from_the_script_s_lines(self):
+        text = "table entities 12\ntable grant_records 30\nversion 4\n"
+        self.assertEqual(gate.parse_counts(text),
+                         {"counts": {"entities": 12, "grant_records": 30}, "version": 4})
+        self.assertEqual(gate.parse_counts("table entities 1\n"),
+                         {"counts": {"entities": 1}, "version": None})
+
+    def test_fewer_rows_or_a_table_gone_fails_and_the_version_is_reported(self):
+        before = {"counts": {"entities": 12, "grant_records": 30, "events": 2}, "version": 4}
+        after = {"counts": {"entities": 13, "grant_records": 29}, "version": 5}
+        problems, notes = gate.db_problems(before, after)
+        self.assertEqual(problems, [
+            "polaris_schema.grant_records: 29 rows, 30 recorded before the upgrade",
+            "polaris_schema.events: gone, 2 rows recorded before the upgrade"])
+        self.assertIn("Schema version: 4 before the upgrade, 5 after: a change is reported, "
+                      "not failed (ADR-051 §3).", notes)
+
+    def test_the_same_or_more_rows_pass(self):
+        before = {"counts": {"entities": 12}, "version": 4}
+        problems, notes = gate.db_problems(before, {"counts": {"entities": 15, "new": 1},
+                                                    "version": 4})
+        self.assertEqual(problems, [])
+        self.assertIn("Schema version: 4 before the upgrade, 4 after.", notes)
+
+    def test_check_migration_without_a_seed_says_so_and_passes(self):
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(gate.subprocess, "run") as run:
+            problems, notes = gate.check_migration(STANDIN_ENV, gate.load_pins(),
+                                                   os.path.join(d, "none.json"))
+        self.assertEqual(problems, [])
+        self.assertEqual(notes, ["Nothing was seeded: a fresh install, nothing to check "
+                                 "(ADR-051 §3)."])
+        run.assert_not_called()
+
+    def test_the_seed_keeps_its_record_and_the_counts_on_the_runner_and_prints_neither(self):
+        record = {"objects": {}, "rows": {}, "principals": {"gate_seed": "id:Secret0123456789"}}
+        answers = {"seed": subprocess.CompletedProcess(
+            [], 0, stdout=f"ok   a\nSEED-RECORD {json.dumps(record)}\n", stderr="")}
+        counts = "table entities 12\nversion 4\n"
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(gate.subprocess, "run",
+                                  side_effect=lambda argv, **kw: answers.get(
+                                      argv[6].split("-")[0] if argv[5:6] == ["run"] else "",
+                                      subprocess.CompletedProcess([], 0, "", ""))), \
+                mock.patch.object(gate, "output", return_value=counts), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            path = os.path.join(d, "seed.json")
+            problems, _ = gate.seed_gate(STANDIN_ENV, gate.load_pins(), path)
+            with open(path, encoding="utf-8") as f:
+                kept = json.load(f)
+        self.assertEqual(problems, [])
+        self.assertEqual(kept, {"api": record, "db": {"counts": {"entities": 12},
+                                                      "version": 4}})
+        self.assertIn("ok   a", out.getvalue())
+        self.assertNotIn("Secret0123456789", out.getvalue())
+
+    def test_a_seed_that_fails_or_writes_no_record_fails(self):
+        for answer in (subprocess.CompletedProcess([], 1, stdout="FAIL x\n", stderr=""),
+                       subprocess.CompletedProcess([], 0, stdout="ok   x\n", stderr="")):
+            with self.subTest(code=answer.returncode), tempfile.TemporaryDirectory() as d, \
+                    mock.patch.object(gate.subprocess, "run", return_value=answer), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                path = os.path.join(d, "seed.json")
+                problems, _ = gate.seed_gate(STANDIN_ENV, gate.load_pins(), path)
+                self.assertTrue(problems)
+                self.assertFalse(os.path.exists(path))
+
+    def test_check_migration_hands_the_record_to_the_pod_and_compares_the_counts(self):
+        record = {"objects": {"/x": {}}, "rows": {}, "principals": {}}
+        kept = {"api": record, "db": {"counts": {"entities": 12}, "version": 4}}
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append((argv, kw))
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(gate.subprocess, "run", side_effect=fake_run), \
+                mock.patch.object(gate, "output", return_value="table entities 11\nversion 4\n"), \
+                contextlib.redirect_stdout(io.StringIO()):
+            path = os.path.join(d, "seed.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(kept, f)
+            problems, notes = gate.check_migration(STANDIN_ENV, gate.load_pins(), path)
+        pod = next(kw for argv, kw in calls if "--overrides" in argv and "-i" in argv)
+        self.assertEqual(json.loads(pod["input"]), record)
+        self.assertEqual(problems,
+                         ["polaris_schema.entities: 11 rows, 12 recorded before the upgrade"])
 
 
 CONSOLE_ENV = {**STANDIN_ENV, "POLARIS_CONSOLE_ENABLED": "true",
