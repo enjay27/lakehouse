@@ -300,9 +300,15 @@ source does not matter for operation. What follows is the list they cover.
   [#170](https://github.com/enjay27/lakehouse/pull/170)
   ([#148](https://github.com/enjay27/lakehouse/issues/148)). Its seed ran on a Linux test
   cluster on 2026-10-16: Polaris 1.6.0 accepts the reused manifest list.
-- Tier D (ADR-053 §7), next: one Polaris replica's capacity on the Linux test server, by hand
-  from a runbook in `docs/runbooks/`, its results in `docs/measurements/`.
-- **Linux:** Tier D, by hand.
+- Tier D (ADR-053 §7): one Polaris replica's capacity on the Linux test server, by hand from
+  `docs/runbooks/stress-capacity.md`, measured on 2026-10-16
+  ([#174](https://github.com/enjay27/lakehouse/issues/174)):
+  `docs/measurements/stress-capacity-2026-10-16.md`. With 4 CPUs and 8 GiB, the knees were
+  40 commits/s, 125 req/s of conditional and of full loads, and 25 req/s of the mixed profile.
+  The read and mixed knees were set by the upstream image's Parallel collector, whose full
+  collections paused up to 0.4 s, while Polaris used under half its CPU. The 2-hour hold at 20
+  req/s answered all 209,149 requests with no heap growth. The sizing for 12,000 req/s waits on
+  that collector's tuning.
 
 ### P7: first release, then upgrades
 

@@ -1,6 +1,8 @@
 # Measure one Polaris replica's capacity on a Linux test server (stress Tier D)
 
-**Status: being proven on a Linux test cluster (#174).**
+**Status: proven on a Linux test cluster (#174):** a three-node kind cluster, Kubernetes
+v1.36.4, CNPG 1.30.1, Polaris 1.6.0, on 2026-10-16. Its measurement is
+`docs/measurements/stress-capacity-2026-10-16.md`.
 
 This runbook measures what one Polaris replica serves (ADR-053 §7, standing under ADR-054). It
 runs Tier A's scenario in a three-node kind cluster that the gate's own scripts build at the
