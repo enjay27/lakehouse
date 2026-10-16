@@ -46,6 +46,11 @@
     }
   },
   "step_seconds": 30,
+  "settle": {
+    "_comment": "Before each ramp and the hold, Polaris's pods must be Ready with no restart for seconds, within timeout_seconds: a ramp's last step can overload Polaris until its liveness probe restarts it, and the next ramp would measure the restart (#174, #179).",
+    "seconds": 60,
+    "timeout_seconds": 900
+  },
   "pass": {
     "_comment": "A step passes when k6 dropped at most 5% of the requests offered, at most 0.1% failed (409s on the hot set not counted) and each kind's p99 is within its cap (ADR-053 §4).",
     "answered_min": 0.95,

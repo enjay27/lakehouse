@@ -179,7 +179,13 @@ for profile in commits queries-conditional queries-full mixed; do
 done
 ```
 
-- Each profile prints one line per step, then `PROFILE: knee N req/s`.
+- **Each ramp first waits for a settled Polaris:** Ready, with no restart for
+  `settle.seconds`. A ramp's last step overloads Polaris on purpose. On the third attempt,
+  on 2026-10-16, that overload made the upstream chart's liveness probe restart Polaris
+  three times (#179). A ramp
+  that started straight after measured the restart, not Polaris.
+- Each profile prints one line per step, then `PROFILE: knee N req/s`. A step in which
+  Polaris or polaris-pg restarted says so at the end of its line. It gives no CPU per request.
 - **`(not reached: the ramp ended first)`:** the profile passed its last step. Raise that
   profile's `max_steps` in `gates/stress/capacity.json`, run that profile's `ramp` again,
   and name the change in the measurement.
@@ -194,24 +200,37 @@ done
 python3 gates/stress/driver.py hold "$OUT"
 ```
 
-- It runs the mixed profile at 80% of its knee for 2 hours.
+- After the same wait for a settled Polaris, it runs the mixed profile at 80% of its knee for
+  2 hours.
 - Every minute it prints Polaris's heap after GC, heap used, GC pauses and worker queue. A
   sample that fails is recorded and the hold goes on.
 
-## 7. Verify and report
+## 7. Verify, report and the timeline
 
 ```sh
 python3 gates/stress/driver.py verify "$OUT"
 python3 gates/stress/driver.py report "$OUT"
+python3 gates/stress/driver.py timeline "$OUT"
 ```
 
 - **verify** fails on a correctness fault only (ADR-054 §2): a failed request at or below a
   knee or in the hold, a lost or duplicated commit, or a restart of Polaris or polaris-pg.
-  It also prints each table's load after the run, for the metadata growth.
+  - A commit the scenario logged as sent, with no outcome after it, counts as unknown: k6
+    cut it short when its step ended.
+  - It also prints each table's load after the run, for the metadata growth.
 - **report** writes `summary.json` and `summary.md` under `OUT`, and prints the summary:
   - the knees and their CPU per request;
   - the sizing for 12,000 req/s;
-  - Polaris's size, and the hold's percentiles, heap and GC.
+  - Polaris's size, and the hold's percentiles, heap and GC;
+  - each step's restarts.
+- **timeline** writes `timeline.json`. It holds the Prometheus stand-in's series for the
+  whole run, every 15 s (ADR-046), and prints one line a minute:
+  - Polaris's CPU, requests per second, mean latency, requests in flight, heap after GC and
+    GC time;
+  - polaris-pg's waiting backends, longest transaction and replication lag.
+
+  It shows what a knee's step cannot: when Polaris saturated, and whether polaris-pg made
+  anything wait. The stand-in keeps a day of data, so run it before rebuilding the cluster.
 
 ## 8. Record
 
@@ -235,6 +254,7 @@ In a PR, from a branch of the measured commit:
   - the deviations: `previous_versions_max` 5, the seed's reused manifest list, the metadata
     growth, and the mixed profile's assumed shares.
 - **`docs/measurements/stress-capacity-<date>.json`** beside it: `OUT/summary.json`.
+- **`docs/measurements/stress-capacity-<date>-timeline.json`**: `OUT/timeline.json`.
 
 Close the run's issue (labelled `cmd:verify-needs-linux`) from that PR. A later run is a new
 file (ADR-003).

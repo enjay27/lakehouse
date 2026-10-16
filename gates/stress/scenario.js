@@ -20,9 +20,11 @@
 //   current snapshot id and the last sequence number out of a 200 with indexOf, then POSTs
 //   add-snapshot and set-snapshot-ref on main with assert-ref-snapshot-id. Ids stay strings:
 //   Iceberg's are 63-bit and JavaScript numbers hold 53. On a 409 it reloads and retries, up
-//   to commit_retries times. Every POST logs `C <outcome> <table> <snapshot id>` to the
-//   console, for the driver's commit accounting: ok (200), conflict (409), unknown (no answer
-//   or 5xx: the commit may have happened), failed (any other answer).
+//   to commit_retries times. Every POST logs `C sent <table> <snapshot id>` to the console
+//   before it goes, and `C <outcome> <table> <snapshot id>` after, for the driver's commit
+//   accounting: ok (200), conflict (409), unknown (no answer or 5xx: the commit may have
+//   happened), failed (any other answer). A `sent` with no outcome after it was cut short when
+//   the run ended, and is unknown too.
 //
 // handleSummary writes /tmp/<NAME>.json: requests by kind and status class, latency by kind,
 // commit outcomes by kind, and the iterations k6 dropped. No credential is in it.
@@ -206,6 +208,7 @@ function commit(kind, headers, table) {
       + `"manifest-list":${JSON.stringify(table.manifest_list)},`
       + `"summary":{"operation":"append"},"schema-id":0}},`
       + `{"action":"set-snapshot-ref","ref-name":"main","type":"branch","snapshot-id":${id}}]}`;
+    console.log(`C sent ${table.name} ${id}`);
     const res = send(kind, 'POST', url, body,
       Object.assign({ 'Content-Type': 'application/json' }, headers), 'none');
     delete cache[table.name];

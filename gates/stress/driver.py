@@ -12,8 +12,11 @@ file it keeps goes under OUT, which stress.yml uploads.
                   the check label, the CPU limit in config.json) and waits until it is ready;
                   records Polaris's replicas, resources and heap maximum.
   ramp PROFILE OUT
-                  runs PROFILE's steps (config.json), one k6 run per step at one rate,
-                  until a step fails. Around each step it reads every node's cAdvisor
+                  first waits until Polaris is Ready with no restart for settle.seconds (a
+                  ramp's last step can overload Polaris until its liveness probe restarts
+                  it, #179); then runs PROFILE's steps (config.json), one k6 run per step at
+                  one rate, until a step fails. Each step records when it ran and any
+                  restart of Polaris or polaris-pg in it. Around each step it reads every node's cAdvisor
                   through the API server (the CPU of k6, OPA, SeaweedFS, Polaris and
                   polaris-pg, and how often the three limited ones were throttled) and
                   Polaris's /q/metrics on 8182 from the k6 pod. A step passes when k6
@@ -22,15 +25,17 @@ file it keeps goes under OUT, which stress.yml uploads.
                   the last step that passed; a knee decided while k6, OPA or SeaweedFS was
                   throttled over the max is that component's, and the profile is not a
                   measurement of Polaris.
-  hold OUT        the mixed profile at 70% of its knee for 10 minutes; skipped, and said so,
-                  when the mixed profile did not run or found no knee. Every sample_seconds
+  hold OUT        after the same wait, the mixed profile at 70% of its knee for 10 minutes;
+                  skipped, and said so, when the mixed profile did not run or found no knee.
+                  Every sample_seconds
                   while it runs, it samples Polaris's heap, heap after GC, GC pauses and
                   worker queue, and each container's CPU and working set.
   verify OUT      fails the run on a correctness fault only (ADR-054 §2): a 5xx or any other
                   failed request, a 409 on the hot set aside, in a step at or below the knee
                   or in the hold (the step past the knee is where the load fails requests, so
                   it is left out); a commit answered 200 missing from its table's snapshots,
-                  a snapshot the scenario never had answered 200 nor left unknown, or one
+                  a snapshot the scenario never had answered 200 nor left unknown (a commit
+                  logged as sent with no outcome, cut short when its step ended, is unknown), or one
                   listed twice (seed.py verify loads every table); a restart or replacement
                   of a Polaris or polaris-pg pod. It also records each table's load in bytes
                   after the seed and after the run.
@@ -41,6 +46,9 @@ file it keeps goes under OUT, which stress.yml uploads.
                   hold's percentiles and samples, the tables' growth, verify's result and,
                   with BASELINE (an earlier run's OUT), each knee's and the hold's p99's
                   change. Speed is reported, never judged.
+  timeline OUT    writes timeline.json: the Prometheus stand-in's series (ADR-046) for
+                  Polaris's load, latency, CPU, heap and GC, and polaris-pg's waits, over the
+                  window the steps and the hold ran in, as evidence beside the results.
 
 STRESS_OVERLAY names an overlay on config.json (gate.stress_config): Tier D's is
 gates/stress/capacity.json, run by hand from docs/runbooks/stress-capacity.md (ADR-053 §7).
@@ -48,9 +56,10 @@ gates/stress/capacity.json, run by hand from docs/runbooks/stress-capacity.md (A
 Every kubectl call names the gate's context, and a namespace where the object has one. Nothing
 here reaches any cluster but the kind cluster (ADR-017).
 
-Usage: driver.py seed OUT | ramp PROFILE OUT | hold OUT | verify OUT | report OUT [BASELINE]
+Usage: driver.py seed|hold|verify|timeline OUT | ramp PROFILE OUT | report OUT [BASELINE]
 """
 
+import datetime
 import glob
 import json
 import math
@@ -59,12 +68,14 @@ import re
 import subprocess
 import sys
 import time
+import urllib.parse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 GATES = os.path.dirname(HERE)
 ROOT = os.path.dirname(GATES)
 sys.path.insert(0, GATES)
 import gate  # noqa: E402
+import metrics  # noqa: E402
 import network  # noqa: E402
 
 release = gate.release
@@ -94,7 +105,7 @@ CPU_SERIES = {"container_cpu_usage_seconds_total": "usage",
               "container_memory_working_set_bytes": "memory"}
 WORKER_POOL = "vert.x-worker-thread"
 PG_POD_LABELS = f"cnpg.io/cluster={release.POLARIS_PG},cnpg.io/podRole=instance"
-COMMIT_RE = re.compile(r'msg="C (ok|conflict|unknown|failed) (\S+) (\d+)"')
+COMMIT_RE = re.compile(r'msg="C (sent|ok|conflict|unknown|failed) (\S+) (\d+)"')
 SERIES_RE = re.compile(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{(.*)\})?\s+(\S+)(?:\s+\S+)?$")
 LABEL_RE = re.compile(r'([a-zA-Z_][a-zA-Z0-9_]*)="((?:[^"\\]|\\.)*)"')
 RESULT = "RESULT "
@@ -291,6 +302,89 @@ def watch(start, every, take, clock=time.monotonic, sleep=time.sleep):
     return process.returncode
 
 
+def polaris_readiness(pods):
+    """(every Polaris pod Ready, each pod's restarts): a restart or a replaced pod changes the
+    second, so a settle starts again."""
+    items = pods.get("items", [])
+    ready = bool(items) and all(c.get("ready") for p in items
+                                for c in p.get("status", {}).get("containerStatuses", [{}]))
+    return ready, tuple(sorted((p["metadata"]["name"],
+                                sum(c.get("restartCount", 0)
+                                    for c in p.get("status", {}).get("containerStatuses", [])))
+                               for p in items))
+
+
+def wait_settled(read, seconds, timeout, clock=time.monotonic, sleep=time.sleep, every=10):
+    """Waits until read() has said Ready, with the same restarts, for `seconds`. False after
+    `timeout` seconds without it."""
+    begin, since, last = clock(), None, None
+    while True:
+        now = clock()
+        ready, restarts = read()
+        if not ready:
+            since = None
+        elif since is None or restarts != last:
+            since = now
+        last = restarts
+        if since is not None and now - since >= seconds:
+            return True
+        if now - begin >= timeout:
+            return False
+        sleep(every)
+
+
+# The Prometheus stand-in's view of a run (ADR-046), kept beside its results (#174): Polaris's
+# load, latency, CPU, heap and GC, and whether polaris-pg made anything wait. Each query's series
+# are summed per timestamp.
+TIMELINE = {
+    "polaris_start": 'max(process_start_time_seconds{job="polaris"})',
+    "polaris_cores": 'sum(rate(process_cpu_time_ns_total{job="polaris"}[30s])) / 1e9',
+    "requests_per_s": 'sum(rate(http_server_requests_seconds_count{job="polaris"}[30s]))',
+    "server_errors_per_s":
+        'sum(rate(http_server_requests_seconds_count{job="polaris",status=~"5.."}[30s]))',
+    "mean_ms": '1000 * sum(rate(http_server_requests_seconds_sum{job="polaris"}[30s]))'
+               ' / sum(rate(http_server_requests_seconds_count{job="polaris"}[30s]))',
+    "in_flight": 'sum(http_server_active_requests{job="polaris"})',
+    "threads": 'sum(jvm_threads_live_threads{job="polaris"})',
+    "heap_used": 'sum(jvm_memory_used_bytes{job="polaris",area="heap"})',
+    "heap_after_gc": 'sum(jvm_gc_live_data_size_bytes{job="polaris"})',
+    "gc_seconds_per_s": 'sum(rate(jvm_gc_pause_seconds_sum{job="polaris"}[30s]))',
+    "gc_longest_s": 'max(jvm_gc_pause_seconds_max{job="polaris"})',
+    "pg_commits_per_s":
+        'sum(rate(cnpg_pg_stat_database_xact_commit{job="polaris-pg",datname="polaris"}[1m]))',
+    "pg_backends": 'sum(cnpg_backends_total{job="polaris-pg",datname="polaris"})',
+    "pg_waiting": 'sum(cnpg_backends_waiting_total{job="polaris-pg"})',
+    "pg_max_tx_s": 'max(cnpg_backends_max_tx_duration_seconds{job="polaris-pg"})',
+    "pg_replication_lag_s": 'max(cnpg_pg_replication_lag{job="polaris-pg"})',
+}
+TIMELINE_STEP = 15
+
+
+def timeline_window(steps):
+    """(first start, last end) of the steps and the hold that ran, as UTC ISO times."""
+    ran = [s for s in steps if "started" in s and "ended" in s]
+    if not ran:
+        return None
+    return min(s["started"] for s in ran), max(s["ended"] for s in ran)
+
+
+def range_path(env, query, start, end, step):
+    """A range query to the Prometheus stand-in, through the API server's service proxy."""
+    qs = urllib.parse.urlencode({"query": query, "start": start, "end": end, "step": step})
+    return (f"/api/v1/namespaces/{env['NS_STANDINS']}/services/prometheus:{metrics.PORT}"
+            f"/proxy/api/v1/query_range?{qs}")
+
+
+def range_series(text):
+    """A range query's answer as [[timestamp, value], ...], its series summed, NaN left out."""
+    sums = {}
+    for result in json.loads(text)["data"]["result"]:
+        for t, v in result["values"]:
+            if v not in ("NaN", "+Inf", "-Inf"):
+                sums[t] = sums.get(t, 0.0) + float(v)
+    return [[t, sums[t]] for t in sorted(sums)]
+
+
 def throttle(before, after, maximum):
     """The share of CFS periods each limited container was throttled in between, and those
     over `maximum`."""
@@ -333,13 +427,21 @@ def commit_records(text):
 
 
 def accounting(records, found):
-    """ADR-054 §2's commit checks against seed.py verify's tables."""
-    ok, unknown = {}, {}
+    """ADR-054 §2's commit checks against seed.py verify's tables. A commit logged as sent with
+    no outcome after it was cut short when its step ended: it may have happened, as an
+    unknown one may."""
+    ok, unknown, sent, answered = {}, {}, set(), set()
     for outcome, table, snapshot in records:
+        if outcome == "sent":
+            sent.add((table, snapshot))
+            continue
+        answered.add((table, snapshot))
         if outcome == "ok":
             ok.setdefault(table, set()).add(snapshot)
         elif outcome == "unknown":
             unknown.setdefault(table, set()).add(snapshot)
+    for table, snapshot in sent - answered:
+        unknown.setdefault(table, set()).add(snapshot)
     problems = []
     for table in sorted(set(found) | set(ok)):
         if table not in found:
@@ -408,7 +510,7 @@ def knee_step(steps):
 def cpu_per_request(step):
     """CPU-seconds per request in one step for Polaris and polaris-pg (all three instances,
     and its primary alone), from cAdvisor (ADR-053 §7)."""
-    if not step or "cpu_seconds" not in step or not step.get("requests"):
+    if not step or "cpu_seconds" not in step or not step.get("requests") or step.get("restarts"):
         return None
     n, cpu = step["requests"], step["cpu_seconds"]
     cost = {"polaris": cpu["polaris"] / n, "polaris-pg": cpu["polaris-pg"] / n}
@@ -671,6 +773,7 @@ def _primary(env):
 def run_step(env, config, out, name, profile, rate, seconds, nodes, polaris_ips, primary=None,
              every=None):
     print(f"{name}: {profile} at {rate} req/s for {seconds} s", flush=True)
+    started, pods_before = _utc(), _restarts(env)
     before = sample(env, nodes, polaris_ips)
     series = []
     argv = k6_run(env, name, profile, rate, seconds)
@@ -678,6 +781,7 @@ def run_step(env, config, out, name, profile, rate, seconds, nodes, polaris_ips,
              lambda t: series.append(probe(env, nodes, polaris_ips, t))):
         sys.exit(f"{name}: k6 failed, see above")
     after = sample(env, nodes, polaris_ips)
+    ended, restarted = _utc(), restart_problems(pods_before, _restarts(env))
     summary = json.loads(gate.output(fetch(env, K6_POD, f"/tmp/{name}.json")))
     console = gate.output(fetch(env, K6_POD, f"/tmp/{name}.log"))
     os.makedirs(os.path.join(out, "console"), exist_ok=True)
@@ -690,7 +794,8 @@ def run_step(env, config, out, name, profile, rate, seconds, nodes, polaris_ips,
                                             2) for k in CONTAINERS},
                    "cpu_seconds_by_pod": {pod: round(v - before["pg_pods"].get(pod, 0), 2)
                                           for pod, v in after["pg_pods"].items()},
-                   "primary": primary,
+                   "primary": primary, "started": started, "ended": ended,
+                   "restarts": restarted,
                    "server": server_requests(before["polaris"], after["polaris"])})
     if every:
         result["series"] = series
@@ -698,8 +803,27 @@ def run_step(env, config, out, name, profile, rate, seconds, nodes, polaris_ips,
           f"{result['answered']:.1%}, errors {result['errors']} of {result['requests']}, "
           f"p99 {', '.join(f'{k} {_num(v)} ms' for k, v in sorted(result['p99_ms'].items()))}"
           f"{'; throttled: ' + ', '.join(over) if over else ''}"
-          f"{'; ' + '; '.join(result['reasons']) if result['reasons'] else ''}", flush=True)
+          f"{'; ' + '; '.join(result['reasons']) if result['reasons'] else ''}"
+          f"{'; ' + '; '.join(restarted) if restarted else ''}", flush=True)
     return result
+
+
+def _utc():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def settle(env, config):
+    """Waits for Polaris to be Ready with no restart for settle.seconds; stops the run if it is
+    not within settle.timeout_seconds."""
+    s = config["settle"]
+    print(f"Waiting for Polaris to be Ready with no restart for {s['seconds']} s", flush=True)
+
+    def read():
+        return polaris_readiness(json.loads(gate.output(
+            _kubectl(env) + ["get", "pods", "-l", gate.POLARIS_POD_LABELS, "-o", "json"])))
+
+    if not wait_settled(read, s["seconds"], s["timeout_seconds"]):
+        sys.exit(f"Polaris did not settle within {s['timeout_seconds']} s")
 
 
 def _targets(env):
@@ -711,6 +835,7 @@ def _targets(env):
 
 
 def ramp(env, config, profile, out):
+    settle(env, config)
     nodes, ips = _targets(env)
     primary = _primary(env)
     steps = []
@@ -738,6 +863,7 @@ def hold(env, config, out):
         print(f"No hold: the {h['profile']} profile has no knee in {out}", flush=True)
         _write(os.path.join(out, "hold.json"), {"skipped": f"no {h['profile']} knee"})
         return 0
+    settle(env, config)
     nodes, ips = _targets(env)
     result = run_step(env, config, out, "hold", h["profile"], rate, h["seconds"], nodes, ips,
                       _primary(env), h.get("sample_seconds"))
@@ -800,6 +926,7 @@ def report(out, pins, baseline=None):
                      | {"cpu_per_request": cpu_per_request(knee_step(p["steps"])),
                         "steps": [{k: s[k] for k in ("rate", "passed", "answered", "error_rate",
                                                      "p99_ms", "throttle", "reasons")}
+                                  | {"restarts": s.get("restarts", [])}
                                   for s in p["steps"]]}
                      for name, p in by_profile.items()},
         "hold": held and {k: v for k, v in held.items() if k != "series"},
@@ -872,6 +999,33 @@ def report(out, pins, baseline=None):
     return 0
 
 
+def timeline(env, out):
+    """timeline.json: each TIMELINE query over the run's window, from the Prometheus stand-in,
+    every TIMELINE_STEP seconds; a table of the main ones, a minute apart, printed."""
+    steps = [_read(p) for p in sorted(glob.glob(os.path.join(out, "steps", "*.json")))]
+    window = timeline_window(steps + [_read(os.path.join(out, "hold.json"), {})])
+    if window is None:
+        print(f"No step in {out} says when it ran: no timeline", file=sys.stderr)
+        return 1
+    start, end = window
+    series = {name: range_series(gate.output(["kubectl", "--context", gate.CONTEXT, "get",
+                                              "--raw", range_path(env, query, start, end,
+                                                                  TIMELINE_STEP)]))
+              for name, query in TIMELINE.items()}
+    _write(os.path.join(out, "timeline.json"), {"start": start, "end": end,
+                                                "step_seconds": TIMELINE_STEP,
+                                                "queries": TIMELINE, "series": series})
+    shown = ("polaris_cores", "requests_per_s", "mean_ms", "in_flight", "heap_after_gc",
+             "gc_seconds_per_s", "pg_waiting")
+    values = {name: dict((int(t), v) for t, v in series[name]) for name in shown}
+    print("UTC      " + " ".join(f"{n[:12]:>12}" for n in shown))
+    for t in sorted({t for v in values.values() for t in v if t % 60 == 0}):
+        when = datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime("%H:%M:%S")
+        print(when + " " + " ".join(f"{values[n][t]:>12.4g}" if t in values[n] else f"{'-':>12}"
+                                    for n in shown))
+    return 0
+
+
 def main(argv):
     config = load_config()
     args = argv[1:]
@@ -879,7 +1033,7 @@ def main(argv):
     if not usage and args[0] == "ramp":
         usage = len(args) != 3 or args[1] not in profiles(config)
     elif not usage:
-        usage = (args[0] not in ("seed", "hold", "verify", "report")
+        usage = (args[0] not in ("seed", "hold", "verify", "report", "timeline")
                  or len(args) > (3 if args[0] == "report" else 2))
     if usage:
         print(__doc__.strip().splitlines()[-1], file=sys.stderr)
@@ -893,6 +1047,8 @@ def main(argv):
         return seed(env, pins, config, out, os.environ.get("STRESS_OVERLAY"))
     if command == "ramp":
         return ramp(env, config, args[1], out)
+    if command == "timeline":
+        return timeline(env, out)
     if command == "hold":
         return hold(env, config, out)
     return verify(env, pins, out)

@@ -212,6 +212,7 @@ STRESS_CONFIG = os.path.join(HERE, "stress", "config.json")
 STRESS_OVERLAY_KEYS = {"step_seconds": True,
                        "profiles": {"*": {"start": True, "step": True, "max_steps": True}},
                        "hold": {"fraction": True, "seconds": True, "sample_seconds": True},
+                       "settle": {"seconds": True, "timeout_seconds": True},
                        "standin_cpu": {"*": True},
                        "k6": {"pre_vus": True, "max_vus": True}}
 STANDIN_BUCKET = "polaris-warehouse"

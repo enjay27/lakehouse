@@ -123,6 +123,17 @@ class Config(unittest.TestCase):
     def test_the_hold_is_sampled_while_it_runs(self):
         self.assertGreater(self.config["hold"]["sample_seconds"], 0)
 
+    def test_each_ramp_and_the_hold_wait_for_a_settled_polaris(self):
+        self.assertGreater(self.config["settle"]["seconds"], 0)
+        self.assertGreater(self.config["settle"]["timeout_seconds"],
+                           self.config["settle"]["seconds"])
+
+    def test_the_scenario_logs_each_commit_before_its_post(self):
+        with open(os.path.join(HERE, "stress", "scenario.js"), encoding="utf-8") as f:
+            script = f.read()
+        sent, post = script.index("console.log(`C sent "), script.index("send(kind, 'POST', url")
+        self.assertLess(sent, post)
+
     def test_tier_ds_overlay_holds_the_mixed_profile_at_80_percent_for_2_hours(self):
         # ADR-053 §7: the four ramps with longer steps, then the mixed profile at 80% of its
         # knee for 2 hours; k6 keeps its 2 CPUs.
@@ -295,6 +306,22 @@ class Commits(unittest.TestCase):
     def found(self, **tables):
         return {name.replace("_", "."): {"snapshots": 9, "new": new, "duplicates": dup}
                 for name, (new, dup) in tables.items()}
+
+    def test_a_commit_sent_with_no_outcome_logged_may_be_there_as_an_unknown_one(self):
+        # k6 cuts an iteration short when a step ends: the scenario logs each commit before
+        # its POST, so one with no outcome after it may have happened (#174).
+        console = ('time="x" level=info msg="C sent ns01.t02 126" source=console\n'
+                   'time="x" level=info msg="C sent ns01.t02 127" source=console\n'
+                   'time="x" level=info msg="C ok ns01.t02 127" source=console\n')
+        records = driver.commit_records(console)
+        self.assertEqual(records, [("sent", "ns01.t02", "126"), ("sent", "ns01.t02", "127"),
+                                   ("ok", "ns01.t02", "127")])
+        problems, tally = driver.accounting(records, self.found(ns01_t02=(["126", "127"], [])))
+        self.assertEqual(problems, [])
+        self.assertEqual(tally, {"ok": 1, "unknown": 1, "found": 2})
+        problems, _ = driver.accounting(records[1:], self.found(ns01_t02=(["126", "127"], [])))
+        self.assertEqual(problems, ["ns01.t02: snapshot 126 was not answered 200 nor left "
+                                    "unknown"])
 
     def test_every_commit_answered_200_is_there_once_and_an_unknown_one_may_be(self):
         records = driver.commit_records(self.CONSOLE)
@@ -508,6 +535,87 @@ class Capacity(unittest.TestCase):
         self.assertIsNone(driver.metadata_growth(seeded, {"a": {"new": []}}))
 
 
+class Settle(unittest.TestCase):
+    """ADR-053 §4 asks each step to measure Polaris: a ramp that starts while Polaris is still
+    restarting from the last ramp's overload measures the restart (#174)."""
+
+    def settle(self, reads, seconds=60, timeout=600):
+        clock = {"now": 0.0}
+        reads = iter(reads)
+
+        def sleep(s):
+            clock["now"] += s
+
+        done = driver.wait_settled(lambda: next(reads), seconds, timeout,
+                                   clock=lambda: clock["now"], sleep=sleep, every=10)
+        return done, clock["now"]
+
+    def test_a_ready_polaris_with_no_restart_settles_after_the_settle_time(self):
+        self.assertEqual(self.settle([(True, 0)] * 7), (True, 60))
+
+    def test_a_restart_or_a_pod_not_ready_starts_the_settle_time_again(self):
+        reads = [(True, 0)] * 3 + [(False, 1)] + [(True, 1)] * 7
+        self.assertEqual(self.settle(reads), (True, 100))
+
+    def test_a_polaris_that_never_settles_times_out(self):
+        self.assertEqual(self.settle([(False, 0)] * 100, timeout=120), (False, 120))
+
+    def pods(self, *pods):
+        return {"items": [{"metadata": {"name": name},
+                           "status": {"phase": "Running",
+                                      "containerStatuses": [{"ready": ready,
+                                                             "restartCount": n}]}}
+                          for name, ready, n in pods]}
+
+    def test_polaris_is_ready_when_every_pod_is_and_a_new_pod_counts_as_a_change(self):
+        self.assertEqual(driver.polaris_readiness(self.pods(("p-1", True, 2))),
+                         (True, (("p-1", 2),)))
+        self.assertEqual(driver.polaris_readiness(self.pods(("p-1", True, 0),
+                                                            ("p-2", False, 0)))[0], False)
+        self.assertEqual(driver.polaris_readiness(self.pods())[0], False)
+        self.assertNotEqual(driver.polaris_readiness(self.pods(("p-1", True, 0))),
+                            driver.polaris_readiness(self.pods(("p-2", True, 0))))
+
+    def test_a_step_polaris_restarted_in_has_no_cost_per_request(self):
+        step = {"rate": 1, "passed": True, "requests": 100, "primary": None,
+                "cpu_seconds": {"polaris": -900.0, "polaris-pg": 1.0},
+                "restarts": ["polaris-x restarted 1 time(s) during the run"]}
+        self.assertIsNone(driver.cpu_per_request(step))
+
+
+class Timeline(unittest.TestCase):
+    """The Prometheus stand-in's view of the run, kept as evidence (ADR-046, #174)."""
+
+    def test_the_window_runs_from_the_first_step_to_the_last(self):
+        steps = [{"started": "2026-10-16T15:12:06Z", "ended": "2026-10-16T15:14:16Z"},
+                 {"started": "2026-10-16T15:20:35Z", "ended": "2026-10-16T15:22:45Z"},
+                 {"skipped": "no mixed knee"}]
+        self.assertEqual(driver.timeline_window(steps),
+                         ("2026-10-16T15:12:06Z", "2026-10-16T15:22:45Z"))
+        self.assertIsNone(driver.timeline_window([{"skipped": "x"}]))
+
+    def test_a_range_query_goes_to_the_stand_in_through_the_api_servers_proxy(self):
+        path = driver.range_path(ENV, 'up{job="polaris"}', "2026-10-16T15:00:00Z",
+                                 "2026-10-16T16:00:00Z", 30)
+        prefix = "/api/v1/namespaces/standins/services/prometheus:9090/proxy/api/v1/query_range?"
+        self.assertTrue(path.startswith(prefix), path)
+        query = dict(p.split("=", 1) for p in path[len(prefix):].split("&"))
+        self.assertEqual(query["query"], "up%7Bjob%3D%22polaris%22%7D")
+        self.assertEqual((query["step"], query["start"]), ("30", "2026-10-16T15%3A00%3A00Z"))
+
+    def test_a_querys_series_are_summed_per_timestamp(self):
+        answer = json.dumps({"status": "success", "data": {"resultType": "matrix", "result": [
+            {"metric": {"pod": "a"}, "values": [[100, "1.5"], [130, "2"]]},
+            {"metric": {"pod": "b"}, "values": [[100, "0.5"], [130, "NaN"]]}]}})
+        self.assertEqual(driver.range_series(answer), [[100, 2.0], [130, 2.0]])
+
+    def test_the_timeline_names_polaris_cpu_load_latency_heap_and_polaris_pg_waits(self):
+        for name in ("polaris_cores", "requests_per_s", "mean_ms", "in_flight", "heap_after_gc",
+                     "gc_seconds_per_s", "polaris_start", "pg_waiting", "pg_max_tx_s",
+                     "pg_replication_lag_s"):
+            self.assertIn(name, driver.TIMELINE)
+
+
 class Report(unittest.TestCase):
     def write(self, out, path, data):
         os.makedirs(os.path.dirname(os.path.join(out, path)), exist_ok=True)
@@ -569,6 +677,8 @@ class Report(unittest.TestCase):
         self.assertEqual(saved["hold_series"]["heap_after_gc"]["max"], 70)
         self.assertNotIn("series", saved["hold"], "the series stays in hold.json")
         self.assertEqual(saved["polaris_size"]["heap_max_bytes"], 6000)
+        self.assertEqual(saved["profiles"]["mixed"]["steps"][0]["restarts"], [],
+                         "each step says whether Polaris or polaris-pg restarted in it")
         out = text.getvalue()
         self.assertIn("| mixed | 2 | 0.4 | 0.6 |", out)
         self.assertIn("For 12,000 req/s: 120 Polaris replicas, polaris-pg primary 4.8 cores",
@@ -670,6 +780,10 @@ class Commands(unittest.TestCase):
 
 
 class Cli(unittest.TestCase):
+    def test_the_timeline_is_a_command_of_its_own(self):
+        self.assertIn("timeline OUT", driver.__doc__.strip().splitlines()[-1])
+        self.assertIn("  timeline OUT ", driver.__doc__)
+
     def test_an_unknown_command_or_profile_prints_the_usage(self):
         for argv in (["driver.py"], ["driver.py", "ramp", "nope", "/tmp/x"],
                      ["driver.py", "dance", "/tmp/x"]):
