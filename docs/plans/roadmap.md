@@ -110,7 +110,8 @@ source does not matter for operation. What follows is the list they cover.
   fresh install): dry-run [38067420439](https://github.com/enjay27/lakehouse/actions/runs/38067420439),
   smoke [38067420520](https://github.com/enjay27/lakehouse/actions/runs/38067420520). The image
   cache waits for the first chart's images.
-- **Gate:** static, then dry-run and smoke on kind. **Linux:** `init_env.py --apply-secrets`
+- **Gate:** static, then dry-run and smoke on kind. **Linux:** `init_env.py --apply-secrets`,
+  verified on a Linux test cluster with Kubernetes v1.36.4 on 2026-10-16
   ([#6](https://github.com/enjay27/lakehouse/issues/6)).
 
 ### P2: Polaris 1.6.0 and its console
@@ -215,13 +216,19 @@ source does not matter for operation. What follows is the list they cover.
   `polaris-backup-s3`; step 0 requires the plugin and its `ObjectStore` CRD. The gate
   installs cert-manager and the plugin from pinned manifests, and the smoke gate's
   `check-restore` backs polaris-pg up, restores it into `polaris-pg-restore` and reads the
-  root principal and the smoke tests' catalog from it.
+  root principal and the smoke tests' catalog from it. The restore runbook,
+  `docs/runbooks/restore-polaris-pg.md`, was proven on a Linux test cluster on 2026-10-16
+  ([#138](https://github.com/enjay27/lakehouse/issues/138)); its three gaps were closed in
+  [#169](https://github.com/enjay27/lakehouse/pull/169).
 - Network policies (2026-10-13, ADR-048, ADR-045, #93). `charts/polaris-network-policies`
   denies ingress to Polaris's namespace by default and allows each rule of ADR-048 by
   namespace label from `.env`; step 1 installs it first, after labelling Polaris's running
   pods as polaris-pg's clients. The stand-ins' namespace denies by default too. The smoke
   gate's `check-network` makes one allowed and one refused connection per rule. The target
-  clusters' labels are a question for the operator team (#9).
+  clusters' labels are a question for the operator team (#9). On a Linux test cluster with
+  no recorder in between, the first upgrade to a release with them (10.12 → 10.14) kept the
+  old Polaris pods' connections to polaris-pg on 2026-10-16
+  ([#95](https://github.com/enjay27/lakehouse/issues/95)).
 - Polaris's metrics (2026-10-13, ADR-046, #98): P5's Polaris half, built ahead of Datahub.
   Polaris on 8182 and polaris-pg's instances on 9187 are a scrape contract in
   `docs/contracts/`; a release ships no `ServiceMonitor`. The smoke gate's Prometheus
@@ -235,7 +242,13 @@ source does not matter for operation. What follows is the list they cover.
   ~185 s outage when the primary pod is deleted; then synchronous replication (ADR-056), for
   the confirmed writes C0 lost on a node loss; then pgjdbc's connect, login and socket
   timeouts in Polaris's values (#165), so a pooled connection no longer waits out a node loss.
-- **Gate:** dry-run and smoke. **Linux:** the release installed on a test cluster.
+  An upgrade that changes polaris-pg's spec restarts its primary in place, CNPG's default
+  `primaryUpdateMethod`: about 18 s of failed requests on 10.12 → 10.14, measured on a Linux
+  test cluster; switchover or restart is Kade's decision
+  ([#168](https://github.com/enjay27/lakehouse/issues/168)).
+- **Gate:** dry-run and smoke. **Linux:** the release installed on a test cluster: done on
+  2026-10-16, on a three-node kind cluster on Linux built by the gate's own scripts
+  (ADR-004), with #95's upgrade and #138's restore above.
 
 ### P3: Datahub
 
@@ -277,6 +290,19 @@ source does not matter for operation. What follows is the list they cover.
 
 - The suite (ADR-005) measures Polaris catalog latency and throughput on the plain upstream
   schema (ADR-015). Results go to `docs/measurements/`, with the versions measured (ADR-003).
+- The stress test (ADR-053, amended by ADR-054;
+  [#142](https://github.com/enjay27/lakehouse/issues/142)): k6 at one rate per step
+  against 100 seeded tables of about 1 MB metadata each, toward 12,000 req/s (1.5× today's
+  peak). Tier A runs on the gate's kind only when Kade starts it (`stress.yml`), never in the
+  release gate. Step 1a merged in
+  [#145](https://github.com/enjay27/lakehouse/pull/145); PR 1b, the driver, seed,
+  scenario and `stress.yml`, merged in
+  [#170](https://github.com/enjay27/lakehouse/pull/170)
+  ([#148](https://github.com/enjay27/lakehouse/issues/148)). Its seed ran on a Linux test
+  cluster on 2026-10-16: Polaris 1.6.0 accepts the reused manifest list.
+- Tier D (ADR-053 §7), next: one Polaris replica's capacity on the Linux test server, by hand
+  from a runbook in `docs/runbooks/`, its results in `docs/measurements/`.
+- **Linux:** Tier D, by hand.
 
 ### P7: first release, then upgrades
 
@@ -319,7 +345,7 @@ when Kade learns the target clusters' version.
 
 ## Open items
 
-- [#6](https://github.com/enjay27/lakehouse/issues/6): `init_env.py --apply-secrets` on a
-  Linux test cluster.
 - [#9](https://github.com/enjay27/lakehouse/issues/9): versions pinned above; the pooler and the
   CPU architecture are still open (Kade).
+- [#168](https://github.com/enjay27/lakehouse/issues/168): an upgrade that changes polaris-pg's spec
+  restarts its primary in place; switchover or restart (Kade).

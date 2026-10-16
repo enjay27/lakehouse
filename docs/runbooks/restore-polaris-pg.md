@@ -1,7 +1,8 @@
 # Restore polaris-pg from its backups into a new Cluster
 
-**Status: not yet proven on a Linux test cluster (#138).** ADR-043 §4 asks for that proof
-before this runbook is used on a target cluster.
+**Status: proven on a Linux test cluster (#138):** a three-node kind cluster, Kubernetes
+v1.36.4, CNPG 1.30.1 with the Barman Cloud Plugin v0.15.1, release `platform-2026.10.14`.
+ADR-043 §4 asks for that proof before this runbook is used on a target cluster.
 
 This runbook restores polaris-pg into a new Cluster, `polaris-pg-restore`, beside it in
 Polaris's namespace. The new Cluster is built from the latest base backup and every WAL
@@ -49,11 +50,12 @@ k get backups --sort-by=.metadata.creationTimestamp \
 **Stop here if no backup reads `completed`.** To take a backup now:
 
 ```sh
+backup=polaris-pg-manual-$(date -u +%Y%m%d%H%M)
 k apply -f - <<EOF
 apiVersion: postgresql.cnpg.io/v1
 kind: Backup
 metadata:
-  name: polaris-pg-manual-$(date -u +%Y%m%d%H%M)
+  name: $backup
 spec:
   cluster:
     name: polaris-pg
@@ -61,9 +63,15 @@ spec:
   pluginConfiguration:
     name: barman-cloud.cloudnative-pg.io
 EOF
+k wait --for=jsonpath='{.status.phase}'=completed "backup/$backup" --timeout=10m
 ```
 
-Wait until it reads `completed`.
+The gate allows 10 minutes for its backup. `k wait` does not stop on a failed backup; if it
+times out, read the phase and error, and stop here if it reads `failed`:
+
+```sh
+k get "backup/$backup" -o jsonpath='{.status.phase}{" "}{.status.error}{"\n"}'
+```
 
 ## 2. Switch WAL on the primary and wait until it is archived
 
@@ -77,16 +85,20 @@ primary=$(k get cluster/polaris-pg -o jsonpath='{.status.currentPrimary}')
 psql_on_primary() { k exec "$primary" -c postgres -- psql -XAtq -c "$1"; }
 segment=$(psql_on_primary "SELECT pg_walfile_name(pg_switch_wal())")
 echo "switched: $segment"
-# WAL file names sort by timeline, then position.
-until [ "$(psql_on_primary "SELECT coalesce(last_archived_wal, '') >= '$segment'
-                            FROM pg_stat_archiver")" = t ]; do
+# WAL file names sort by timeline, then position. 40 reads, 3 s apart: 120 s, as the gate.
+archived=no
+for i in $(seq 40); do
+  if [ "$(psql_on_primary "SELECT coalesce(last_archived_wal, '') >= '$segment'
+                           FROM pg_stat_archiver")" = t ]; then
+    archived=yes; break
+  fi
   sleep 3
 done
-echo "archived: $segment"
+[ "$archived" = yes ] && echo "archived: $segment" || echo "not archived within 120 s: $segment"
 ```
 
-The gate allows 120 s for this. If it takes longer, check the plugin's sidecar logs in the
-primary's pod before going on.
+**If it prints `not archived within 120 s`, do not go on to step 3.** Check the plugin's
+sidecar logs in the primary's pod; if archiving is broken, stop and raise it.
 
 **If the primary is gone:** this step cannot run, and the restore may not reach a
 consistent state from the latest backup. This runbook does not cover that case; stop and
@@ -200,10 +212,12 @@ diff live.txt restored.txt && echo "same principals and catalogs"
 Moving Polaris onto `polaris-pg-restore` is not covered here (see the top).
 
 When the copy is no longer needed, delete it. Its PVC goes with it, and polaris-pg and its
-backups are not touched:
+backups are not touched. The pod and PVC go a little after the Cluster (up to 19 s on the
+test cluster), so the second command waits for the PVC:
 
 ```sh
 k delete cluster polaris-pg-restore --wait --timeout=5m
+k wait --for=delete pvc -l cnpg.io/cluster=polaris-pg-restore --timeout=5m
 rm -f restored.txt live.txt
 ```
 

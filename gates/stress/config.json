@@ -1,8 +1,71 @@
 {
-  "_comment": "Tuning values for the stress scenario (ADR-053; ADR-000 rule 11). Every number is a placeholder until the calibration ADR-053 §5 runs before the job joins the release gate; each change names its evidence in the PR that makes it.",
+  "_comment": "Tuning values for the stress scenario (ADR-053; ADR-000 rule 11). Every number is a placeholder until calibration, a run recorded in docs/measurements/, gives evidence for it; each change names its evidence in the PR that makes it. Read by gates/stress/driver.py, seed.py and scenario.js.",
   "standin_cpu": {
     "_comment": "The CPU limit of each stand-in Polaris reaches directly on a stress install (ADR-053 §4): a knee reached while one of them is throttled is that stand-in's, not Polaris's.",
     "seaweedfs": "1",
     "opa": "1"
+  },
+  "seed": {
+    "_comment": "100 tables in 10 namespaces, each grown to a load of about 1 MB by batches of add-snapshot updates (ADR-053 §3). Each table keeps only its last previous_versions_max metadata files, so the runner's disk stays bounded: a deviation from the target's defaults.",
+    "namespaces": 10,
+    "tables_per_namespace": 10,
+    "metadata_bytes": 1000000,
+    "batch": 500,
+    "max_batches": 20,
+    "previous_versions_max": 5
+  },
+  "hot": {
+    "_comment": "The first tables are the hot set: commits from the arrival rate never go there; writers_per_table writers per table commit in a loop with pause_ms between commits, so commits collide and the 409 path runs. They run whenever a profile commits.",
+    "tables": 10,
+    "writers_per_table": 4,
+    "pause_ms": 2000
+  },
+  "commit_retries": 4,
+  "etag_ttl_s": 300,
+  "profiles": {
+    "_comment": "Each profile's request mix (shares sum to 1) and its step ramp: start, start + step, ... for max_steps steps of step_seconds each. The mixed profile's shares are ADR-053's assumption until the target's metrics give the real ones (#142).",
+    "commits": {
+      "shares": {"commit": 1.0},
+      "start": 10, "step": 10, "max_steps": 8
+    },
+    "queries-conditional": {
+      "shares": {"conditional_load": 0.9, "token": 0.02, "config": 0.02,
+                 "list_namespaces": 0.02, "list_tables": 0.02, "head_table": 0.02},
+      "start": 200, "step": 200, "max_steps": 8
+    },
+    "queries-full": {
+      "shares": {"full_load": 0.9, "token": 0.02, "config": 0.02,
+                 "list_namespaces": 0.02, "list_tables": 0.02, "head_table": 0.02},
+      "start": 20, "step": 20, "max_steps": 8
+    },
+    "mixed": {
+      "shares": {"conditional_load": 0.85, "token": 0.02, "config": 0.02,
+                 "list_namespaces": 0.02, "list_tables": 0.02, "head_table": 0.02,
+                 "commit": 0.05},
+      "start": 100, "step": 100, "max_steps": 8
+    }
+  },
+  "step_seconds": 30,
+  "pass": {
+    "_comment": "A step passes when k6 dropped at most 5% of the requests offered, at most 0.1% failed (409s on the hot set not counted) and each kind's p99 is within its cap (ADR-053 §4).",
+    "answered_min": 0.95,
+    "error_max": 0.001,
+    "p99_ms": {"token": 1000, "config": 500, "list_namespaces": 500, "list_tables": 500,
+               "head_table": 500, "conditional_load": 500, "full_load": 3000,
+               "commit": 5000}
+  },
+  "throttle_max": 0.05,
+  "hold": {
+    "_comment": "After the ramps, the mixed profile at fraction of its knee (ADR-053 §5, ADR-054 §1).",
+    "profile": "mixed",
+    "fraction": 0.7,
+    "seconds": 600
+  },
+  "k6": {
+    "_comment": "The k6 pod's CPU limit (ADR-053 §2), the VUs the arrival rate may use and each request's timeout.",
+    "cpu": "2",
+    "pre_vus": 50,
+    "max_vus": 500,
+    "timeout": "10s"
   }
 }

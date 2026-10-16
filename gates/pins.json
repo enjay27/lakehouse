@@ -92,5 +92,11 @@
       "sha256": "1981b31d3993c58702783c1cddf10a34e48c1f413d70ff1cb6def0a143484647",
       "source": "the version Polaris 1.6.0's image ships (/deployments/lib/main); the jar's sha256 equals that copy's, and its sha1 Maven Central's, read 2026-10-13 (ADR-047 \u00a75)"
     }
+  },
+  "load_images": {
+    "k6": {
+      "image": "grafana/k6:2.3.0@sha256:9c2dee7f8ed74d317e4027c06a10f169b625638189de8d4555d0b3486a5aeb34",
+      "source": "Docker Hub index digest (docker-content-digest, recomputed), read 2026-10-14; 2.3.0 pushed 2026-09-21, the newest release at least two weeks old (1.8.2 of 2026-10-12 patches the 1.x line); Alpine 3.24.1 base with BusyBox's sleep and wget, which the driver uses (ADR-053 \u00a72)"
+    }
   }
 }
