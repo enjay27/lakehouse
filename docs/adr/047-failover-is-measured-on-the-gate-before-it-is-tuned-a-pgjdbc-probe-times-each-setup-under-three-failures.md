@@ -1,6 +1,6 @@
 # ADR-047: Failover is measured on the gate before it is tuned: a pgjdbc probe times each setup under three failures
 
-- **Status:** Accepted
+- **Status:** Amended by ADR-058
 - **Date:** 2026-10-13
 - **Related:** ADR-003, ADR-004, ADR-008, ADR-010, ADR-015, ADR-017, ADR-025, ADR-030, ADR-031, ADR-032, ADR-038, ADR-039, ADR-043, ADR-044, ADR-045
 
