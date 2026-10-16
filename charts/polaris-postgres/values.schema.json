@@ -12,10 +12,11 @@
     "synchronous": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["number", "dataDurability"],
+      "required": ["number", "dataDurability", "failoverQuorum"],
       "properties": {
         "number": {"type": "integer", "minimum": 1},
-        "dataDurability": {"enum": ["required", "preferred"]}
+        "dataDurability": {"enum": ["required", "preferred"]},
+        "failoverQuorum": {"type": "boolean"}
       }
     },
     "storage": {

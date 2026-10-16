@@ -64,12 +64,14 @@ GRACE_S = 20
 # goes straight to a fast shutdown instead of letting open sessions commit for 180 s.
 # Synchronous replication: a commit returns once one standby has it, and waits while none
 # can (ADR-047 §2). The liveness probe, its isolation check and the lease stay CNPG's.
+# failoverQuorum is off by name: the chart turns it on (ADR-058 §3), and a merge patch keeps
+# what it does not name, so C1 stays C1q without it.
 C1_CLUSTER = {
     "failoverDelay": 0,
     "smartShutdownTimeout": 0,
     "probes": {"readiness": {"periodSeconds": 1, "timeoutSeconds": 1, "failureThreshold": 3}},
     "postgresql": {"synchronous": {"method": "any", "number": 1,
-                                   "dataDurability": "required"}},
+                                   "dataDurability": "required", "failoverQuorum": False}},
 }
 # C1q: C1, and CNPG promotes only a standby it can show holds every synchronous commit.
 C1Q_CLUSTER = {**C1_CLUSTER, "postgresql": {"synchronous": {
