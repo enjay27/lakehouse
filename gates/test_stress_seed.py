@@ -1,6 +1,7 @@
 """Tests for stress/seed.py, with Polaris's REST API and PyIceberg faked: PyIceberg is installed
 only in the seed pod. Run: python3 -m unittest discover -s gates"""
 
+import importlib.util
 import io
 import json
 import os
@@ -8,8 +9,20 @@ import sys
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(HERE, "stress"))
-import seed  # noqa: E402
+
+
+def load(name, path):
+    """The module at path, under name: gates/ holds another driver.py (failover/) and seed.py
+    (ADR-051, imported by gate.py), and unittest discover imports every test module into one
+    process, so a plain `import driver` or `import seed` may get the other one."""
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+seed = load("stress_seed", os.path.join(HERE, "stress", "seed.py"))
 
 ENV = {"ROOT_CLIENT_ID": "rootid0123456789", "ROOT_CLIENT_SECRET": "RootSecret0123456789",
        "S3_ACCESS_KEY_ID": "smokekey01234567", "S3_SECRET_ACCESS_KEY": "SmokeSecret0123456789"}
