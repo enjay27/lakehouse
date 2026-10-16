@@ -78,7 +78,7 @@ flowchart LR
 | [027](027-ingress-is-denied-by-default-and-allowed-per-caller.md) | Ingress to this repository's namespaces is denied by default and allowed per caller | Superseded by ADR-044 |
 | [028](028-the-polaris-console-is-a-maintainer-tool-outside-the-release-path.md) | The Polaris console is a maintainer tool, built from a pinned commit and kept off the release path | Accepted |
 | [029](029-the-cnpg-operator-belongs-to-the-operator-team-installed-here-only-on-the-gate.md) | The CloudNativePG operator belongs to the operator team; this repository installs it only on the gate and test clusters | Superseded by ADR-045 |
-| [030](030-auto-merge-leaves-prs-that-change-the-merge-rules-or-the-checks-to-kade.md) | Auto-merge leaves PRs that change the merge rules or the checks to Kade | Accepted |
+| [030](030-auto-merge-leaves-prs-that-change-the-merge-rules-or-the-checks-to-kade.md) | Auto-merge leaves PRs that change the merge rules or the checks to Kade | Amended by ADR-059 |
 | [031](031-other-teams-services-are-interfaces-stand-ins-only-on-the-gate-seaweedfs-for-s3.md) | Other teams' services are interfaces in `.env`; stand-ins only on the gate, SeaweedFS for S3 | Amended by ADR-034 |
 | [032](032-a-cleanup-workflow-deletes-merged-claude-branches-and-their-gate-branches.md) | A cleanup workflow deletes merged `claude/*` branches and their `gate/*` branches | Amended by ADR-049 |
 | [033](033-release-candidates-are-gated-on-a-pr-from-main-into-rc-the-release-workflow-tags-rc.md) | Release candidates are gated on a PR from `main` into `rc`; the release workflow tags `rc` | Accepted |
@@ -107,7 +107,7 @@ flowchart LR
 | [056](056-polaris-pg-commits-wait-for-one-of-two-standbys-writes-stop-rather-than-lose-a-confirmed-one.md) | polaris-pg's commits wait for one of its two standbys; writes stop rather than lose a confirmed one | Amended by ADR-057 |
 | [057](057-adr-056s-proof-compares-the-chart-with-itself-before-the-change-synchronous-commits-cost-s1-about-4-s.md) | ADR-056's proof compares the chart with itself before the change; synchronous commits cost S1 about 4 s | Accepted |
 | [058](058-the-primary-and-a-standby-lost-together-are-measured-and-failoverquorum-enters-the-chart-if-it-keeps-a-lagging-standby-from-losing-writes.md) | The primary and a standby lost together are measured, and failoverQuorum enters the chart if it keeps a lagging standby from losing writes | Accepted |
-| [059](059-auto-merge-also-leaves-adrs-and-agent-rules-to-kade.md) | Auto-merge also leaves ADRs and agent rules to Kade | Proposed |
+| [059](059-auto-merge-also-leaves-adrs-and-agent-rules-to-kade.md) | Auto-merge also leaves ADRs and agent rules to Kade | Accepted |
 
 ## Not ADRs
 

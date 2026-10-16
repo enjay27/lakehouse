@@ -1,6 +1,6 @@
 # ADR-059: Auto-merge also leaves ADRs and agent rules to Kade
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-16
 - **Related:** ADR-000, ADR-022, ADR-030
 

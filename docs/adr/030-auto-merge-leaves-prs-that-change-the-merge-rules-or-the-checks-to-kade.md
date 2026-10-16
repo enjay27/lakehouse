@@ -1,6 +1,6 @@
 # ADR-030: Auto-merge leaves PRs that change the merge rules or the checks to Kade
 
-- **Status:** Accepted
+- **Status:** Amended by ADR-059
 - **Date:** 2026-10-10
 - **Related:** ADR-019, ADR-022
 
