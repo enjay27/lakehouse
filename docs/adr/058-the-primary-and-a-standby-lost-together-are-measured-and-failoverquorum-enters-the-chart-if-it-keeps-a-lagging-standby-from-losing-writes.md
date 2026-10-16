@@ -1,6 +1,6 @@
 # ADR-058: The primary and a standby lost together are measured, and failoverQuorum enters the chart if it keeps a lagging standby from losing writes
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-15
 - **Related:** ADR-016, ADR-030, ADR-039, ADR-047, ADR-056, ADR-057
 
