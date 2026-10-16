@@ -27,7 +27,7 @@ storage, observability, SSO and the catalog gateway are other teams' services, r
 | `scripts/adr_check.py` | ADR-000 checks: names, numbers, headers, index rows, citations |
 | `scripts/repo_check.py` | No env file, key file, secret pattern or CRLF in what git tracks (ADR-002, ADR-006) |
 | `scripts/claude_md_check.py` | This file at most 100 lines; `.claude/rules/*.md` at most 80 with `paths:` |
-| `scripts/auto_merge_gate.py` | Merge, wait or stop from a head's checks, drafts and paths (ADR-022, ADR-030) |
+| `scripts/auto_merge_gate.py` | Merge, wait or stop from a head's checks, drafts and paths (ADR-022, ADR-030, ADR-059) |
 | `scripts/gate_check.py` | gate-check: platform files need a dry-run and a smoke covering the head (ADR-039), batch and fixture spec files a log-batch (ADR-040) |
 | `scripts/branch_cleanup.py` | Which merged `claude/*` and stale `gate/*` branches to delete (ADR-032) |
 | `gates/` | The kind gate: pinned tools and node image, the cluster, CNPG, cert-manager and the Barman Cloud Plugin, the stand-ins (SeaweedFS, OPA with `gates/opa/policy.rego`), the recorder that `check-traffic` reads, the PyIceberg smoke tests (`gates/iceberg/`), the console's sign-in check (`gates/console/`), `check-restore` (a backup of polaris-pg restored, ADR-043), `seed.py`, data written through the last release before the upgrade and read back by `check-migration` after it (ADR-051), `check-logs` with a stand-in Fluent Bit reading the log batch's output; `network.py`, the gate's own allow policies and `check-network`, one allowed and one refused connection per rule (ADR-048); `metrics.py`, a Prometheus stand-in loading `docs/contracts/`'s scrape file and `check-metrics` (ADR-046); `fixtures.py`, Polaris's files across a real UTC hour, and `log_batch_gate.py`, the batch over them through Fluent Bit into an OpenSearch stand-in (ADR-040); `failover/`, the failover measurement: its driver, setups C0 to C2, results and the pgjdbc probe (ADR-047); `stress/`, the k6 stress run, `driver.py` seeding with `seed.py`, ramping `scenario.js` and checking, `config.json` its tuning (ADR-053, ADR-054); on the gate only, the gate's Secrets (ADR-017, ADR-026, ADR-031, ADR-034, ADR-036, ADR-045) |
@@ -83,14 +83,14 @@ unread by gate-check (ADR-050 §3). How to push each head to `gate/<level>/<task
 - The PR is the session record: *What changed and why*, *Verified*, *NOT VERIFIED*, *Wrong
   turns*, and `Closes #N`.
 
-## Version control (ADR-022, ADR-030, ADR-033)
+## Version control (ADR-022, ADR-030, ADR-033, ADR-059)
 
 - Sessions work on `claude/<task>`, one task per PR, from an up-to-date `main`.
 - `auto-merge.yml` (not GitHub's setting) merges a green `claude/*` PR, deletes the branch and
   closes its `Closes #N` issues; a new check workflow joins its `workflows:` list in that PR.
-  It never merges a draft, nor a PR changing `.github/workflows/`, `scripts/auto_merge_gate.py`
-  or `scripts/gate_check.py` (ADR-030): open those as drafts Kade merges by hand. It is read
-  from `main`, so a change to it acts after its own merge. Kade's branches merge by hand.
+  It never merges a draft, nor a PR changing `.github/workflows/`, `scripts/auto_merge_gate.py`,
+  `scripts/gate_check.py` (ADR-030), `docs/adr/`, `CLAUDE.md` or `.claude/rules/` (ADR-059):
+  open those as drafts Kade merges by hand, as are his branches. Read from `main`, a change to it acts after its own merge.
 - A gate run deletes its `gate/*` branch when it ends (ADR-049); `branch-cleanup.yml` deletes merged `claude/*` branches and any gate branch left over (ADR-032).
 - Releases (ADR-033): a PR from `main` into `rc`, gated by `release-gate.yml`, merged by Kade;
   `release.yml` on `rc` tags it. Sessions open such a PR or run a release only when asked.

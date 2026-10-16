@@ -120,7 +120,7 @@ class DraftsAndProtectedPaths(unittest.TestCase):
         return gate.decide(runs, NO_STATUSES, ["static", "gate-check"], pull, files)
 
     def test_an_ordinary_pr_merges(self):
-        self.assertEqual(self.decide(pr(), [file("docs/adr/README.md")]), "merge")
+        self.assertEqual(self.decide(pr(), [file("docs/plans/roadmap.md")]), "merge")
 
     def test_a_draft_stops(self):
         self.assertEqual(self.decide(pr(draft=True), [file("README.md")]), "stop")
@@ -131,15 +131,23 @@ class DraftsAndProtectedPaths(unittest.TestCase):
 
     def test_protected_paths_stop(self):
         for path in (".github/workflows/auto-merge.yml", ".github/workflows/new.yml",
-                     "scripts/auto_merge_gate.py", "scripts/gate_check.py"):
+                     "scripts/auto_merge_gate.py", "scripts/gate_check.py",
+                     "docs/adr/README.md", "docs/adr/059-new.md", "CLAUDE.md",
+                     ".claude/rules/gates.md", ".claude/rules/new.md"):
             with self.subTest(path=path):
                 self.assertEqual(self.decide(pr(), [file(path)]), "stop")
 
     def test_other_paths_are_not_protected(self):
         for path in (".github/labels.json", "scripts/test_gate_check.py",
-                     "scripts/init_env.py", "docs/github/workflows/x.md"):
+                     "scripts/init_env.py", "docs/github/workflows/x.md",
+                     "docs/adr.md", "docs/plans/roadmap.md", "README.md",
+                     "gates/CLAUDE.md", ".claude/settings.json", "scripts/claude_md_check.py"):
             with self.subTest(path=path):
                 self.assertEqual(self.decide(pr(), [file(path)]), "merge")
+
+    def test_a_rename_out_of_adr_counts_under_its_old_name(self):
+        files = [file("docs/old/030.md", previous="docs/adr/030.md")]
+        self.assertEqual(self.decide(pr(), files), "stop")
 
     def test_a_rename_counts_under_its_old_name(self):
         files = [file("docs/old-gate.py", previous="scripts/gate_check.py")]
