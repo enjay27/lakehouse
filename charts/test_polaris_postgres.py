@@ -162,7 +162,7 @@ class Rendered(unittest.TestCase):
 
 
 class Backups(unittest.TestCase):
-    """ADR-043 §1 and §2."""
+    """ADR-043 §1 and §2, ADR-060."""
 
     @classmethod
     def setUpClass(cls):
@@ -185,8 +185,14 @@ class Backups(unittest.TestCase):
         creds = self.kinds["ObjectStore"]["spec"]["configuration"]["s3Credentials"]
         self.assertEqual(creds, {
             "accessKeyId": {"name": secret.name, "key": "accessKeyId"},
-            "secretAccessKey": {"name": secret.name, "key": "secretAccessKey"}})
-        self.assertEqual(sorted(secret.from_env), ["accessKeyId", "secretAccessKey"])
+            "secretAccessKey": {"name": secret.name, "key": "secretAccessKey"},
+            "region": {"name": secret.name, "key": "region"}})
+        self.assertEqual(sorted(secret.from_env), ["accessKeyId", "region", "secretAccessKey"])
+
+    def test_the_backups_sign_for_the_region_from_env(self):
+        """ADR-060: the plugin reads the region only from a Secret key; init_env fills it."""
+        secret = next(s for s in init_env.SECRETS if s.name == release.POLARIS_BACKUP_SECRET)
+        self.assertEqual(secret.from_env["region"], "S3_REGION")
 
     def test_retention_is_a_value_30_days_by_default(self):
         self.assertEqual(self.kinds["ObjectStore"]["spec"]["retentionPolicy"], "30d")
