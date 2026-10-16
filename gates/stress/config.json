@@ -15,10 +15,10 @@
     "previous_versions_max": 5
   },
   "hot": {
-    "_comment": "The first tables are the hot set: commits from the arrival rate never go there; writers_per_table writers per table commit in a loop with pause_ms between commits, so commits collide and the 409 path runs. They run whenever a profile commits.",
+    "_comment": "The first tables are the hot set: commits from the arrival rate never go there; writers_per_table writers per table commit in a loop with pause_ms between commits, so commits collide and the 409 path runs. They run whenever a profile commits. pause_ms was 2000 until Tier D's attempt 5 on 2026-10-16 (#174): the hot set then sent about 19 commits/s whatever the profile's rate, and one Polaris replica's mixed profile failed its first step at 25 req/s.",
     "tables": 10,
     "writers_per_table": 4,
-    "pause_ms": 2000
+    "pause_ms": 10000
   },
   "commit_retries": 4,
   "etag_ttl_s": 300,

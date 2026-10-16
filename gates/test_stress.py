@@ -699,6 +699,11 @@ class Timeline(unittest.TestCase):
             {"metric": {"pod": "b"}, "values": [[100, "0.5"], [130, "NaN"]]}]}})
         self.assertEqual(driver.range_series(answer), [[100, 2.0], [130, 2.0]])
 
+    def test_the_printed_timeline_has_one_row_a_minute_whatever_second_the_run_began(self):
+        start = 1760634386  # 17:06:26 UTC: no sample falls on a whole minute
+        times = [start + 15 * i for i in range(12)]
+        self.assertEqual(driver.per_minute(times), [start, start + 45, start + 105, start + 165])
+
     def test_the_timeline_names_polaris_cpu_load_latency_heap_and_polaris_pg_waits(self):
         for name in ("polaris_cores", "requests_per_s", "mean_ms", "in_flight", "heap_after_gc",
                      "gc_seconds_per_s", "polaris_start", "pg_waiting", "pg_max_tx_s",

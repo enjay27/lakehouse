@@ -373,6 +373,17 @@ def timeline_window(steps):
     return min(s["started"] for s in ran), max(s["ended"] for s in ran)
 
 
+def per_minute(times):
+    """The first of `times` in each minute: the run's window starts at any second, so its
+    samples need not fall on a whole minute."""
+    rows, last = [], None
+    for t in sorted(times):
+        if t // 60 != last:
+            rows.append(t)
+            last = t // 60
+    return rows
+
+
 def range_path(env, query, start, end, step):
     """A range query to the Prometheus stand-in, through the API server's service proxy."""
     qs = urllib.parse.urlencode({"query": query, "start": start, "end": end, "step": step})
@@ -1121,7 +1132,7 @@ def timeline(env, out):
              "gc_seconds_per_s", "pg_waiting")
     values = {name: dict((int(t), v) for t, v in series[name]) for name in shown}
     print("UTC      " + " ".join(f"{n[:12]:>12}" for n in shown))
-    for t in sorted({t for v in values.values() for t in v if t % 60 == 0}):
+    for t in per_minute({t for v in values.values() for t in v}):
         when = dt.datetime.fromtimestamp(t, dt.timezone.utc).strftime("%H:%M:%S")
         print(when + " " + " ".join(f"{values[n][t]:>12.4g}" if t in values[n] else f"{'-':>12}"
                                     for n in shown))
