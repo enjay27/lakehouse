@@ -22,6 +22,7 @@ NS_CATALOG_DATAHUB=catalog-datahub
 
 # Other teams' services (ADR-031).
 S3_ENDPOINT=
+S3_REGION=
 POLARIS_S3_ACCESS_KEY_ID=
 POLARIS_S3_SECRET_ACCESS_KEY=
 SMOKE_S3_ACCESS_KEY_ID=
@@ -117,7 +118,7 @@ class Merge(unittest.TestCase):
         existing = "KUBE_CONTEXT=kind-gate\nPOLARIS_ROOT_CLIENT_SECRET=kept\n"
         text, filled, added = ie.merge(TEMPLATE, existing, counter())
         env = ie.parse(text)
-        self.assertEqual(added, ["NS_CATALOG_POLARIS", "NS_CATALOG_DATAHUB", "S3_ENDPOINT",
+        self.assertEqual(added, ["NS_CATALOG_POLARIS", "NS_CATALOG_DATAHUB", "S3_ENDPOINT", "S3_REGION",
                                  "POLARIS_S3_ACCESS_KEY_ID", "POLARIS_S3_SECRET_ACCESS_KEY",
                                  "SMOKE_S3_ACCESS_KEY_ID", "SMOKE_S3_SECRET_ACCESS_KEY",
                                  "POLARIS_BACKUP_S3_ACCESS_KEY_ID",
@@ -153,6 +154,7 @@ class WriteEnv(unittest.TestCase):
 def full_env():
     env = ie.parse(ie.merge(TEMPLATE, None, counter())[0])
     env["KUBE_CONTEXT"] = "kind-gate"
+    env["S3_REGION"] = "eu-test-1"
     for name in BY_HAND:
         env[name] = f"typed-{name}"
     return env
@@ -196,10 +198,12 @@ class Manifests(unittest.TestCase):
         self.assertEqual(decode(by_name["smoke-s3"]), {
             "accessKeyId": env["SMOKE_S3_ACCESS_KEY_ID"],
             "secretAccessKey": env["SMOKE_S3_SECRET_ACCESS_KEY"]})
-        # ADR-043 §2: the backups' own key, never Polaris's warehouse key.
+        # ADR-043 §2: the backups' own key, never Polaris's warehouse key, and the region the
+        # plugin signs for (ADR-060).
         self.assertEqual(decode(by_name["polaris-backup-s3"]), {
             "accessKeyId": env["POLARIS_BACKUP_S3_ACCESS_KEY_ID"],
-            "secretAccessKey": env["POLARIS_BACKUP_S3_SECRET_ACCESS_KEY"]})
+            "secretAccessKey": env["POLARIS_BACKUP_S3_SECRET_ACCESS_KEY"],
+            "region": "eu-test-1"})
         self.assertEqual(by_name["polaris-backup-s3"]["items"][1]["type"], "Opaque")
         self.assertEqual(decode(by_name["datahub-db"]), {
             "username": "datahub", "password": env["DATAHUB_DB_PASSWORD"]})
@@ -226,6 +230,11 @@ class Problems(unittest.TestCase):
             "polaris-s3: POLARIS_S3_SECRET_ACCESS_KEY is empty",
             "datahub-db: NS_CATALOG_DATAHUB is empty",
         ])
+
+    def test_an_empty_region_stops_the_backup_secret(self):
+        env = full_env()
+        env["S3_REGION"] = ""
+        self.assertEqual(ie.secret_problems(env), ["polaris-backup-s3: S3_REGION is empty"])
 
 
 class ApplySecrets(unittest.TestCase):

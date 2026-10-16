@@ -1,6 +1,7 @@
 # Where polaris-pg's WAL and base backups go (ADR-043): the backup bucket on the S3 endpoint
-# from .env, with the backups' own key. The Barman Cloud Plugin, in the operator's namespace,
-# reads it; gates/gate.py check-restore restores from it by this name.
+# from .env, with the backups' own key, signed for S3_REGION (ADR-060). The Barman Cloud
+# Plugin, in the operator's namespace, reads it; gates/gate.py check-restore restores from it by
+# this name.
 apiVersion: barmancloud.cnpg.io/v1
 kind: ObjectStore
 metadata:
@@ -22,3 +23,6 @@ spec:
       secretAccessKey:
         name: {{ .Values.backup.credentialsSecret }}
         key: secretAccessKey
+      region:
+        name: {{ .Values.backup.credentialsSecret }}
+        key: region
