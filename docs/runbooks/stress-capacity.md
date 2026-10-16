@@ -186,6 +186,9 @@ done
   that started straight after measured the restart, not Polaris.
 - Each profile prints one line per step, then `PROFILE: knee N req/s`. A step in which
   Polaris or polaris-pg restarted says so at the end of its line. It gives no CPU per request.
+- **A step after which Polaris cannot be read fails** with `Polaris could not be read after
+  the step`: its liveness probe restarted it during the step (#179). The ramp waits for a
+  settled Polaris, then ends on that step, and the next profile runs.
 - **`(not reached: the ramp ended first)`:** the profile passed its last step. Raise that
   profile's `max_steps` in `gates/stress/capacity.json`, run that profile's `ramp` again,
   and name the change in the measurement.
@@ -220,6 +223,7 @@ python3 gates/stress/driver.py timeline "$OUT"
   - It also prints each table's load after the run, for the metadata growth.
 - **report** writes `summary.json` and `summary.md` under `OUT`, and prints the summary:
   - the knees and their CPU per request;
+  - each step's rate, requests, errors and error rate, and its highest p99;
   - the sizing for 12,000 req/s;
   - Polaris's size, and the hold's percentiles, heap and GC;
   - each step's restarts.

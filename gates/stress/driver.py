@@ -16,7 +16,8 @@ file it keeps goes under OUT, which stress.yml uploads.
                   ramp's last step can overload Polaris until its liveness probe restarts
                   it, #179); then runs PROFILE's steps (config.json), one k6 run per step at
                   one rate, until a step fails. Each step records when it ran and any
-                  restart of Polaris or polaris-pg in it. Around each step it reads every node's cAdvisor
+                  restart of Polaris or polaris-pg in it; a step after which Polaris
+                  cannot be read fails, after the same wait. Around each step it reads every node's cAdvisor
                   through the API server (the CPU of k6, OPA, SeaweedFS, Polaris and
                   polaris-pg, and how often the three limited ones were throttled) and
                   Polaris's /q/metrics on 8182 from the k6 pod. A step passes when k6
@@ -770,6 +771,37 @@ def _primary(env):
                                         "jsonpath={.status.currentPrimary}"]).strip()
 
 
+UNREAD = "Polaris could not be read after the step"
+
+
+def read_after(read, recover):
+    """The sample after a step, or None when it fails: an overloaded Polaris can be restarted
+    by its liveness probe during the step (#179), so recover() waits for it to settle and the
+    ramp ends on a failed step instead of stopping the run."""
+    try:
+        return read()
+    except SystemExit as e:  # gate.output stops on a failed command
+        print(f"The sample after the step failed: {e}", flush=True)
+        recover()
+        return None
+
+
+def measure(result, before, after, throttle_max):
+    """A step's result with its throttling, CPU-seconds and Polaris's own counts between the
+    samples before and after it. With no sample after it the step fails and has no cost."""
+    if after is None:
+        return result | {"passed": False, "reasons": result["reasons"] + [UNREAD],
+                         "throttle": {}, "throttled": []}
+    ratios, over = throttle(before["cpu"], after["cpu"], throttle_max)
+    return result | {
+        "throttle": ratios, "throttled": over,
+        "cpu_seconds": {k: round(after["cpu"][k]["usage"] - before["cpu"][k]["usage"], 2)
+                        for k in CONTAINERS},
+        "cpu_seconds_by_pod": {pod: round(v - before["pg_pods"].get(pod, 0), 2)
+                               for pod, v in after["pg_pods"].items()},
+        "server": server_requests(before["polaris"], after["polaris"])}
+
+
 def run_step(env, config, out, name, profile, rate, seconds, nodes, polaris_ips, primary=None,
              every=None):
     print(f"{name}: {profile} at {rate} req/s for {seconds} s", flush=True)
@@ -780,23 +812,17 @@ def run_step(env, config, out, name, profile, rate, seconds, nodes, polaris_ips,
     if watch(lambda: subprocess.Popen(argv), every,
              lambda t: series.append(probe(env, nodes, polaris_ips, t))):
         sys.exit(f"{name}: k6 failed, see above")
-    after = sample(env, nodes, polaris_ips)
+    after = read_after(lambda: sample(env, nodes, polaris_ips), lambda: settle(env, config))
     ended, restarted = _utc(), restart_problems(pods_before, _restarts(env))
     summary = json.loads(gate.output(fetch(env, K6_POD, f"/tmp/{name}.json")))
     console = gate.output(fetch(env, K6_POD, f"/tmp/{name}.log"))
     os.makedirs(os.path.join(out, "console"), exist_ok=True)
     with open(os.path.join(out, "console", f"{name}.log"), "w", encoding="utf-8") as f:
         f.write(console)
-    result = step_result(summary, config)
-    ratios, over = throttle(before["cpu"], after["cpu"], config["throttle_max"])
-    result.update({"name": name, "seconds": seconds, "throttle": ratios, "throttled": over,
-                   "cpu_seconds": {k: round(after["cpu"][k]["usage"] - before["cpu"][k]["usage"],
-                                            2) for k in CONTAINERS},
-                   "cpu_seconds_by_pod": {pod: round(v - before["pg_pods"].get(pod, 0), 2)
-                                          for pod, v in after["pg_pods"].items()},
-                   "primary": primary, "started": started, "ended": ended,
-                   "restarts": restarted,
-                   "server": server_requests(before["polaris"], after["polaris"])})
+    result = measure(step_result(summary, config), before, after, config["throttle_max"])
+    over = result["throttled"]
+    result.update({"name": name, "seconds": seconds, "primary": primary, "started": started,
+                   "ended": ended, "restarts": restarted})
     if every:
         result["series"] = series
     print(f"{name}: {'passed' if result['passed'] else 'failed'}; answered "
@@ -924,8 +950,9 @@ def report(out, pins, baseline=None):
         "polaris_size": _read(os.path.join(out, "polaris.json")),
         "profiles": {name: {k: p[k] for k in ("knee", "reached", "limited_by", "valid")}
                      | {"cpu_per_request": cpu_per_request(knee_step(p["steps"])),
-                        "steps": [{k: s[k] for k in ("rate", "passed", "answered", "error_rate",
-                                                     "p99_ms", "throttle", "reasons")}
+                        "steps": [{k: s[k] for k in ("rate", "passed", "requests", "errors",
+                                                     "answered", "error_rate", "p99_ms",
+                                                     "throttle", "reasons")}
                                   | {"restarts": s.get("restarts", [])}
                                   for s in p["steps"]]}
                      for name, p in by_profile.items()},
@@ -944,6 +971,17 @@ def report(out, pins, baseline=None):
     for name, p in summary["profiles"].items():
         lines.append(f"| {name} | {p['knee']}{'' if p['reached'] else ' (not reached)'} | "
                      f"{len(p['steps'])} | {', '.join(p['limited_by']) or 'Polaris'} |")
+    lines += ["", "Each step, its error rate against its rate:", "",
+              "| Profile | Rate (req/s) | Requests | Errors | Error rate | Answered | "
+              "Highest p99 | Result |", "|---|---|---|---|---|---|---|---|"]
+    for name, p in summary["profiles"].items():
+        for s in p["steps"]:
+            worst = max(s["p99_ms"].items(), key=lambda kv: kv[1], default=None)
+            lines.append(f"| {name} | {s['rate']} | {s['requests']:,} | {s['errors']:,} | "
+                         f"{s['error_rate']:.2%} | {s['answered']:.1%} | "
+                         f"{f'{worst[0]} {_num(worst[1])} ms' if worst else '-'} | "
+                         f"{'passed' if s['passed'] else 'failed'}"
+                         f"{', Polaris or polaris-pg restarted' if s['restarts'] else ''} |")
     costs = {n: p["cpu_per_request"] for n, p in summary["profiles"].items()
              if p["cpu_per_request"]}
     if costs:

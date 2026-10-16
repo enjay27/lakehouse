@@ -582,6 +582,38 @@ class Settle(unittest.TestCase):
                 "restarts": ["polaris-x restarted 1 time(s) during the run"]}
         self.assertIsNone(driver.cpu_per_request(step))
 
+    def sample(self, usage):
+        return {"cpu": {name: {"usage": usage, "periods": 100, "throttled": 0, "memory": 1}
+                        for name in driver.CONTAINERS},
+                "polaris": [""], "pg_pods": {"polaris-pg-1": usage}}
+
+    def test_a_polaris_unread_after_its_step_waits_to_settle_and_gives_no_sample(self):
+        calls = []
+
+        def unreadable():
+            raise SystemExit("wget: can't connect to remote host: Connection refused")
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertIsNone(driver.read_after(unreadable, lambda: calls.append("settle")))
+        self.assertEqual(calls, ["settle"])
+        self.assertEqual(driver.read_after(lambda: "sample", lambda: calls.append("x")),
+                         "sample")
+        self.assertEqual(calls, ["settle"])
+
+    def test_a_step_with_no_sample_after_it_fails_with_no_cost(self):
+        result = {"passed": True, "requests": 100, "reasons": []}
+        measured = driver.measure(dict(result, reasons=[]), self.sample(10.0), None, 0.05)
+        self.assertFalse(measured["passed"])
+        self.assertEqual(measured["reasons"], [driver.UNREAD])
+        self.assertEqual((measured["throttle"], measured["throttled"]), ({}, []))
+        self.assertNotIn("cpu_seconds", measured)
+        self.assertIsNone(driver.cpu_per_request(dict(measured, primary=None)))
+        read = driver.measure(dict(result, reasons=[]), self.sample(10.0), self.sample(12.5),
+                              0.05)
+        self.assertTrue(read["passed"])
+        self.assertEqual(read["cpu_seconds"]["polaris"], 2.5)
+        self.assertEqual(read["cpu_seconds_by_pod"], {"polaris-pg-1": 2.5})
+
 
 class Timeline(unittest.TestCase):
     """The Prometheus stand-in's view of the run, kept as evidence (ADR-046, #174)."""
@@ -642,6 +674,12 @@ class Report(unittest.TestCase):
         self.assertEqual(saved["profiles"]["mixed"]["knee"], 100)
         self.assertEqual(saved["profiles"]["mixed"]["limited_by"], ["opa"])
         self.assertIn("| mixed | 100 | 2 | opa |", text.getvalue())
+        self.assertEqual({k: saved["profiles"]["mixed"]["steps"][0][k]
+                          for k in ("requests", "errors")}, {"requests": 1050, "errors": 0})
+        self.assertIn("| mixed | 100 | 1,050 | 0 | 0.00% | 100.0% | commit 400 ms | passed |",
+                      text.getvalue(), "each step's error rate against its rate")
+        self.assertIn("| mixed | 150 | 1,050 | 0 | 0.00% | 100.0% | commit 400 ms | failed |",
+                      text.getvalue())
         self.assertIn("Hold at 70 req/s for 10 s", text.getvalue())
         self.assertIn("Correctness: no fault", text.getvalue())
 
