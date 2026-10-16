@@ -230,5 +230,57 @@ class Summaries(unittest.TestCase):
         self.assertEqual(len([l for l in text.splitlines() if l.startswith("| C0")]), 4)
 
 
+
+def s5_record(run=1, valid=True, lost_seq=None):
+    """S5: writes confirmed between the cut, 10 s before the pause, and the pause at T0."""
+    record = run_record(setup="C1", scenario="S5", outage_ms=130_000, lost_seq=lost_seq)
+    record.update({"run": run, "run_id": f"C1-S5-{run}", "valid": valid,
+                   "invalid_reason": None if valid else "the survivor did not fall behind",
+                   "nodes": ["lakehouse-gate-worker", "lakehouse-gate-worker2"],
+                   "survivor": "polaris-pg-1",
+                   "cut": {"start": T0 - 10_000, "end": T0 + 50, "survivor_lsn": "0/3000000",
+                           "standby_lsn": "0/3001000", "primary_lsn": "0/3001000"}})
+    return record
+
+
+class NodeLosses(unittest.TestCase):
+    """S4 and S5 (ADR-058 §2)."""
+
+    def test_the_writes_confirmed_after_the_cut_are_at_risk(self):
+        got = results.summarize(s5_record(lost_seq=595))
+        # steady() writes every 100 ms: 100 per mode in the 10 s before the pause.
+        self.assertEqual(got["modes"]["pooled"]["at_risk"], 100)
+        self.assertEqual(got["modes"]["pooled"]["lost"], 1)
+        self.assertTrue(got["valid"])
+        self.assertEqual(got["survivor"], "polaris-pg-1")
+        self.assertEqual(got["nodes"], ["lakehouse-gate-worker", "lakehouse-gate-worker2"])
+        self.assertEqual(got["cut"]["survivor_lsn"], "0/3000000")
+
+    def test_without_a_cut_nothing_is_at_risk_and_the_run_is_valid(self):
+        got = results.summarize(run_record())
+        self.assertIsNone(got["modes"]["pooled"]["at_risk"])
+        self.assertTrue(got["valid"])
+
+    def test_an_invalid_run_is_reported_and_not_counted(self):
+        runs = [results.summarize(s5_record(1)), results.summarize(s5_record(2, valid=False))]
+        table = results.aggregate(runs)
+        self.assertEqual(table[("C1", "S5", "pooled")]["runs"], 1)
+        self.assertEqual(table[("C1", "S5", "pooled")]["at_risk_total"], 100)
+        self.assertEqual(results.invalid(runs),
+                         ["C1-S5-2: the survivor did not fall behind"])
+        self.assertIsNone(results.aggregate([results.summarize(run_record())])[
+            ("C0", "S1", "pooled")]["at_risk_total"])
+
+    def test_markdown_lists_the_writes_at_risk_and_the_invalid_runs(self):
+        runs = [results.summarize(s5_record(1, lost_seq=595)),
+                results.summarize(s5_record(2, valid=False))]
+        text = results.markdown(results.aggregate(runs), results.invalid(runs))
+        self.assertIn("| C1 | S5 | pooled | 1 | 100 | 1 |", text)
+        self.assertIn("Not counted: C1-S5-2: the survivor did not fall behind", text)
+        plain = results.markdown(results.aggregate([results.summarize(run_record())]))
+        self.assertNotIn("at risk", plain)
+        self.assertNotIn("Not counted", plain)
+
+
 if __name__ == "__main__":
     unittest.main()

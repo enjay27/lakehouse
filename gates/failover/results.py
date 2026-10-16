@@ -12,6 +12,9 @@ time is epoch milliseconds, read on the runner, the one clock of the kind cluste
   bound.
 - **A confirmed write is lost** when its commit returned to the probe and its row is missing.
 - **Commit latency:** p50 and p99, nearest rank, over the 60 s before the failure.
+- **S5's writes at risk** (ADR-058 §2): commits that returned after the survivor was cut off
+  and before both workers were paused. Only the standby paused with the primary holds them.
+- **An invalid run** (S5 whose survivor did not fall behind) is listed, not counted.
 """
 
 import datetime as dt
@@ -82,6 +85,15 @@ def lost(records, mode, rows):
     """Sequence numbers whose commit returned and whose row is missing from `rows`, a set of
     (mode, seq)."""
     return sorted(r["seq"] for r in _of(records, mode) if r["ok"] and (mode, r["seq"]) not in rows)
+
+
+def at_risk(records, mode, cut, t0):
+    """S5: the confirmed writes sent after the cut started and done before the pause; None
+    without a cut."""
+    if not cut:
+        return None
+    return sum(1 for r in _of(records, mode)
+               if r["ok"] and r["sent"] >= cut["start"] and r["done"] < t0)
 
 
 def percentile(values, p):
@@ -162,8 +174,12 @@ def summarize(run):
                        else round(out["outage_ms"] / 1000, 1),
                        "recovered": out["recovered"], "failed": failed(probe, mode, t0),
                        "lost": len(lost(probe, mode, rows)),
+                       "at_risk": at_risk(probe, mode, run.get("cut"), t0),
                        "latency": latency(probe, mode, t0)}
     return {"setup": run["setup"], "scenario": run["scenario"], "run": run["run"],
+            "run_id": run.get("run_id", f"{run['setup']}-{run['scenario']}-{run['run']}"),
+            "valid": run.get("valid", True), "invalid_reason": run.get("invalid_reason"),
+            "nodes": run.get("nodes"), "survivor": run.get("survivor"), "cut": run.get("cut"),
             "node_down_s": run.get("node_down_s"), "old_primary": run["old_primary"],
             "new_primary": found["new_primary"], "settings": run.get("settings", {}),
             "events_s": {"detected": _seconds(found["detected"], t0),
@@ -175,9 +191,11 @@ def summarize(run):
 
 
 def aggregate(summaries):
-    """{(setup, scenario, mode): row}: median and worst over the runs."""
+    """{(setup, scenario, mode): row}: median and worst over the valid runs."""
     groups = {}
     for s in summaries:
+        if not s["valid"]:
+            continue
         for mode, m in s["modes"].items():
             groups.setdefault((s["setup"], s["scenario"], mode), []).append(m)
     table = {}
@@ -192,12 +210,19 @@ def aggregate(summaries):
                       "failed_median": statistics.median(m["failed"] for m in runs),
                       "lost_total": sum(m["lost"] for m in runs),
                       "lost_worst": max(m["lost"] for m in runs),
+                      "at_risk_total": None if any(m["at_risk"] is None for m in runs)
+                      else sum(m["at_risk"] for m in runs),
                       "latency_p50_median_ms": statistics.median(p50) if p50 else None,
                       "latency_p99_worst_ms": max(p99) if p99 else None}
     return table
 
 
-def markdown(table):
+def invalid(summaries):
+    """`run: reason` for each run not counted."""
+    return [f"{s['run_id']}: {s['invalid_reason']}" for s in summaries if not s["valid"]]
+
+
+def markdown(table, not_counted=()):
     lines = ["| Setup | Failure | Mode | Runs | Outage median (s) | Outage worst (s) | "
              "All recovered | Failed writes, median | Confirmed and lost, total | "
              "Commit p50 (ms) | Commit p99, worst (ms) |",
@@ -208,4 +233,12 @@ def markdown(table):
                      f"{'yes' if row['all_recovered'] else 'no'} | {row['failed_median']} | "
                      f"{row['lost_total']} | {row['latency_p50_median_ms']} | "
                      f"{row['latency_p99_worst_ms']} |")
+    risky = [(key, row) for key, row in table.items() if row["at_risk_total"] is not None]
+    if risky:
+        lines += ["", "| Setup | Failure | Mode | Runs | Confirmed after the cut (at risk), "
+                      "total | Confirmed and lost, total |", "|---|---|---|---|---|---|"]
+        lines += [f"| {setup} | {scenario} | {mode} | {row['runs']} | {row['at_risk_total']} | "
+                  f"{row['lost_total']} |" for (setup, scenario, mode), row in risky]
+    if not_counted:
+        lines += [""] + [f"Not counted: {line}" for line in not_counted]
     return "\n".join(lines) + "\n"

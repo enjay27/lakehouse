@@ -15,11 +15,13 @@
           loads it into kind. Adds the setup and the image to STATE, which `up` began with
           the grace period, for `run`.
   run SETUP --out DIR [--scenarios S1,S2,S3] [--runs N] [--node-down SECONDS]
-          each failure N times: waits for a healthy cluster (before S3, with the primary on a
-          worker), starts a probe pod, takes 60 s of writes, injects the failure while polling
-          the cluster each second, waits until both of the probe's modes write again for 10 s
-          (at most RUN_TIMEOUT), then reads the probe's table on the primary once every
-          instance is back. Each run's record goes to DIR/<run>.json; prints the table.
+          each failure N times: waits for a healthy cluster (before S3 to S5, with the primary
+          on a worker), starts a probe pod, takes 60 s of writes, injects the failure while
+          polling the cluster each second, waits until both of the probe's modes write again
+          for 10 s (at most RUN_TIMEOUT), then reads the probe's table on the primary once
+          every instance is back. S4 and S5, named in --scenarios, pause both workers; S5
+          first cuts the survivor off from the primary for CUT_S and checks it fell behind
+          (ADR-058 §1). Each run's record goes to DIR/<run>.json; prints the table.
   report DIR
           the table of every record in DIR (results.py).
   matrix [--setups C0,..] [--scenarios S1,..] [--grace-job true|false]
@@ -121,11 +123,12 @@ def primary_of(env):
     return cluster["status"]["currentPrimary"]
 
 
-def psql_command(env, sql, database="postgres"):
-    """`sql` on the primary, as postgres through its local socket."""
-    return kubectl(env["NS_CATALOG_POLARIS"], "exec", primary_of(env), "-c", "postgres", "--",
-                   "psql", "-v", "ON_ERROR_STOP=1", "-d", database, "-At", "-F", ",", "-c",
-                   sql)
+def psql_command(env, sql, database="postgres", pod=None):
+    """`sql` on the primary, or on the instance `pod`, as postgres through its local
+    socket."""
+    return kubectl(env["NS_CATALOG_POLARIS"], "exec", pod or primary_of(env), "-c", "postgres",
+                   "--", "psql", "-v", "ON_ERROR_STOP=1", "-d", database, "-At", "-F", ",",
+                   "-c", sql)
 
 
 def psql(env, sql, database="postgres"):
@@ -262,8 +265,31 @@ class Poller(threading.Thread):
             self.stopping.wait(max(0, POLL_S - (now_ms() - t) / 1000))
 
 
+def fell_behind(env, standby, survivor):
+    """S5, just before the pause: (valid, reason, LSNs). Valid when the survivor has received
+    less WAL than the standby `standby` has flushed, so that only the standby paused with the
+    primary holds the last confirmed commits (ADR-058 §1)."""
+    lsns = {"primary_lsn": None, "standby_lsn": None, "survivor_lsn": None}
+    code, out = call(psql_command(env, setups.standby_flush_query(standby)))
+    if code != 0:
+        return False, f"the primary did not answer: {out.strip()}", lsns
+    if not out.strip():
+        return False, f"the primary lists no standby {standby}", lsns
+    lsns["primary_lsn"], lsns["standby_lsn"] = out.strip().splitlines()[0].split(",")
+    if not lsns["standby_lsn"]:
+        return False, f"{standby} has reported no flushed LSN", lsns
+    code, out = call(psql_command(env, setups.RECEIVED_QUERY, pod=survivor))
+    if code != 0:
+        return False, f"{survivor} did not answer: {out.strip()}", lsns
+    lsns["survivor_lsn"] = out.strip()
+    if setups.lsn(lsns["survivor_lsn"]) >= setups.lsn(lsns["standby_lsn"]):
+        return False, (f"{survivor} received {lsns['survivor_lsn']}, not behind {standby}'s "
+                       f"{lsns['standby_lsn']}"), lsns
+    return True, None, lsns
+
+
 def place_primary(env):
-    """Before S3: the primary onto a worker, as `kubectl cnpg promote` would move it."""
+    """Before S3 to S5: the primary onto a worker, as `kubectl cnpg promote` would move it."""
     ns = env["NS_CATALOG_POLARIS"]
     primary = primary_of(env)
     target = setups.switchover_target(instances(env), primary)
@@ -289,11 +315,15 @@ def probe_logs(ns, name):
 def one_run(env, state, scenario, n, node_down_s):
     ns, setup = env["NS_CATALOG_POLARIS"], state["setup"]
     settle(env)
-    if scenario == "S3":
+    if scenario in setups.NODE_LOSSES:
         place_primary(env)
     primary = primary_of(env)
-    pod = json.loads(must(kubectl(ns, "get", "pod", primary, "-o", "json")))
-    node = pod["spec"]["nodeName"]
+    pods = instances(env)
+    by_name = {p["metadata"]["name"]: p for p in pods["items"]}
+    node = by_name[primary]["spec"]["nodeName"]
+    placed = setups.placement(pods, primary) if scenario in ("S4", "S5") else None
+    standby_node = placed["standby_node"] if placed else None
+    nodes = [node] + ([standby_node] if placed else [])
     run_id = f"{setup}-{scenario}-{n}"
     name = f"failover-probe-{run_id.lower()}"
     must(kubectl(ns, "apply", "-f", "-"),
@@ -308,12 +338,33 @@ def one_run(env, state, scenario, n, node_down_s):
     poller = Poller(env)
     poller.start()
     resume = None
-    t0 = now_ms()
-    print(f"{run_id}: {scenario} on {primary} ({node}) at {t0}", flush=True)
-    must(setups.inject_command(scenario, ns, primary, node))
+    cut, uncut, valid, reason = None, [], True, None
     try:
-        if scenario == "S3":
-            resume = threading.Timer(node_down_s, call, [setups.resume_command(node)])
+        if scenario == "S5":
+            add, uncut = setups.cut_commands(by_name[placed["survivor"]]["status"]["podIP"],
+                                             by_name[primary]["status"]["podIP"])
+            cut = {"start": now_ms()}
+            for argv in add:
+                must(argv)
+            print(f"{run_id}: {placed['survivor']} cut off from {primary} at {cut['start']}",
+                  flush=True)
+            time.sleep(setups.CUT_S)
+            valid, reason, lsns = fell_behind(env, placed["standby"], placed["survivor"])
+            cut.update(lsns)
+            if not valid:
+                print(f"{run_id}: not counted: {reason}", flush=True)
+        t0 = now_ms()
+        print(f"{run_id}: {scenario} on {primary} ({', '.join(nodes)}) at {t0}", flush=True)
+        must(setups.inject_command(scenario, ns, primary, node, standby_node))
+        if uncut:
+            # Both workers are frozen: nothing reaches the survivor until they are unpaused,
+            # and the instances must reach each other again once they are.
+            for argv in uncut:
+                must(argv)
+            cut["end"] = now_ms()
+            uncut = []
+        if scenario in setups.NODE_LOSSES:
+            resume = threading.Timer(node_down_s, call, [setups.resume_command(*nodes)])
             resume.start()
         end = time.monotonic() + RUN_TIMEOUT_S
         timed_out = False
@@ -327,10 +378,14 @@ def one_run(env, state, scenario, n, node_down_s):
                 timed_out = True
                 break
     finally:
+        # No filter is left in place and no node is left paused: removing a filter already
+        # removed, or unpausing a node already unpaused, only fails.
+        for argv in uncut:
+            call(argv)
         if resume is not None:
-            # The node is never left paused: unpausing one already unpaused only fails.
             resume.cancel()
-            call(setups.resume_command(node))
+        if scenario in setups.NODE_LOSSES:
+            call(setups.resume_command(*nodes))
         poller.stopping.set()
         poller.join()
     text = probe_logs(ns, name)
@@ -343,8 +398,10 @@ def one_run(env, state, scenario, n, node_down_s):
                                       release.OPERATOR_LABEL, "--tail=-1",
                                       f"--since-time={since}"))
     return {"setup": setup, "scenario": scenario, "run": n, "run_id": run_id, "t0": t0,
-            "old_primary": primary, "node": node,
-            "node_down_s": node_down_s if scenario == "S3" else None,
+            "old_primary": primary, "node": node, "nodes": nodes,
+            "survivor": placed["survivor"] if placed else None, "cut": cut,
+            "valid": valid, "invalid_reason": reason,
+            "node_down_s": node_down_s if scenario in setups.NODE_LOSSES else None,
             "timed_out": timed_out, "observations": poller.observations,
             "operator_log": operator_log if code == 0 else "",
             "probe": results.parse_records(text),
@@ -371,7 +428,7 @@ def run(setup, scenarios, runs, node_down_s, out):
             summaries.append(summary)
             print(json.dumps({k: summary[k] for k in ("setup", "scenario", "run", "events_s",
                                                       "modes")}), flush=True)
-    print(results.markdown(results.aggregate(summaries)))
+    print(results.markdown(results.aggregate(summaries), results.invalid(summaries)))
 
 
 def report(directory):
@@ -379,7 +436,7 @@ def report(directory):
     for path in sorted(glob.glob(os.path.join(directory, "**", "*.json"), recursive=True)):
         with open(path, encoding="utf-8") as f:
             summaries.append(results.summarize(json.load(f)))
-    print(results.markdown(results.aggregate(summaries)))
+    print(results.markdown(results.aggregate(summaries), results.invalid(summaries)))
 
 
 def main(argv):

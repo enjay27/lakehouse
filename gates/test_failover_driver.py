@@ -86,5 +86,58 @@ class C1qApplied(C1Applied):
             self.assertTrue(driver.c1_applied(ENV, "C1q"))
 
 
+
+class FellBehind(unittest.TestCase):
+    """S5 counts only if the survivor fell behind the standby lost with the primary
+    (ADR-058 §1)."""
+
+    def setUp(self):
+        p = mock.patch.object(driver, "primary_of", return_value="polaris-pg-2")
+        p.start()
+        self.addCleanup(p.stop)
+
+    @staticmethod
+    def answers(primary="0/3001000,0/3001000\n", survivor="0/3000000\n"):
+        def call(argv, stdin=None):
+            pod = argv[argv.index("exec") + 1]
+            if pod == "polaris-pg-2":
+                return 0, primary
+            if pod == "polaris-pg-1":
+                return 0, survivor
+            raise AssertionError(argv)
+        return call
+
+    def check(self, **answers):
+        with mock.patch.object(driver, "call", side_effect=self.answers(**answers)):
+            return driver.fell_behind(ENV, "polaris-pg-3", "polaris-pg-1")
+
+    def test_valid_when_the_survivor_received_less_than_the_standby_flushed(self):
+        self.assertEqual(self.check(), (True, None, {
+            "primary_lsn": "0/3001000", "standby_lsn": "0/3001000",
+            "survivor_lsn": "0/3000000"}))
+
+    def test_invalid_when_the_survivor_kept_up(self):
+        valid, reason, _ = self.check(survivor="0/3001000\n")
+        self.assertFalse(valid)
+        self.assertIn("polaris-pg-1 received 0/3001000", reason)
+
+    def test_invalid_when_the_primary_lists_no_such_standby(self):
+        valid, reason, lsns = self.check(primary="\n")
+        self.assertFalse(valid)
+        self.assertIn("polaris-pg-3", reason)
+        self.assertIsNone(lsns["standby_lsn"])
+
+    def test_invalid_when_the_standby_reported_no_flush(self):
+        valid, reason, _ = self.check(primary="0/3001000,\n")
+        self.assertFalse(valid)
+        self.assertIn("no flushed LSN", reason)
+
+    def test_invalid_when_an_instance_does_not_answer(self):
+        with mock.patch.object(driver, "call", return_value=(2, "psql: error")):
+            valid, reason, _ = driver.fell_behind(ENV, "polaris-pg-3", "polaris-pg-1")
+        self.assertFalse(valid)
+        self.assertIn("psql: error", reason)
+
+
 if __name__ == "__main__":
     unittest.main()
