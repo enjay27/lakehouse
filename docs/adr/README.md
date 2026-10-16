@@ -91,7 +91,7 @@ flowchart LR
 | [040](040-log-batch-fixtures-come-from-a-real-utc-roll-and-a-log-batch-gate-ships-them-into-an-opensearch-stand-in.md) | Log batch fixtures come from a real UTC roll; a Log Batch Gate ships them into an OpenSearch stand-in | Amended by ADR-041 |
 | [041](041-the-log-batch-gate-creates-fixtures-only-when-no-unexpired-artifact-holds-their-spec-hash.md) | The Log Batch Gate creates fixtures only when no unexpired artifact holds their spec hash | Accepted |
 | [042](042-the-release-workflow-pushes-the-log-batchs-image-to-ghcr-and-clusters-pull-it-from-a-registry-named-in-env.md) | The release workflow pushes the log batch's image to GHCR; clusters pull it from a registry named in `.env` | Accepted |
-| [043](043-every-postgresql-backs-up-to-s3-through-the-barman-cloud-plugin-which-the-operator-team-installs.md) | Every PostgreSQL backs up to S3 through the Barman Cloud Plugin, which the operator team installs | Accepted |
+| [043](043-every-postgresql-backs-up-to-s3-through-the-barman-cloud-plugin-which-the-operator-team-installs.md) | Every PostgreSQL backs up to S3 through the Barman Cloud Plugin, which the operator team installs | Amended by ADR-060 |
 | [044](044-ingress-is-denied-by-default-allowed-per-caller-and-proven-on-the-gate.md) | Ingress is denied by default and allowed per caller; Polaris's policies are a chart, proven on the gate | Superseded by ADR-048 |
 | [045](045-the-cnpg-operator-and-its-backup-plugin-are-the-operator-teams-and-a-release-installs-in-a-fixed-order.md) | The CNPG operator and its backup plugin are the operator team's; a release installs in a fixed order | Accepted |
 | [046](046-metrics-are-a-scrape-contract-for-the-observability-teams-prometheus-proven-by-a-stand-in-on-the-gate.md) | Metrics are a scrape contract for the observability team's Prometheus, proven by a stand-in on the gate | Accepted |
@@ -108,7 +108,7 @@ flowchart LR
 | [057](057-adr-056s-proof-compares-the-chart-with-itself-before-the-change-synchronous-commits-cost-s1-about-4-s.md) | ADR-056's proof compares the chart with itself before the change; synchronous commits cost S1 about 4 s | Accepted |
 | [058](058-the-primary-and-a-standby-lost-together-are-measured-and-failoverquorum-enters-the-chart-if-it-keeps-a-lagging-standby-from-losing-writes.md) | The primary and a standby lost together are measured, and failoverQuorum enters the chart if it keeps a lagging standby from losing writes | Accepted |
 | [059](059-auto-merge-also-leaves-adrs-and-agent-rules-to-kade.md) | Auto-merge also leaves ADRs and agent rules to Kade | Accepted |
-| [060](060-polaris-pgs-backups-sign-for-s3-region-from-the-backup-secret.md) | polaris-pg's backups sign for `S3_REGION`, read from the backup Secret | Proposed |
+| [060](060-polaris-pgs-backups-sign-for-s3-region-from-the-backup-secret.md) | polaris-pg's backups sign for `S3_REGION`, read from the backup Secret | Accepted |
 
 ## Not ADRs
 

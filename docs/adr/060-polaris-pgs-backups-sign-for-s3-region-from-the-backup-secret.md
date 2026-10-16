@@ -1,6 +1,6 @@
 # ADR-060: polaris-pg's backups sign for `S3_REGION`, read from the backup Secret
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-16
 - **Related:** ADR-006, ADR-031, ADR-034, ADR-043
 
