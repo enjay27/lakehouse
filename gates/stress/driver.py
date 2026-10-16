@@ -8,7 +8,8 @@ file it keeps goes under OUT, which stress.yml uploads.
                   in a short-lived pod on the pinned Python image (the check label, root's
                   credentials, the smoke tests' S3 key); puts its tables into the ConfigMap
                   as tables.json; records the restarts of Polaris's and polaris-pg's
-                  containers; starts the long-lived k6 pod (pinned, the check label, the CPU
+                  containers, and polaris-pg's primary and the time; starts the long-lived
+                  k6 pod (pinned, the check label, the CPU
                   limit in config.json) and waits until it is ready.
   ramp PROFILE OUT
                   runs PROFILE's steps (config.json), one k6 run per step at one rate,
@@ -29,7 +30,10 @@ file it keeps goes under OUT, which stress.yml uploads.
                   it is left out); a commit answered 200 missing from its table's snapshots,
                   a snapshot the scenario never had answered 200 nor left unknown, or one
                   listed twice (seed.py verify loads every table); a restart or replacement
-                  of a Polaris or polaris-pg pod.
+                  of a Polaris or polaris-pg pod. It also records, without judging, whether
+                  polaris-pg's primary changed since the seed and how often its instances'
+                  readiness probe failed: CNPG demotes a primary inside its container, so a
+                  failover under load restarts no container, and the restart check misses it.
   report OUT [BASELINE]
                   writes summary.json and summary.md (printed too) from what OUT holds: each
                   profile's knee and steps, the hold's percentiles, verify's result and, with
@@ -42,6 +46,7 @@ here reaches any cluster but the kind cluster (ADR-017).
 Usage: driver.py seed OUT | ramp PROFILE OUT | hold OUT | verify OUT | report OUT [BASELINE]
 """
 
+import datetime as dt
 import glob
 import json
 import math
@@ -285,6 +290,58 @@ def restart_problems(before, after):
     return problems
 
 
+# polaris-pg's instance pods, not its Job pods (`polaris-pg-1-initdb-...`) nor Polaris's.
+PG_INSTANCE = re.compile(rf"^{re.escape(release.POLARIS_PG)}-\d+$")
+
+
+def pg_before(cluster, since):
+    return {"primary": cluster.get("status", {}).get("currentPrimary"), "since": since}
+
+
+def pg_events_command(env):
+    return _kubectl(env) + ["get", "events",
+                            "--field-selector=involvedObject.kind=Pod,reason=Unhealthy",
+                            "-o", "json"]
+
+
+def _when(text):
+    return dt.datetime.fromisoformat(text.replace("Z", "+00:00")) if text else None
+
+
+def pg_watch(before, cluster, events):
+    """polaris-pg's primary at the seed and now, and its instances' readiness probe failures
+    last seen since the seed, by pod."""
+    since, failures = _when(before["since"]), {}
+    for e in events.get("items", []):
+        pod = e.get("involvedObject", {}).get("name", "")
+        last = _when(e.get("lastTimestamp") or e.get("eventTime"))
+        if (e.get("reason") == "Unhealthy" and PG_INSTANCE.match(pod)
+                and str(e.get("message", "")).startswith("Readiness probe failed")
+                and last is not None and last >= since):
+            failures[pod] = failures.get(pod, 0) + (e.get("count") or 1)
+    return {"primary_before": before["primary"],
+            "primary_after": cluster.get("status", {}).get("currentPrimary"),
+            "readiness_failures": dict(sorted(failures.items()))}
+
+
+def pg_line(watch):
+    if not watch:
+        return "polaris-pg: not recorded"
+    before, after = watch["primary_before"], watch["primary_after"]
+    primary = (f"{before} primary throughout" if before == after
+               else f"the primary changed from {before} to {after}")
+    failures = watch["readiness_failures"]
+    probe = (f"{sum(failures.values())} readiness probe failure(s): "
+             + ", ".join(f"{pod} {n}" for pod, n in failures.items())
+             if failures else "no readiness probe failure")
+    return f"polaris-pg: {primary}; {probe}"
+
+
+def _pg_cluster(env):
+    return json.loads(gate.output(_kubectl(env) + ["get", f"cluster/{release.POLARIS_PG}",
+                                                   "-o", "json"]))
+
+
 def hold_rate(config, mixed_knee):
     if not mixed_knee:
         return None
@@ -448,6 +505,8 @@ def seed(env, pins, config, out):
     _write(os.path.join(out, "tables.json"), result)
     _apply(env, configmap(env, result), f"the ConfigMap {CONFIGMAP} with the seed's tables")
     _write(os.path.join(out, "restarts.json"), _restarts(env))
+    since = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _write(os.path.join(out, "polaris_pg.json"), pg_before(_pg_cluster(env), since))
     _apply(env, k6_pod(env, pins["load_images"]["k6"]["image"], config), f"pod/{K6_POD}")
     gate.run(_kubectl(env) + ["wait", "--for=condition=Ready", f"pod/{K6_POD}",
                               "--timeout=180s"])
@@ -552,7 +611,12 @@ def verify(env, pins, out):
     held = _read(os.path.join(out, "hold.json"))
     problems += correctness(by_profile, held if held and "skipped" not in held else None)
     problems += restart_problems(_read(os.path.join(out, "restarts.json"), {}), _restarts(env))
-    _write(os.path.join(out, "verify.json"), {"problems": problems, "commits": tally})
+    before = _read(os.path.join(out, "polaris_pg.json"))
+    watch = before and pg_watch(before, _pg_cluster(env),
+                                json.loads(gate.output(pg_events_command(env))))
+    _write(os.path.join(out, "verify.json"), {"problems": problems, "commits": tally,
+                                              "polaris_pg": watch})
+    print(pg_line(watch), flush=True)
     print(f"Commits: {tally.get('ok', 0)} answered 200, {tally.get('unknown', 0)} unknown, "
           f"{tally.get('found', 0)} new snapshots found", flush=True)
     for line in problems or ["No correctness fault."]:
@@ -602,6 +666,8 @@ def report(out, pins, baseline=None):
     checked = summary["verify"]
     lines += ["", "Correctness: " + ("not verified" if checked is None else
                                      "; ".join(checked["problems"]) or "no fault")]
+    if checked is not None:
+        lines += ["", pg_line(checked.get("polaris_pg"))]
     if baseline:
         lines += ["", "Against the baseline run:", ""] + [f"- {x}" for x in
                                                          summary["comparison"]]
