@@ -293,6 +293,63 @@ class RebuildReplica(unittest.TestCase):
                         self.assertNotIn("rebuild-replica", step.get("run", ""), name)
 
 
+class Stress(unittest.TestCase):
+    """stress.yml runs only when Kade starts it, never on a push or in the release gate
+    (ADR-054 §1); it builds the gate as smoke does, in direct mode (ADR-053 §4)."""
+
+    def setUp(self):
+        self.workflow = read_workflow(os.path.join(WORKFLOWS, "stress.yml"))
+        self.job = self.workflow["jobs"]["stress"]
+
+    def test_its_only_trigger_is_workflow_dispatch_with_profiles_and_a_baseline_run(self):
+        self.assertEqual(list(self.workflow["on"]), ["workflow_dispatch"])
+        inputs = self.workflow["on"]["workflow_dispatch"]["inputs"]
+        self.assertEqual(set(inputs), {"profiles", "baseline_run"})
+        self.assertEqual(inputs["profiles"]["default"],
+                         "commits queries-conditional queries-full mixed")
+        self.assertEqual(inputs["baseline_run"]["default"], "")
+        self.assertNotIn("stress.yml", gate_workflows())
+
+    def test_no_workflow_calls_it(self):
+        for name, workflow in workflows().items():
+            for job in (workflow.get("jobs") or {}).values():
+                self.assertNotEqual(job.get("uses"), "./.github/workflows/stress.yml", name)
+
+    def test_each_job_gets_only_the_read_it_needs(self):
+        self.assertEqual(self.workflow["permissions"], {})
+        self.assertEqual(self.job["permissions"], {"contents": "read"})
+        self.assertEqual(self.workflow["jobs"]["baseline"]["permissions"], {"actions": "read"})
+        self.assertEqual(sorted(self.workflow["jobs"]), ["baseline", "stress"])
+
+    def test_it_stops_after_60_minutes_and_never_keeps_credentials(self):
+        self.assertEqual(self.job["timeout-minutes"], "60")
+        (checkout,) = [s for s in self.job["steps"]
+                       if str(s.get("uses", "")).startswith("actions/checkout@")]
+        self.assertEqual(checkout["with"]["persist-credentials"], "false")
+
+    def test_the_steps_build_the_gate_in_direct_mode_then_seed_ramp_hold_verify_report(self):
+        runs = [s.get("run", "") for s in self.job["steps"]]
+        order = ["gate.py up", "gate.py secrets --direct", "gate.py batch-image",
+                 "gate.py standins --direct", "gate.py install --fresh",
+                 "stress/driver.py seed", "stress/driver.py ramp", "stress/driver.py hold",
+                 "stress/driver.py verify", "stress/driver.py report"]
+        found = [next(i for i, r in enumerate(runs) if command in r) for command in order]
+        self.assertEqual(found, sorted(found))
+        self.assertFalse(any(re.search(r"gate\.py (secrets|standins)\s*($|\|)", r)
+                             for r in runs), "both run in direct mode")
+
+    def test_inputs_reach_the_scripts_through_the_environment_only(self):
+        for job in self.workflow["jobs"].values():
+            for step in job["steps"]:
+                self.assertNotIn("${{ inputs.", step.get("run", ""))
+
+    def test_the_summary_is_uploaded_whatever_the_outcome(self):
+        (upload,) = [s for s in self.job["steps"]
+                     if str(s.get("uses", "")).startswith("actions/upload-artifact@")]
+        self.assertEqual(upload["if"], "${{ !cancelled() }}")
+        self.assertEqual(upload["with"]["name"], "stress")
+
+
 class DeleteWorkflow(unittest.TestCase):
     def setUp(self):
         self.workflow = read_workflow(os.path.join(WORKFLOWS, DELETE))
