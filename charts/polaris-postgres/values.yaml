@@ -20,6 +20,18 @@ podAntiAffinityType: required
 # 180 and C1 8.4 s with 0 (#31). A tuning value (ADR-047 §8).
 smartShutdownTimeout: 0
 
+# How fast an instance whose PostgreSQL stops answering goes unready, and one back comes ready
+# (CNPG's readiness probe). The primary going unready is what starts a failover, and the `-rw`
+# Service follows readiness. CNPG's default probes every 10 s with a 5 s timeout, so a failure
+# takes up to 30 s to see, and a primary back after a node loss waits up to 10 s: failover.yml's
+# C0-S4-1 came back 9 s after C0-S4-3 (#178). 1 s, 1 s and 3 sees a failure within 3 s, as C1
+# measured. The liveness probe stays CNPG's. Tuning values (ADR-047 §8).
+probes:
+  readiness:
+    periodSeconds: 1
+    timeoutSeconds: 1
+    failureThreshold: 3
+
 # Synchronous replication (ADR-056): a commit returns once `number` of the standbys have it,
 # whichever answer first (CNPG's `method: any`). `required`: commits wait while fewer standbys
 # are healthy, so writes stop rather than lose a confirmed one; `preferred` would go on without

@@ -16,6 +16,12 @@ spec:
     podAntiAffinityType: {{ .Values.podAntiAffinityType }}
     topologyKey: kubernetes.io/hostname
   smartShutdownTimeout: {{ .Values.smartShutdownTimeout }}
+  # The readiness probe's timings (ADR-047 §8); the liveness probe stays CNPG's.
+  probes:
+    readiness:
+      periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+      timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+      failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
   {{- if ge (int .Values.instances) 3 }}
   # Commits wait for any one standby (ADR-056), and promotion for a standby holding them
   # (ADR-058); with fewer instances, asynchronous.

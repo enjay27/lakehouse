@@ -807,8 +807,9 @@ class GateEnv(unittest.TestCase):
 
 IMAGE = "ghcr.io/cloudnative-pg/postgresql:16.15-1-minimal-trixie@sha256:" + "a" * 64
 SYNC = {"number": 1, "dataDurability": "required", "failoverQuorum": True}
+READINESS = {"periodSeconds": 1, "timeoutSeconds": 1, "failureThreshold": 3}
 VALUES = {"instances": 3, "image": IMAGE, "podAntiAffinityType": "required",
-          "smartShutdownTimeout": 0, "synchronous": SYNC}
+          "smartShutdownTimeout": 0, "synchronous": SYNC, "probes": {"readiness": READINESS}}
 # What CNPG keeps of the chart's block, with a field it fills in itself.
 RUNNING_SYNC = {"method": "any", **SYNC, "maxStandbyNamesFromCluster": 2}
 # The FailoverQuorum CNPG keeps for the Cluster, as the primary's instance manager reports it.
@@ -820,16 +821,21 @@ def pg_problems(values, running, instances, quorum=QUORUM):
     return gate.polaris_pg_problems(values, running, instances, quorum)
 
 
-def cluster(instances=3, image=IMAGE, ready=3, anti="required", shutdown=0, sync=RUNNING_SYNC):
+def cluster(instances=3, image=IMAGE, ready=3, anti="required", shutdown=0, sync=RUNNING_SYNC,
+            readiness=READINESS):
     spec = {"instances": instances, "imageName": image, "smartShutdownTimeout": shutdown,
-            "affinity": {"podAntiAffinityType": anti}}
+            "affinity": {"podAntiAffinityType": anti}, "probes": {"readiness": readiness}}
     if sync is not None:
         spec["postgresql"] = {"synchronous": sync}
     return {"spec": spec, "status": {"readyInstances": ready}}
 
 
-def pods(*nodes):
-    return {"items": [{"metadata": {"name": f"polaris-pg-{i + 1}"}, "spec": {"nodeName": n}}
+def pods(*nodes, readiness=READINESS):
+    # What the kubelet runs: CNPG's probe with the Cluster's timings, and a successThreshold.
+    probe = {"httpGet": {"path": "/readyz", "port": 8000}, "successThreshold": 1, **readiness}
+    return {"items": [{"metadata": {"name": f"polaris-pg-{i + 1}"},
+                       "spec": {"nodeName": n, "containers": [
+                           {"name": "postgres", "readinessProbe": probe}]}}
                       for i, n in enumerate(nodes)]}
 
 
@@ -907,6 +913,24 @@ class PolarisPg(unittest.TestCase):
         quorum = {"status": {**QUORUM["status"], "standbyNumber": 2}}
         problems, _ = pg_problems(VALUES, cluster(), pods("a", "b", "c"), quorum)
         self.assertIn("FailoverQuorum", "\n".join(problems))
+
+    def test_a_different_readiness_probe_on_the_cluster_is_found(self):
+        # ADR-047 §8.
+        running = {**READINESS, "periodSeconds": 10}
+        problems, _ = pg_problems(VALUES, cluster(readiness=running), pods("a", "b", "c"))
+        self.assertIn("readiness", "\n".join(problems))
+
+    def test_an_instance_still_on_another_readiness_probe_is_found(self):
+        old = {"periodSeconds": 10, "timeoutSeconds": 5, "failureThreshold": 3}
+        running = pods("a", "b", "c")
+        running["items"][2] = pods("c", readiness=old)["items"][0]
+        running["items"][2]["metadata"]["name"] = "polaris-pg-3"
+        problems, _ = pg_problems(VALUES, cluster(), running)
+        self.assertIn("polaris-pg-3", "\n".join(problems))
+
+    def test_the_readiness_probe_is_named_in_the_notes(self):
+        _, notes = pg_problems(VALUES, cluster(), pods("a", "b", "c"))
+        self.assertIn("readiness every 1 s, 1 s timeout, 3 failures", "\n".join(notes))
 
     def test_values_without_the_failover_quorum_need_no_object(self):
         values = {**VALUES, "synchronous": {**SYNC, "failoverQuorum": False}}

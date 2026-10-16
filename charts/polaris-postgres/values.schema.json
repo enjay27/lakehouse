@@ -2,13 +2,30 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "type": "object",
   "additionalProperties": false,
-  "required": ["instances", "image", "podAntiAffinityType", "smartShutdownTimeout",
+  "required": ["instances", "image", "podAntiAffinityType", "smartShutdownTimeout", "probes",
                "synchronous", "storage", "database", "owner", "credentialsSecret", "backup"],
   "properties": {
     "instances": {"type": "integer", "minimum": 1},
     "image": {"type": "string", "pattern": "^[^@\\s]+:[^@\\s]+@sha256:[0-9a-f]{64}$"},
     "podAntiAffinityType": {"enum": ["required", "preferred"]},
     "smartShutdownTimeout": {"type": "integer", "minimum": 0},
+    "probes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["readiness"],
+      "properties": {
+        "readiness": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["periodSeconds", "timeoutSeconds", "failureThreshold"],
+          "properties": {
+            "periodSeconds": {"type": "integer", "minimum": 1},
+            "timeoutSeconds": {"type": "integer", "minimum": 1},
+            "failureThreshold": {"type": "integer", "minimum": 1}
+          }
+        }
+      }
+    },
     "synchronous": {
       "type": "object",
       "additionalProperties": false,

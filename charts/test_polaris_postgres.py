@@ -32,7 +32,8 @@ CHART = os.path.join(HERE, "polaris-postgres")
 NAMESPACE = "catalog-polaris"
 # CNPG's own defaults for the fields this chart sets (CNPG 1.30 API reference).
 CNPG_DEFAULTS = {"instances": 1, "podAntiAffinityType": "preferred", "smartShutdownTimeout": 180,
-                 "failoverQuorum": False}
+                 "failoverQuorum": False,
+                 "readiness": {"periodSeconds": 10, "timeoutSeconds": 5, "failureThreshold": 3}}
 # What install/release.py passes from .env (ADR-043 §2), as helm lint reads it in static.yml;
 # the chart has no default for them.
 LINT_VALUES = os.path.join(CHART, "ci", "lint-values.yaml")
@@ -153,6 +154,22 @@ class Rendered(unittest.TestCase):
         self.assertIs(sync["failoverQuorum"], True)
         self.assertNotEqual(sync["failoverQuorum"], CNPG_DEFAULTS["failoverQuorum"])
 
+    def test_an_instance_is_unready_within_3_s_of_postgresql_not_answering(self):
+        # ADR-047 §8, ADR-057 §3: CNPG's default takes up to 30 s, and a primary back after a
+        # node loss waits up to 10 s for its next probe (#178's C0-S4-1).
+        readiness = self.spec["probes"]["readiness"]
+        self.assertEqual(readiness, {"periodSeconds": 1, "timeoutSeconds": 1,
+                                     "failureThreshold": 3})
+        self.assertLessEqual(readiness["periodSeconds"] * readiness["failureThreshold"], 3)
+        self.assertNotEqual(readiness, CNPG_DEFAULTS["readiness"])
+        self.assertEqual(set(self.spec["probes"]), {"readiness"})  # liveness stays CNPG's
+
+    def test_the_readiness_probe_is_a_value(self):
+        spec = by_kind(render("probes.readiness.timeoutSeconds=3",
+                              "probes.readiness.failureThreshold=5"))["Cluster"]["spec"]
+        self.assertEqual(spec["probes"]["readiness"], {"periodSeconds": 1, "timeoutSeconds": 3,
+                                                       "failureThreshold": 5})
+
     def test_fewer_than_three_instances_stay_asynchronous(self):
         # ADR-056 §3: one standby restarting would stop every write.
         for n in (1, 2):
@@ -246,6 +263,12 @@ class ValuesSchema(unittest.TestCase):
 
     def test_an_unknown_data_durability_is_refused(self):
         self.assertRefused("synchronous.dataDurability=sometimes")
+
+    def test_a_readiness_probe_below_one_or_unknown_is_refused(self):
+        for field in ("periodSeconds", "timeoutSeconds", "failureThreshold"):
+            self.assertRefused(f"probes.readiness.{field}=0")
+        self.assertRefused("probes.readiness.successThreshold=2")
+        self.assertRefused("probes.liveness.periodSeconds=1")
 
     def test_a_textual_failover_quorum_is_refused(self):
         self.assertRefused("synchronous.failoverQuorum=sometimes")

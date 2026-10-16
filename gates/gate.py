@@ -80,7 +80,9 @@
                   was installed with, its shutdown timeout and synchronous replication among
                   them (ADR-056), and checks its instances run on different nodes (ADR-016).
                   When the values turn on failoverQuorum, its `FailoverQuorum` object must
-                  report quorum over `number` standbys (ADR-058 §3).
+                  report quorum over `number` standbys (ADR-058 §3). The readiness probe's
+                  timings must be the values' on the Cluster and on every instance pod
+                  (ADR-047 §8).
   check-polaris   compares the running Polaris (its Deployment, pods and ConfigMap) with the
                   values its helm release was installed with and with `.env`, checks its
                   replicas run on different nodes (ADR-016), then runs gates/check_polaris.sh
@@ -811,9 +813,19 @@ def polaris_pg_problems(values, cluster, pods, quorum):
             ("synchronous", polaris_pg_sync(running_sync),
              polaris_pg_sync(values["synchronous"], values["instances"])),
             ("failoverQuorum", bool((running_sync or {}).get("failoverQuorum")),
-             wanted_quorum)):
+             wanted_quorum),
+            ("readiness probe", readiness_timings(spec.get("probes", {}).get("readiness")),
+             readiness_timings(values["probes"]["readiness"]))):
         if running != wanted:
             problems.append(f"{field}: {running} running, {wanted} in the values")
+    wanted_probe = readiness_timings(values["probes"]["readiness"])
+    for pod in pods["items"]:
+        postgres = next((c for c in pod["spec"].get("containers", [])
+                         if c["name"] == "postgres"), {})
+        probe = readiness_timings(postgres.get("readinessProbe"))
+        if probe != wanted_probe:
+            problems.append(f"{pod['metadata']['name']}: readiness probe {probe} running, "
+                            f"{wanted_probe} in the values")
     status = (quorum or {}).get("status", {})
     reported = (f"{str(status.get('method', '')).lower()} {status.get('standbyNumber')}"
                 if status else None)
@@ -832,9 +844,18 @@ def polaris_pg_problems(values, cluster, pods, quorum):
     replication = "synchronous " + " ".join(str(v) for v in sync) if sync else "asynchronous"
     if reported:
         replication += f", failover quorum {reported}"
+    period, timeout, threshold = wanted_probe
     return problems, [f"Cluster {release.POLARIS_PG}: {ready} instances ready on "
                       f"{len(nodes)} nodes ({', '.join(str(n) for n in nodes)}), image "
-                      f"{spec['imageName']}, anti-affinity {anti}, replication {replication}."]
+                      f"{spec['imageName']}, anti-affinity {anti}, replication {replication}, "
+                      f"readiness every {period} s, {timeout} s timeout, {threshold} failures."]
+
+
+def readiness_timings(probe):
+    """(periodSeconds, timeoutSeconds, failureThreshold) of a readiness probe, None without."""
+    if probe is None:
+        return None
+    return tuple(probe.get(k) for k in ("periodSeconds", "timeoutSeconds", "failureThreshold"))
 
 
 def polaris_pg_sync(block, instances=None):
