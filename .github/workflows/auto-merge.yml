@@ -2,9 +2,9 @@
 # deletes the branch and closes the issues it names with `Closes #N` (ADR-022). Runs when a
 # check workflow below completes; scripts/auto_merge_gate.py merges only when every check on
 # the PR's head commit is green. Anything else is left for a person: a failed or cancelled
-# check, another branch prefix, a fork, a stale run, a PR into any other branch, a draft, and
-# a PR that changes .github/workflows/ or the gate scripts or whose files cannot be read
-# whole (ADR-030).
+# check, another branch prefix, a fork, a stale run, a PR into any other branch, a draft, a
+# PR that changes .github/workflows/ or the gate scripts (ADR-030) or docs/adr/, CLAUDE.md or
+# .claude/rules/ (ADR-059), and a PR whose files cannot be read whole.
 # Add each new PR check workflow's name to `workflows:` in the PR that adds it. The merge also
 # requires the checks `static` and `gate-check` (ADR-039) by name: with two workflows starting
 # this one, either may finish before the other has started, and a check not started yet must
@@ -68,7 +68,8 @@ jobs:
             --jq '.check_runs[] | {name, status, conclusion}' | jq -s . > "$RUNNER_TEMP/check-runs.json"
           gh api "repos/$REPO/commits/$RUN_SHA/status" \
             --jq '{state, total_count}' > "$RUNNER_TEMP/status.json"
-          # ADR-030: drafts and PRs that change the merge rules or the checks go to Kade.
+          # ADR-030, ADR-059: drafts, and PRs that change the merge rules, the checks, the
+          # ADRs or the agent rules, go to Kade.
           gh api "repos/$REPO/pulls/$number" --jq '{draft, changed_files}' > "$RUNNER_TEMP/pr.json"
           gh api --paginate "repos/$REPO/pulls/$number/files?per_page=100" \
             --jq '.[] | {filename, previous_filename}' | jq -s . > "$RUNNER_TEMP/files.json"

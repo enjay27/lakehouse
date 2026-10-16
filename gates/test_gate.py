@@ -806,11 +806,18 @@ class GateEnv(unittest.TestCase):
 
 
 IMAGE = "ghcr.io/cloudnative-pg/postgresql:16.15-1-minimal-trixie@sha256:" + "a" * 64
-SYNC = {"number": 1, "dataDurability": "required"}
+SYNC = {"number": 1, "dataDurability": "required", "failoverQuorum": True}
 VALUES = {"instances": 3, "image": IMAGE, "podAntiAffinityType": "required",
           "smartShutdownTimeout": 0, "synchronous": SYNC}
 # What CNPG keeps of the chart's block, with a field it fills in itself.
 RUNNING_SYNC = {"method": "any", **SYNC, "maxStandbyNamesFromCluster": 2}
+# The FailoverQuorum CNPG keeps for the Cluster, as the primary's instance manager reports it.
+QUORUM = {"status": {"method": "ANY", "standbyNumber": 1, "primary": "polaris-pg-1",
+                     "standbyNames": ["polaris-pg-2", "polaris-pg-3"]}}
+
+
+def pg_problems(values, running, instances, quorum=QUORUM):
+    return gate.polaris_pg_problems(values, running, instances, quorum)
 
 
 def cluster(instances=3, image=IMAGE, ready=3, anti="required", shutdown=0, sync=RUNNING_SYNC):
@@ -830,60 +837,88 @@ class PolarisPg(unittest.TestCase):
     """The running Cluster against the chart's values (ADR-016)."""
 
     def test_as_installed_passes_and_names_the_nodes(self):
-        problems, notes = gate.polaris_pg_problems(VALUES, cluster(), pods("a", "b", "c"))
+        problems, notes = pg_problems(VALUES, cluster(), pods("a", "b", "c"))
         self.assertEqual(problems, [])
         self.assertIn("3 nodes", "\n".join(notes))
         self.assertIn("synchronous any 1 required", "\n".join(notes))
 
     def test_a_different_instance_count_is_found(self):
-        problems, _ = gate.polaris_pg_problems(VALUES, cluster(instances=1, ready=1), pods("a"))
+        problems, _ = pg_problems(VALUES, cluster(instances=1, ready=1), pods("a"))
         self.assertIn("instances", "\n".join(problems))
 
     def test_a_different_image_is_found(self):
-        problems, _ = gate.polaris_pg_problems(VALUES, cluster(image="postgres:16"),
+        problems, _ = pg_problems(VALUES, cluster(image="postgres:16"),
                                                pods("a", "b", "c"))
         self.assertIn("image", "\n".join(problems))
 
     def test_instances_not_ready_are_found(self):
-        problems, _ = gate.polaris_pg_problems(VALUES, cluster(ready=2), pods("a", "b", "c"))
+        problems, _ = pg_problems(VALUES, cluster(ready=2), pods("a", "b", "c"))
         self.assertIn("ready", "\n".join(problems))
 
     def test_a_different_anti_affinity_is_found(self):
-        problems, _ = gate.polaris_pg_problems(VALUES, cluster(anti="preferred"),
+        problems, _ = pg_problems(VALUES, cluster(anti="preferred"),
                                                pods("a", "b", "c"))
         self.assertIn("podAntiAffinityType", "\n".join(problems))
 
     def test_a_different_shutdown_timeout_is_found(self):
-        problems, _ = gate.polaris_pg_problems(VALUES, cluster(shutdown=180), pods("a", "b", "c"))
+        problems, _ = pg_problems(VALUES, cluster(shutdown=180), pods("a", "b", "c"))
         self.assertIn("smartShutdownTimeout", "\n".join(problems))
 
     def test_asynchronous_replication_with_three_instances_is_found(self):
         # ADR-056 §1.
-        problems, _ = gate.polaris_pg_problems(VALUES, cluster(sync=None), pods("a", "b", "c"))
+        problems, _ = pg_problems(VALUES, cluster(sync=None), pods("a", "b", "c"))
         self.assertIn("synchronous", "\n".join(problems))
 
     def test_a_different_durability_is_found(self):
         running = {**RUNNING_SYNC, "dataDurability": "preferred"}
-        problems, _ = gate.polaris_pg_problems(VALUES, cluster(sync=running), pods("a", "b", "c"))
+        problems, _ = pg_problems(VALUES, cluster(sync=running), pods("a", "b", "c"))
         self.assertIn("synchronous", "\n".join(problems))
 
     def test_one_instance_runs_asynchronously(self):
         # ADR-056 §3.
         values = {**VALUES, "instances": 1}
-        problems, notes = gate.polaris_pg_problems(values, cluster(instances=1, ready=1, sync=None),
+        problems, notes = pg_problems(values, cluster(instances=1, ready=1, sync=None),
                                                    pods("a"))
         self.assertEqual(problems, [])
         self.assertIn("asynchronous", "\n".join(notes))
-        problems, _ = gate.polaris_pg_problems(values, cluster(instances=1, ready=1), pods("a"))
+        problems, _ = pg_problems(values, cluster(instances=1, ready=1), pods("a"))
         self.assertIn("synchronous", "\n".join(problems))
 
     def test_two_instances_on_one_node_are_found(self):
-        problems, _ = gate.polaris_pg_problems(VALUES, cluster(), pods("a", "a", "c"))
+        problems, _ = pg_problems(VALUES, cluster(), pods("a", "a", "c"))
         self.assertIn("nodes", "\n".join(problems))
+
+    def test_a_cluster_without_the_failover_quorum_is_found(self):
+        # ADR-058 §3.
+        running = {k: v for k, v in RUNNING_SYNC.items() if k != "failoverQuorum"}
+        problems, _ = pg_problems(VALUES, cluster(sync=running), pods("a", "b", "c"))
+        self.assertIn("failoverQuorum", "\n".join(problems))
+
+    def test_the_failover_quorum_object_is_named_in_the_notes(self):
+        _, notes = pg_problems(VALUES, cluster(), pods("a", "b", "c"))
+        self.assertIn("failover quorum any 1", "\n".join(notes))
+
+    def test_a_missing_failover_quorum_object_is_found(self):
+        for quorum in (None, {}, {"status": {}}):
+            problems, _ = pg_problems(VALUES, cluster(), pods("a", "b", "c"), quorum)
+            self.assertIn("FailoverQuorum", "\n".join(problems), quorum)
+
+    def test_a_failover_quorum_over_another_count_is_found(self):
+        quorum = {"status": {**QUORUM["status"], "standbyNumber": 2}}
+        problems, _ = pg_problems(VALUES, cluster(), pods("a", "b", "c"), quorum)
+        self.assertIn("FailoverQuorum", "\n".join(problems))
+
+    def test_values_without_the_failover_quorum_need_no_object(self):
+        values = {**VALUES, "synchronous": {**SYNC, "failoverQuorum": False}}
+        running = {**RUNNING_SYNC, "failoverQuorum": False}
+        problems, _ = pg_problems(values, cluster(sync=running), pods("a", "b", "c"), None)
+        self.assertEqual(problems, [])
 
     def test_the_check_reads_the_release_and_the_cluster_in_its_namespace(self):
         commands = gate.polaris_pg_commands("catalog-polaris")
-        self.assertEqual([c[0] for c in commands], ["helm", "kubectl", "kubectl"])
+        self.assertEqual([c[0] for c in commands], ["helm", "kubectl", "kubectl", "kubectl"])
+        self.assertIn("failoverquorum/polaris-pg", commands[3])
+        self.assertIn("--ignore-not-found", commands[3])
         for argv in commands:
             self.assertEqual(argv[argv.index("-n") + 1], "catalog-polaris")
             self.assertIn(gate.CONTEXT, argv)

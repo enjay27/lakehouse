@@ -31,7 +31,8 @@ import release  # noqa: E402
 CHART = os.path.join(HERE, "polaris-postgres")
 NAMESPACE = "catalog-polaris"
 # CNPG's own defaults for the fields this chart sets (CNPG 1.30 API reference).
-CNPG_DEFAULTS = {"instances": 1, "podAntiAffinityType": "preferred", "smartShutdownTimeout": 180}
+CNPG_DEFAULTS = {"instances": 1, "podAntiAffinityType": "preferred", "smartShutdownTimeout": 180,
+                 "failoverQuorum": False}
 # What install/release.py passes from .env (ADR-043 §2), as helm lint reads it in static.yml;
 # the chart has no default for them.
 LINT_VALUES = os.path.join(CHART, "ci", "lint-values.yaml")
@@ -143,7 +144,14 @@ class Rendered(unittest.TestCase):
         # ADR-056 §1, §2: CNPG's default is asynchronous replication.
         self.assertNotIn("postgresql", CNPG_DEFAULTS)
         self.assertEqual(self.spec["postgresql"]["synchronous"],
-                         {"method": "any", "number": 1, "dataDurability": "required"})
+                         {"method": "any", "number": 1, "dataDurability": "required",
+                          "failoverQuorum": True})
+
+    def test_promotion_waits_for_a_standby_holding_every_confirmed_commit(self):
+        # ADR-058 §3: in S5, C1 lost 512 confirmed writes and C1q none (#173).
+        sync = self.spec["postgresql"]["synchronous"]
+        self.assertIs(sync["failoverQuorum"], True)
+        self.assertNotEqual(sync["failoverQuorum"], CNPG_DEFAULTS["failoverQuorum"])
 
     def test_fewer_than_three_instances_stay_asynchronous(self):
         # ADR-056 §3: one standby restarting would stop every write.
@@ -152,17 +160,18 @@ class Rendered(unittest.TestCase):
             self.assertNotIn("postgresql", spec, f"instances={n}")
 
     def test_the_synchronous_values_are_values(self):
-        spec = by_kind(render("synchronous.number=2",
-                              "synchronous.dataDurability=preferred"))["Cluster"]["spec"]
+        spec = by_kind(render("synchronous.number=2", "synchronous.dataDurability=preferred",
+                              "synchronous.failoverQuorum=false"))["Cluster"]["spec"]
         self.assertEqual(spec["postgresql"]["synchronous"],
-                         {"method": "any", "number": 2, "dataDurability": "preferred"})
+                         {"method": "any", "number": 2, "dataDurability": "preferred",
+                          "failoverQuorum": False})
 
     def test_the_instance_count_is_a_value(self):
         self.assertEqual(by_kind(render("instances=1"))["Cluster"]["spec"]["instances"], 1)
 
 
 class Backups(unittest.TestCase):
-    """ADR-043 §1 and §2."""
+    """ADR-043 §1 and §2, ADR-060."""
 
     @classmethod
     def setUpClass(cls):
@@ -185,8 +194,14 @@ class Backups(unittest.TestCase):
         creds = self.kinds["ObjectStore"]["spec"]["configuration"]["s3Credentials"]
         self.assertEqual(creds, {
             "accessKeyId": {"name": secret.name, "key": "accessKeyId"},
-            "secretAccessKey": {"name": secret.name, "key": "secretAccessKey"}})
-        self.assertEqual(sorted(secret.from_env), ["accessKeyId", "secretAccessKey"])
+            "secretAccessKey": {"name": secret.name, "key": "secretAccessKey"},
+            "region": {"name": secret.name, "key": "region"}})
+        self.assertEqual(sorted(secret.from_env), ["accessKeyId", "region", "secretAccessKey"])
+
+    def test_the_backups_sign_for_the_region_from_env(self):
+        """ADR-060: the plugin reads the region only from a Secret key; init_env fills it."""
+        secret = next(s for s in init_env.SECRETS if s.name == release.POLARIS_BACKUP_SECRET)
+        self.assertEqual(secret.from_env["region"], "S3_REGION")
 
     def test_retention_is_a_value_30_days_by_default(self):
         self.assertEqual(self.kinds["ObjectStore"]["spec"]["retentionPolicy"], "30d")
@@ -231,6 +246,9 @@ class ValuesSchema(unittest.TestCase):
 
     def test_an_unknown_data_durability_is_refused(self):
         self.assertRefused("synchronous.dataDurability=sometimes")
+
+    def test_a_textual_failover_quorum_is_refused(self):
+        self.assertRefused("synchronous.failoverQuorum=sometimes")
 
     def test_an_image_without_a_digest_is_refused(self):
         self.assertRefused("image=ghcr.io/cloudnative-pg/postgresql:16")

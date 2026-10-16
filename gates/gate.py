@@ -80,6 +80,8 @@
                   compares the running `Cluster` polaris-pg with the values its helm release
                   was installed with, its shutdown timeout and synchronous replication among
                   them (ADR-056), and checks its instances run on different nodes (ADR-016).
+                  When the values turn on failoverQuorum, its `FailoverQuorum` object must
+                  report quorum over `number` standbys (ADR-058 §3).
   check-polaris   compares the running Polaris (its Deployment, pods and ConfigMap) with the
                   values its helm release was installed with and with `.env`, checks its
                   replicas run on different nodes (ADR-016), then runs gates/check_polaris.sh
@@ -825,7 +827,8 @@ def measure_timeline(since, commands):
 
 
 def polaris_pg_commands(namespace):
-    """The helm release's values, the Cluster and its instance pods (not Job pods), as JSON."""
+    """The helm release's values, the Cluster, its instance pods (not Job pods) and its
+    FailoverQuorum, as JSON; nothing for a FailoverQuorum CNPG does not keep."""
     kubectl = ["kubectl", "--context", CONTEXT, "-n", namespace, "get"]
     return [
         ["helm", "--kube-context", CONTEXT, "-n", namespace, "get", "values",
@@ -833,12 +836,17 @@ def polaris_pg_commands(namespace):
         kubectl + [f"cluster/{release.POLARIS_PG}", "-o", "json"],
         kubectl + ["pods", "-l", f"cnpg.io/cluster={release.POLARIS_PG},cnpg.io/podRole=instance",
                    "-o", "json"],
+        kubectl + [f"failoverquorum/{release.POLARIS_PG}", "--ignore-not-found", "-o", "json"],
     ]
 
 
-def polaris_pg_problems(values, cluster, pods):
-    """The running Cluster against the values it was installed with (ADR-016)."""
+def polaris_pg_problems(values, cluster, pods, quorum):
+    """The running Cluster, and its FailoverQuorum (None without one), against the values it
+    was installed with (ADR-016)."""
     spec, problems = cluster["spec"], []
+    running_sync = spec.get("postgresql", {}).get("synchronous")
+    wanted_quorum = (polaris_pg_sync(values["synchronous"], values["instances"]) is not None
+                     and values["synchronous"]["failoverQuorum"])
     for field, running, wanted in (
             ("instances", spec["instances"], values["instances"]),
             ("image", spec["imageName"], values["image"]),
@@ -846,10 +854,18 @@ def polaris_pg_problems(values, cluster, pods):
              values["podAntiAffinityType"]),
             ("smartShutdownTimeout", spec.get("smartShutdownTimeout"),
              values["smartShutdownTimeout"]),
-            ("synchronous", polaris_pg_sync(spec.get("postgresql", {}).get("synchronous")),
-             polaris_pg_sync(values["synchronous"], values["instances"]))):
+            ("synchronous", polaris_pg_sync(running_sync),
+             polaris_pg_sync(values["synchronous"], values["instances"])),
+            ("failoverQuorum", bool((running_sync or {}).get("failoverQuorum")),
+             wanted_quorum)):
         if running != wanted:
             problems.append(f"{field}: {running} running, {wanted} in the values")
+    status = (quorum or {}).get("status", {})
+    reported = (f"{str(status.get('method', '')).lower()} {status.get('standbyNumber')}"
+                if status else None)
+    if wanted_quorum and reported != f"any {values['synchronous']['number']}":
+        problems.append(f"FailoverQuorum {release.POLARIS_PG}: {reported or 'not reported'}, "
+                        f"any {values['synchronous']['number']} in the values")
     ready = cluster.get("status", {}).get("readyInstances", 0)
     if ready != values["instances"]:
         problems.append(f"{ready} instances ready of {values['instances']}")
@@ -860,6 +876,8 @@ def polaris_pg_problems(values, cluster, pods):
     anti = spec["affinity"]["podAntiAffinityType"]
     sync = polaris_pg_sync(spec.get("postgresql", {}).get("synchronous"))
     replication = "synchronous " + " ".join(str(v) for v in sync) if sync else "asynchronous"
+    if reported:
+        replication += f", failover quorum {reported}"
     return problems, [f"Cluster {release.POLARIS_PG}: {ready} instances ready on "
                       f"{len(nodes)} nodes ({', '.join(str(n) for n in nodes)}), image "
                       f"{spec['imageName']}, anti-affinity {anti}, replication {replication}."]
@@ -935,7 +953,7 @@ def rebuilt(cluster, joins):
 def rebuild_replica(env):
     """ADR-048 §7. Returns (problems, notes)."""
     ns = env["NS_CATALOG_POLARIS"]
-    cluster_command, pods_command = polaris_pg_commands(ns)[1:]
+    cluster_command, pods_command = polaris_pg_commands(ns)[1:3]
     instance = rebuild_target(json.loads(output(cluster_command)),
                               json.loads(output(pods_command)))
     if not instance:
@@ -2138,10 +2156,10 @@ def main(argv):
         return 1 if problems else 0
     if argv[1:] == ["check-polaris-pg"]:
         namespace = os.environ.get("NS_CATALOG_POLARIS") or "catalog-polaris"
-        answers = [json.loads(subprocess.run(c, capture_output=True, text=True,
-                                             check=True).stdout)
+        outputs = [subprocess.run(c, capture_output=True, text=True, check=True).stdout
                    for c in polaris_pg_commands(namespace)]
-        problems, notes = polaris_pg_problems(*answers)
+        problems, notes = polaris_pg_problems(*(json.loads(o) if o.strip() else None
+                                                for o in outputs))
         for line in notes + problems:
             print(line)
         return 1 if problems else 0

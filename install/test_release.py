@@ -185,8 +185,11 @@ class FakeCalls:
     """Answers step 1's kubectl and helm calls; records every call."""
 
     def __init__(self, secret=True, helm=(0, ""), wait=(0, ""), clusters=None, pods=(0, ""),
-                 label=(0, ""), generations=((1, "NotFound"),)):
+                 label=(0, ""), generations=((1, "NotFound"),),
+                 backup_keys=("accessKeyId", "region", "secretAccessKey")):
         self.secret, self.helm, self.wait, self.calls = secret, helm, wait, []
+        # The key names the Secrets read gives for polaris-backup-s3 (ADR-060).
+        self.backup_keys = backup_keys
         self.pods, self.label = pods, label
         # The Cluster's generation as each read gives it, before the helm upgrade and after
         # Ready; the last answer repeats. By default there is no Cluster.
@@ -205,7 +208,10 @@ class FakeCalls:
                         self.values.append(json.load(f))
             return self.helm
         if "secret" in argv:
-            return (0, "secret/polaris-db") if self.secret else (1, "NotFound")
+            if not self.secret:
+                return (1, "NotFound")
+            return (0, f"{release.POLARIS_DB_SECRET}: password username\n"
+                       f"{release.POLARIS_BACKUP_SECRET}: {' '.join(self.backup_keys)}\n")
         if "wait" in argv:
             return self.wait
         if argv[5:7] == ["get", "pods"]:
@@ -276,6 +282,30 @@ class PolarisPostgres(unittest.TestCase):
         problems, _ = self.step(calls)
         self.assertIn("init_env.py --apply-secrets", "\n".join(problems))
         self.assertFalse(any(c[0] == "helm" for c in calls.calls))
+
+    def test_a_backup_secret_without_a_region_stops_before_helm_and_names_init_env(self):
+        """ADR-060: an upgrade that skipped --apply-secrets would archive no WAL."""
+        calls = FakeCalls(backup_keys=("accessKeyId", "secretAccessKey"))
+        problems, _ = self.step(calls)
+        self.assertEqual(problems, [
+            f"Secret {release.POLARIS_BACKUP_SECRET} in catalog-polaris has no key region: run "
+            "scripts/init_env.py --apply-secrets with this release first (ADR-060)"])
+        self.assertFalse(any(c[0] == "helm" for c in calls.calls))
+
+    def test_a_backup_secret_without_a_region_stops_a_dry_run_too(self):
+        calls = FakeCalls(backup_keys=("accessKeyId", "secretAccessKey"))
+        problems, _ = self.step(calls, dry_run=True)
+        self.assertIn("no key region", "\n".join(problems))
+        self.assertFalse(any(c[0] == "helm" for c in calls.calls))
+
+    def test_the_secrets_are_read_for_their_key_names_never_their_values(self):
+        calls = FakeCalls()
+        self.step(calls)
+        read = next(c for c in calls.calls if "secret" in c)
+        self.assertEqual(read[read.index("get"):read.index("get") + 4],
+                         ["get", "secret", release.POLARIS_DB_SECRET, release.POLARIS_BACKUP_SECRET])
+        self.assertEqual(read[-2:], ["-o", release.SECRET_KEYS_TEMPLATE])
+        self.assertNotIn("$value}}", release.SECRET_KEYS_TEMPLATE)
 
     def test_a_failed_helm_stops_with_its_error(self):
         problems, _ = self.step(FakeCalls(helm=(1, "admission webhook denied")))

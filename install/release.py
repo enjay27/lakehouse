@@ -90,6 +90,11 @@ POLARIS_DB_SECRET = "polaris-db"
 # polaris-pg's backups (ADR-043): the chart's ObjectStore and the Secret with their key.
 POLARIS_BACKUP_STORE = "polaris-backup"
 POLARIS_BACKUP_SECRET = "polaris-backup-s3"
+# Step 1 reads the Secrets it needs for their key names only, one line per Secret, never a value.
+SECRET_KEYS_TEMPLATE = ('go-template={{range .items}}{{.metadata.name}}:'
+                        '{{range $key, $value := .data}} {{$key}}{{end}}{{println}}{{end}}')
+# The key the backups' region comes from; init_env.py writes it from S3_REGION (ADR-060).
+POLARIS_BACKUP_REGION_KEY = "region"
 POLARIS = "polaris"
 POLARIS_REALM = "POLARIS"
 POLARIS_DATABASE = "polaris"
@@ -339,11 +344,17 @@ def polaris_postgres(env, run, dry_run=False):
     context = env["KUBE_CONTEXT"]
     secrets_needed = (POLARIS_DB_SECRET, POLARIS_BACKUP_SECRET)
     generation = None
-    code, _ = run(["kubectl", "--context", context, "-n", namespace, "get", "secret",
-                   *secrets_needed, "-o", "name"])
+    code, out = run(["kubectl", "--context", context, "-n", namespace, "get", "secret",
+                     *secrets_needed, "-o", SECRET_KEYS_TEMPLATE])
     if code != 0:
         return [f"Secrets {', '.join(secrets_needed)} must exist in {namespace}: run "
                 "scripts/init_env.py --apply-secrets first (ADR-006)"], []
+    keys = {name.strip(): set(rest.split())
+            for name, _, rest in (line.partition(":") for line in out.splitlines()) if name}
+    if POLARIS_BACKUP_REGION_KEY not in keys.get(POLARIS_BACKUP_SECRET, set()):
+        return [f"Secret {POLARIS_BACKUP_SECRET} in {namespace} has no key "
+                f"{POLARIS_BACKUP_REGION_KEY}: run scripts/init_env.py --apply-secrets with this "
+                "release first (ADR-060)"], []
     if not dry_run:
         generation = cluster_generation(run, context, namespace)
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:

@@ -61,10 +61,12 @@ SECRETS = [
     Secret("smoke-s3", "NS_CATALOG_POLARIS", "Opaque",
            {"accessKeyId": "SMOKE_S3_ACCESS_KEY_ID",
             "secretAccessKey": "SMOKE_S3_SECRET_ACCESS_KEY"}, {}),
-    # The backups' own S3 key, which the ObjectStore of charts/polaris-postgres reads (ADR-043).
+    # The backups' own S3 key, which the ObjectStore of charts/polaris-postgres reads (ADR-043),
+    # and the region the plugin signs for: it reads one only from a Secret key (ADR-060).
     Secret("polaris-backup-s3", "NS_CATALOG_POLARIS", "Opaque",
            {"accessKeyId": "POLARIS_BACKUP_S3_ACCESS_KEY_ID",
-            "secretAccessKey": "POLARIS_BACKUP_S3_SECRET_ACCESS_KEY"}, {}),
+            "secretAccessKey": "POLARIS_BACKUP_S3_SECRET_ACCESS_KEY",
+            "region": "S3_REGION"}, {}),
     Secret("datahub-db", "NS_CATALOG_DATAHUB", "kubernetes.io/basic-auth",
            {"password": "DATAHUB_DB_PASSWORD"}, {"username": "datahub"}),
 ]

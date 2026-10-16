@@ -42,7 +42,8 @@ class Setups(unittest.TestCase):
     def test_c1_turns_detection_shutdown_and_synchronous_replication(self):
         spec = setups.cluster_patch("C1")["spec"]
         self.assertEqual(spec["postgresql"]["synchronous"],
-                         {"method": "any", "number": 1, "dataDurability": "required"})
+                         {"method": "any", "number": 1, "dataDurability": "required",
+                          "failoverQuorum": False})
         self.assertEqual(spec["failoverDelay"], 0)
         self.assertEqual(spec["smartShutdownTimeout"], 0)
         readiness = spec["probes"]["readiness"]
@@ -50,12 +51,13 @@ class Setups(unittest.TestCase):
         self.assertNotIn("liveness", spec["probes"])  # the isolation check stays as CNPG's
 
     def test_c1q_is_c1_with_a_failover_quorum(self):
-        # ADR-056 §4: failoverQuorum is measured as a C1 variant before any release has it.
+        # ADR-058 §1: the two differ only in failoverQuorum. The chart turns it on (§3), and a
+        # merge patch keeps what it does not name, so C1 turns it off by name.
         c1, c1q = setups.cluster_patch("C1")["spec"], setups.cluster_patch("C1q")["spec"]
         self.assertIs(c1q["postgresql"]["synchronous"]["failoverQuorum"], True)
-        self.assertNotIn("failoverQuorum", c1["postgresql"]["synchronous"])
+        self.assertIs(c1["postgresql"]["synchronous"]["failoverQuorum"], False)
         without = json.loads(json.dumps(c1q))
-        del without["postgresql"]["synchronous"]["failoverQuorum"]
+        without["postgresql"]["synchronous"]["failoverQuorum"] = False
         self.assertEqual(without, c1)
         self.assertEqual(setups.jdbc_url("C1q"), setups.jdbc_url("C1"))
         self.assertIsNone(setups.pooler("C1q", NS))
