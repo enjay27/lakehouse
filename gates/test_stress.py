@@ -163,6 +163,16 @@ class Config(unittest.TestCase):
         self.assertIn("responseType", script)
         self.assertIn("null, h, 'none')", script, "loads read no body")
 
+    def test_each_client_fetches_a_new_token_before_polaris_s_hour_is_up(self):
+        # Attempt 6's hold on 2026-10-16 (#174): one token from setup() for 2 hours, and
+        # every request after its first hour was a 401.
+        with open(os.path.join(HERE, "stress", "scenario.js"), encoding="utf-8") as f:
+            script = f.read()
+        self.assertFalse("Bearer ${data.token}" in script, "no request uses setup()'s token")
+        self.assertTrue("config.token_refresh_s" in script)
+        config = driver.load_config(environ={})
+        self.assertLess(config["token_refresh_s"], 3600, "Polaris's tokens last an hour")
+
 
 class Ramp(unittest.TestCase):
     def test_rates_rise_by_the_step_up_to_max_steps(self):

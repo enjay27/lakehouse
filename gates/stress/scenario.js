@@ -7,7 +7,9 @@
 // It reads /stress/config.json (gates/stress/config.json) and /stress/tables.json (the seed's
 // result, gates/stress/seed.py). Root's credentials come from the pod's environment
 // (ROOT_CLIENT_ID, ROOT_CLIENT_SECRET, the Secret polaris-root): setup() rotates gate_stress's
-// credentials with them, and every request after that is gate_stress's.
+// credentials with them, and every request after that is gate_stress's. Polaris's tokens last
+// an hour, so each VU fetches a new one every token_refresh_s (the hold runs 2 hours); those
+// fetches are not counted among the request kinds.
 //
 // - `main`, an open-model arrival rate: each iteration picks a request kind by the profile's
 //   shares. Loads and HEADs go to any table; commits go to the tables outside the hot set.
@@ -159,8 +161,29 @@ export function setup() {
   const credentials = res.json('credentials');
   return {
     clientId: credentials.clientId, clientSecret: credentials.clientSecret,
-    token: token(credentials.clientId, credentials.clientSecret),
+    token: token(credentials.clientId, credentials.clientSecret), tokenAt: Date.now(),
   };
+}
+
+// This VU's token: setup()'s, then a new one every token_refresh_s. A fetch that fails keeps
+// the old token and is tried again 30 s later.
+let bearer = null;
+let bearerAt = 0;
+
+function authHeaders(data) {
+  if (bearer === null) {
+    bearer = data.token;
+    bearerAt = data.tokenAt;
+  }
+  if (Date.now() - bearerAt > config.token_refresh_s * 1000) {
+    try {
+      bearer = token(data.clientId, data.clientSecret);
+      bearerAt = Date.now();
+    } catch (e) {
+      bearerAt = Date.now() - (config.token_refresh_s - 30) * 1000;
+    }
+  }
+  return { Authorization: `Bearer ${bearer}`, 'Polaris-Realm': REALM };
 }
 
 // This VU's ETags: table name -> {etag, at, snapshot, sequence}.
@@ -226,7 +249,7 @@ function commit(kind, headers, table) {
 }
 
 export function main(data) {
-  const headers = { Authorization: `Bearer ${data.token}`, 'Polaris-Realm': REALM };
+  const headers = authHeaders(data);
   const r = Math.random() * total;
   const kind = (mix.find(([upTo]) => r < upTo) || mix[mix.length - 1])[1];
   if (kind === 'conditional_load') load(kind, headers, pick(tables), true);
@@ -249,7 +272,7 @@ export function main(data) {
 }
 
 export function hot(data) {
-  const headers = { Authorization: `Bearer ${data.token}`, 'Polaris-Realm': REALM };
+  const headers = authHeaders(data);
   commit('commit_hot', headers, hotTables[exec.vu.idInTest % hotTables.length]);
   sleep(config.hot.pause_ms / 1000);
 }

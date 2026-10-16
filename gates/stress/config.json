@@ -21,6 +21,7 @@
     "pause_ms": 10000
   },
   "commit_retries": 4,
+  "token_refresh_s": 1800,
   "etag_ttl_s": 300,
   "profiles": {
     "_comment": "Each profile's request mix (shares sum to 1) and its step ramp: start, start + step, ... for max_steps steps of step_seconds each. The mixed profile's shares are ADR-053's assumption until the target's metrics give the real ones (#142).",
