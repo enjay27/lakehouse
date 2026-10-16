@@ -63,14 +63,17 @@ def summary(rate=100, seconds=10, dropped=0, loads=None, commits=None, hot=None,
     }
 
 
-def cadvisor(rows):
-    """cAdvisor's text: rows of (namespace, pod, container, usage, periods, throttled)."""
+def cadvisor(rows, memory=None):
+    """cAdvisor's text: rows of (namespace, pod, container, usage, periods, throttled), and
+    each pod's working set from `memory`."""
     lines = ["# HELP container_cpu_usage_seconds_total x", "# TYPE x counter"]
     for ns, pod, container, usage, periods, throttled in rows:
         labels = f'container="{container}",id="/x",namespace="{ns}",pod="{pod}"'
         lines += [f"container_cpu_usage_seconds_total{{{labels}}} {usage} 1700000000000",
                   f"container_cpu_cfs_periods_total{{{labels}}} {periods} 1700000000000",
                   f"container_cpu_cfs_throttled_periods_total{{{labels}}} {throttled}"]
+        if memory and pod in memory:
+            lines.append(f"container_memory_working_set_bytes{{{labels}}} {memory[pod]}")
     lines.append('container_cpu_usage_seconds_total{container="",namespace="standins",'
                  'pod="opa-1"} 999')
     return "\n".join(lines) + "\n"
@@ -116,6 +119,29 @@ class Config(unittest.TestCase):
         self.assertEqual(self.config["hold"], {**self.config["hold"], "profile": "mixed",
                                                "fraction": 0.7, "seconds": 600})
         self.assertEqual(self.config["k6"]["cpu"], "2")
+
+    def test_the_hold_is_sampled_while_it_runs(self):
+        self.assertGreater(self.config["hold"]["sample_seconds"], 0)
+
+    def test_tier_ds_overlay_holds_the_mixed_profile_at_80_percent_for_2_hours(self):
+        # ADR-053 §7: the four ramps with longer steps, then the mixed profile at 80% of its
+        # knee for 2 hours; k6 keeps its 2 CPUs.
+        tier_d = driver.load_config(environ={"STRESS_OVERLAY": driver.CAPACITY})
+        self.assertEqual(driver.profiles(tier_d), driver.profiles(self.config))
+        self.assertGreater(tier_d["step_seconds"], self.config["step_seconds"])
+        self.assertEqual(tier_d["hold"], {**self.config["hold"], "fraction": 0.8,
+                                          "seconds": 7200,
+                                          "sample_seconds": tier_d["hold"]["sample_seconds"]})
+        self.assertEqual(tier_d["k6"]["cpu"], "2")
+        for name in driver.profiles(tier_d):
+            with self.subTest(profile=name):
+                self.assertEqual(tier_d["profiles"][name]["shares"],
+                                 self.config["profiles"][name]["shares"])
+
+    def test_an_overlay_is_named_from_the_repository_root_or_absolutely(self):
+        relative = driver.load_config(environ={"STRESS_OVERLAY": "gates/stress/capacity.json"})
+        self.assertEqual(relative, driver.load_config(environ={"STRESS_OVERLAY":
+                                                               driver.CAPACITY}))
 
     def test_the_scenario_knows_every_kind_and_reads_the_config(self):
         with open(os.path.join(HERE, "stress", "scenario.js"), encoding="utf-8") as f:
@@ -190,8 +216,26 @@ class Throttle(unittest.TestCase):
                          ("standins", "opa-2", "opa", 1.5, 50, 1),
                          ("catalog-polaris", "stress-k6", "stress-k6", 3, 10, 0)])
         cpu = driver.container_cpu([text], self.TARGETS)
-        self.assertEqual(cpu["opa"], {"usage": 12.0, "periods": 150, "throttled": 5})
-        self.assertEqual(cpu["seaweedfs"], {"usage": 0, "periods": 0, "throttled": 0})
+        self.assertEqual(cpu["opa"], {"usage": 12.0, "periods": 150, "throttled": 5,
+                                      "memory": 0})
+        self.assertEqual(cpu["seaweedfs"], {"usage": 0, "periods": 0, "throttled": 0,
+                                            "memory": 0})
+
+    def test_the_working_set_is_summed_per_container(self):
+        text = cadvisor([("standins", "opa-1", "opa", 1, 1, 0),
+                         ("standins", "opa-2", "opa", 1, 1, 0)],
+                        memory={"opa-1": 100, "opa-2": 50})
+        self.assertEqual(driver.container_cpu([text], self.TARGETS)["opa"]["memory"], 150)
+
+    def test_each_polaris_pg_instance_is_counted_on_its_own(self):
+        # ADR-053 §7: polaris-pg's cores for 12,000 req/s are its primary's, since every
+        # Polaris replica shares one primary.
+        text = cadvisor([("catalog-polaris", "polaris-pg-1", "postgres", 7, 0, 0),
+                         ("catalog-polaris", "polaris-pg-2", "postgres", 2, 0, 0),
+                         ("catalog-polaris", "polaris-pg-2", "plugin-barman-cloud", 9, 0, 0),
+                         ("standins", "polaris-pg-3", "postgres", 9, 0, 0)])
+        self.assertEqual(driver.pod_cpu([text], "catalog-polaris", "postgres"),
+                         {"polaris-pg-1": 7.0, "polaris-pg-2": 2.0})
 
     def test_a_component_throttled_past_the_maximum_over_a_step_is_named(self):
         before = driver.container_cpu([cadvisor([
@@ -320,6 +364,150 @@ class Baseline(unittest.TestCase):
             "hold conditional_load p99: 30 ms against 40 (-25.0%)"])
 
 
+def jvm_text(heap=(100, 50), live=70, pauses=(3, 0.5, 0.2), queue=4, rejected=1):
+    """Polaris's /q/metrics with the JVM and worker-pool series a hold sample reads."""
+    a = 'application="Polaris"'
+    old, eden = heap
+    count, total, longest = pauses
+    pool = f'{a},pool_name="vert.x-worker-thread",pool_type="worker"'
+    other = f'{a},pool_name="vert.x-internal-blocking",pool_type="worker"'
+    gc = f'action="end of minor GC",{a},cause="x",gc="PS Scavenge"'
+    return "\n".join([
+        f'jvm_memory_used_bytes{{{a},area="heap",id="PS Old Gen"}} {old}',
+        f'jvm_memory_used_bytes{{{a},area="heap",id="PS Eden Space"}} {eden}',
+        f'jvm_memory_used_bytes{{{a},area="nonheap",id="Metaspace"}} 999',
+        f'jvm_memory_max_bytes{{{a},area="heap",id="PS Old Gen"}} 4000',
+        f'jvm_memory_max_bytes{{{a},area="heap",id="PS Eden Space"}} 2000',
+        f'jvm_memory_max_bytes{{{a},area="nonheap",id="Metaspace"}} -1.0',
+        f'jvm_gc_live_data_size_bytes{{{a}}} {live}',
+        f'jvm_gc_pause_seconds_count{{{gc}}} {count}',
+        f'jvm_gc_pause_seconds_sum{{{gc}}} {total}',
+        f'jvm_gc_pause_seconds_max{{{gc}}} {longest}',
+        f'worker_pool_queue_size{{{pool}}} {queue}', f'worker_pool_queue_size{{{other}}} 50',
+        f'worker_pool_rejected_total{{{pool}}} {rejected}',
+    ]) + "\n"
+
+
+class HoldSamples(unittest.TestCase):
+    def test_a_sample_reads_the_heap_after_gc_the_pauses_and_the_worker_queue(self):
+        self.assertEqual(driver.jvm_sample([jvm_text()]), {
+            "heap_used": 150, "heap_max": 6000, "heap_after_gc": 70, "gc_pauses": 3,
+            "gc_seconds": 0.5, "gc_longest": 0.2, "worker_queue": 4, "worker_rejected": 1})
+
+    def test_the_hold_is_sampled_every_interval_until_k6_ends(self):
+        clock = {"now": 0.0}
+
+        class K6:
+            returncode = 0
+
+            def poll(self):
+                return 0 if clock["now"] >= 250 else None
+
+        def sleep(seconds):
+            clock["now"] += seconds
+
+        taken = []
+        code = driver.watch(K6, 100, taken.append, clock=lambda: clock["now"], sleep=sleep)
+        self.assertEqual(code, 0)
+        self.assertEqual(taken, [100, 200])
+
+    def test_without_an_interval_the_run_is_only_waited_for(self):
+        class K6:
+            def wait(self):
+                return 3
+
+        taken = []
+        self.assertEqual(driver.watch(K6, None, taken.append), 3)
+        self.assertEqual(taken, [])
+
+    def test_the_series_gives_the_heaps_drift_the_pauses_and_the_working_sets(self):
+        def at(t, live, used, pauses, gc, longest, queue, rejected, memory):
+            return {"t": t, "jvm": {"heap_used": used, "heap_max": 6000, "heap_after_gc": live,
+                                    "gc_pauses": pauses, "gc_seconds": gc,
+                                    "gc_longest": longest, "worker_queue": queue,
+                                    "worker_rejected": rejected},
+                    "memory": {"polaris": memory, "polaris-pg": 10}}
+        series = [at(60, 100, 300, 10, 1.0, 0.1, 0, 2, 1000),
+                  {"t": 120, "error": "kubectl exec failed"},
+                  at(180, 140, 500, 30, 4.0, 0.3, 7, 2, 1500),
+                  at(240, 120, 400, 40, 5.5, 0.2, 1, 5, 1400)]
+        self.assertEqual(driver.series_summary(series), {
+            "samples": 3, "failed_samples": 1,
+            "heap_after_gc": {"first": 100, "last": 120, "max": 140},
+            "heap_used_max": 500, "heap_max": 6000,
+            "gc": {"pauses": 30, "seconds": 4.5, "longest": 0.3},
+            "worker_queue_max": 7, "worker_rejected": 3,
+            "memory": {"polaris": {"first": 1000, "last": 1400, "max": 1500},
+                       "polaris-pg": {"first": 10, "last": 10, "max": 10}}})
+
+    def test_a_series_with_no_sample_gives_none(self):
+        self.assertIsNone(driver.series_summary([]))
+        self.assertIsNone(driver.series_summary([{"t": 60, "error": "x"}]))
+
+
+class Capacity(unittest.TestCase):
+    def step(self, rate, passed, polaris=None, pg=None, by_pod=None, primary=None,
+             requests=1000):
+        step = {"rate": rate, "passed": passed, "requests": requests}
+        if polaris is not None:
+            step["cpu_seconds"] = {"polaris": polaris, "polaris-pg": pg}
+            step["cpu_seconds_by_pod"] = by_pod or {}
+            step["primary"] = primary
+        return step
+
+    def test_the_knee_step_is_the_last_that_passed(self):
+        steps = [self.step(100, True), self.step(200, True), self.step(300, False)]
+        self.assertEqual(driver.knee_step(steps)["rate"], 200)
+        self.assertEqual(driver.knee_step(steps[:2])["rate"], 200, "the ramp ended first")
+        self.assertIsNone(driver.knee_step([self.step(100, False)]))
+        self.assertIsNone(driver.knee_step([]))
+
+    def test_cpu_per_request_at_the_knee_counts_polaris_and_polaris_pgs_primary(self):
+        step = self.step(200, True, polaris=8.0, pg=3.0, primary="polaris-pg-2",
+                         by_pod={"polaris-pg-1": 0.5, "polaris-pg-2": 2.0, "polaris-pg-3": 0.5},
+                         requests=4000)
+        self.assertEqual(driver.cpu_per_request(step), {
+            "polaris": 0.002, "polaris-pg": 0.00075, "polaris-pg primary": 0.0005})
+
+    def test_a_step_without_cpu_or_requests_has_no_cost(self):
+        self.assertIsNone(driver.cpu_per_request(None))
+        self.assertIsNone(driver.cpu_per_request(self.step(1, True)))
+        self.assertIsNone(driver.cpu_per_request(self.step(1, True, 1.0, 1.0, requests=0)))
+
+    def test_the_sizing_for_12000_req_s_divides_by_the_mixed_knee(self):
+        # ADR-053 §7: replicas = 12,000 / the mixed knee; polaris-pg's cores = 12,000 x its
+        # primary's CPU-seconds per request, all three instances' when the primary is unknown.
+        self.assertEqual(driver.TARGET_RPS, 12000)
+        self.assertEqual(driver.sizing(2500, {"polaris": 0.002, "polaris-pg": 0.0009,
+                                              "polaris-pg primary": 0.0005}),
+                         {"target_rps": 12000, "polaris_replicas": 5,
+                          "polaris_pg_primary_cores": 6.0})
+        self.assertEqual(driver.sizing(3000, {"polaris": 0.002, "polaris-pg": 0.0009})
+                         ["polaris_pg_primary_cores"], 10.8)
+        self.assertIsNone(driver.sizing(0, {"polaris": 1}))
+        self.assertIsNone(driver.sizing(100, None))
+
+    def test_polaris_size_reads_the_deployments_resources_and_the_heap_maximum(self):
+        resources = {"limits": {"cpu": "4", "memory": "8Gi"},
+                     "requests": {"cpu": "4", "memory": "8Gi"}}
+        deployment = {"spec": {"replicas": 1, "template": {"spec": {"containers": [
+            {"name": "polaris", "resources": resources}]}}}}
+        self.assertEqual(driver.polaris_size(deployment, [jvm_text()]),
+                         {"replicas": 1, "resources": resources, "heap_max_bytes": 6000})
+
+    def test_metadata_growth_compares_the_seed_with_verify_for_hot_and_ordinary_tables(self):
+        seeded = [{"name": "a", "hot": True, "metadata_bytes": 1000},
+                  {"name": "b", "hot": False, "metadata_bytes": 1100},
+                  {"name": "c", "hot": False, "metadata_bytes": 1050}]
+        found = {"a": {"metadata_bytes": 5000}, "b": {"metadata_bytes": 1500},
+                 "c": {"metadata_bytes": 1200}}
+        self.assertEqual(driver.metadata_growth(seeded, found), {
+            "seeded": {"min": 1000, "max": 1100},
+            "after": {"hot": {"min": 5000, "max": 5000},
+                      "ordinary": {"min": 1200, "max": 1500}}})
+        self.assertIsNone(driver.metadata_growth(seeded, {"a": {"new": []}}))
+
+
 class Report(unittest.TestCase):
     def write(self, out, path, data):
         os.makedirs(os.path.dirname(os.path.join(out, path)), exist_ok=True)
@@ -348,6 +536,46 @@ class Report(unittest.TestCase):
         self.assertIn("| mixed | 100 | 2 | opa |", text.getvalue())
         self.assertIn("Hold at 70 req/s for 10 s", text.getvalue())
         self.assertIn("Correctness: no fault", text.getvalue())
+
+    def test_tier_d_adds_the_cost_per_request_the_sizing_the_heap_and_the_metadata(self):
+        with tempfile.TemporaryDirectory() as out:
+            steps = [self.step(100, True), self.step(150, False)]
+            steps[0].update({"cpu_seconds": {"polaris": 4.0, "polaris-pg": 1.2},
+                             "cpu_seconds_by_pod": {"polaris-pg-1": 0.8},
+                             "primary": "polaris-pg-1", "requests": 2000})
+            self.write(out, "profiles/mixed.json", {"steps": steps, **driver.verdict(steps)})
+            hold = self.step(80, True)
+            hold["series"] = [{"t": 60, "jvm": driver.jvm_sample([jvm_text()]),
+                               "memory": {"polaris": 900, "polaris-pg": 10}}]
+            self.write(out, "hold.json", hold)
+            self.write(out, "polaris.json", {"replicas": 1, "resources": {
+                "limits": {"cpu": "4", "memory": "8Gi"}}, "heap_max_bytes": 6000})
+            self.write(out, "config.json", {"overlay": "gates/stress/capacity.json",
+                                            "config": CONFIG})
+            self.write(out, "verify.json", {"problems": [], "commits": {"ok": 1}, "metadata": {
+                "seeded": {"min": 1000, "max": 1100},
+                "after": {"hot": {"min": 5000, "max": 6000},
+                          "ordinary": {"min": 1200, "max": 1500}}}})
+            text = io.StringIO()
+            with contextlib.redirect_stdout(text):
+                driver.report(out, driver.gate.load_pins())
+            with open(os.path.join(out, "summary.json"), encoding="utf-8") as f:
+                saved = json.load(f)
+        self.assertEqual(saved["profiles"]["mixed"]["cpu_per_request"],
+                         {"polaris": 0.002, "polaris-pg": 0.0006, "polaris-pg primary": 0.0004})
+        self.assertEqual(saved["sizing"], {"target_rps": 12000, "polaris_replicas": 120,
+                                           "polaris_pg_primary_cores": 4.8})
+        self.assertEqual(saved["overlay"], "gates/stress/capacity.json")
+        self.assertEqual(saved["hold_series"]["heap_after_gc"]["max"], 70)
+        self.assertNotIn("series", saved["hold"], "the series stays in hold.json")
+        self.assertEqual(saved["polaris_size"]["heap_max_bytes"], 6000)
+        out = text.getvalue()
+        self.assertIn("| mixed | 2 | 0.4 | 0.6 |", out)
+        self.assertIn("For 12,000 req/s: 120 Polaris replicas, polaris-pg primary 4.8 cores",
+                      out)
+        self.assertIn("Heap after GC over the hold: first 70 B, last 70 B, max 70 B", out)
+        self.assertIn("Metadata: seeded 1000 to 1100 B; after the run, hot tables 5000 to "
+                      "6000 B, ordinary 1200 to 1500 B", out)
 
     def test_a_run_that_was_never_verified_says_so(self):
         with tempfile.TemporaryDirectory() as out:
@@ -421,12 +649,14 @@ class Commands(unittest.TestCase):
                          ["seed", "verify", "http://polaris:8181", "POLARIS"])
 
     def test_the_configmap_carries_the_scripts_the_config_and_the_seeds_tables(self):
-        cm = driver.configmap(ENV, {"tables": []})
+        cm = driver.configmap(ENV, {"tables": []}, CONFIG)
         self.assertEqual((cm["kind"], cm["metadata"]["name"], cm["metadata"]["namespace"]),
                          ("ConfigMap", driver.CONFIGMAP, "catalog-polaris"))
         self.assertEqual(set(cm["data"]), {"seed.py", "smoke.py", "requirements.txt",
                                            "scenario.js", "config.json", "tables.json"})
         self.assertEqual(json.loads(cm["data"]["tables.json"]), {"tables": []})
+        self.assertEqual(json.loads(cm["data"]["config.json"]), CONFIG,
+                         "the scenario reads the config the driver runs with, overlay and all")
 
     def test_k6_is_pinned_by_digest(self):
         pins = driver.gate.load_pins()

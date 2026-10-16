@@ -28,7 +28,8 @@
                   With them the recorder (ADR-034), with a TLS certificate made here, and
                   Prometheus loading docs/contracts/polaris-prometheus-scrape.yaml (ADR-046).
                   `standins --direct`: SeaweedFS and OPA also take connections from Polaris's
-                  namespace and run under the CPU limits in gates/stress/config.json (ADR-053).
+                  namespace and run under the CPU limits in gates/stress/config.json, or in
+                  the overlay STRESS_OVERLAY names (Tier D's capacity.json, ADR-053 §7).
   check-standins  runs gates/check_standins.sh in a short-lived curl pod in Polaris's namespace:
                   an S3 round trip with Polaris's credentials, and every case of
                   gates/opa/cases.json against the policy endpoint (ADR-026, ADR-031); then
@@ -204,6 +205,13 @@ GATE_ENV_GENERATED = ("POLARIS_S3_ACCESS_KEY_ID", "POLARIS_S3_SECRET_ACCESS_KEY"
 STANDIN_REGION = "us-east-1"
 # The stress scenario's tuning values (ADR-053, ADR-000 rule 11).
 STRESS_CONFIG = os.path.join(HERE, "stress", "config.json")
+# What an overlay on it may change (ADR-053 §1, §7): the rates, the step length, the hold, the
+# stand-ins' CPU and k6's VUs; never the shares, the pass rules, the seed or k6's CPU.
+STRESS_OVERLAY_KEYS = {"step_seconds": True,
+                       "profiles": {"*": {"start": True, "step": True, "max_steps": True}},
+                       "hold": {"fraction": True, "seconds": True, "sample_seconds": True},
+                       "standin_cpu": {"*": True},
+                       "k6": {"pre_vus": True, "max_vus": True}}
 STANDIN_BUCKET = "polaris-warehouse"
 STANDIN_BACKUP_BUCKET = "polaris-backup"
 # Polaris's own S3 key, as the AWS SDK reads it: catalogs without STS are read and written with
@@ -364,10 +372,48 @@ def standin_endpoints(ns, direct=False):
     }
 
 
-def stress_standin_cpu(path=STRESS_CONFIG):
-    """The CPU limit of each stand-in a stress install reaches directly (ADR-053 §4)."""
+def _overlay(base, overlay, allowed, where):
+    """`base` with `overlay`'s values, each of which `allowed` must name ("*" for any key base
+    has) and base must hold, with the same type; anything else is a ValueError."""
+    merged = dict(base)
+    for key, value in overlay.items():
+        if key.startswith("_"):
+            continue
+        rule = allowed.get(key, allowed.get("*")) if isinstance(allowed, dict) else None
+        path = f"{where}{key}"
+        if rule is None or key not in base:
+            raise ValueError(f"{path}: not a value the overlay may change")
+        if isinstance(rule, dict):
+            if not isinstance(value, dict) or not isinstance(base[key], dict):
+                raise ValueError(f"{path}: expected an object")
+            merged[key] = _overlay(base[key], value, rule, f"{path}.")
+        elif type(value) is not type(base[key]) and not (
+                isinstance(value, (int, float)) and isinstance(base[key], (int, float))
+                and not isinstance(value, bool)):
+            raise ValueError(f"{path}: {value!r} is not a {type(base[key]).__name__}")
+        else:
+            merged[key] = value
+    return merged
+
+
+def stress_config(environ=None, path=STRESS_CONFIG):
+    """gates/stress/config.json, with the overlay STRESS_OVERLAY names (from the repository's
+    root, or absolute) on top: Tier D's, gates/stress/capacity.json (ADR-053 §7). An overlay
+    changes only the rates, the step length, the hold, the stand-ins' CPU and k6's VUs, so
+    both tiers run the same scenario (ADR-053 §1)."""
+    environ = os.environ if environ is None else environ
     with open(path, encoding="utf-8") as f:
-        limits = json.load(f)["standin_cpu"]
+        config = json.load(f)
+    name = environ.get("STRESS_OVERLAY")
+    if not name:
+        return config
+    with open(os.path.join(ROOT, name), encoding="utf-8") as f:
+        return _overlay(config, json.load(f), STRESS_OVERLAY_KEYS, "")
+
+
+def stress_standin_cpu(path=STRESS_CONFIG, environ=None):
+    """The CPU limit of each stand-in a stress install reaches directly (ADR-053 §4)."""
+    limits = stress_config(environ, path)["standin_cpu"]
     return {name: cpu for name, cpu in limits.items() if not name.startswith("_")}
 
 

@@ -56,10 +56,11 @@
   },
   "throttle_max": 0.05,
   "hold": {
-    "_comment": "After the ramps, the mixed profile at fraction of its knee (ADR-053 §5, ADR-054 §1).",
+    "_comment": "After the ramps, the mixed profile at fraction of its knee (ADR-053 §5, ADR-054 §1), Polaris's heap, GC and worker queue sampled every sample_seconds while it runs (ADR-053 §7).",
     "profile": "mixed",
     "fraction": 0.7,
-    "seconds": 600
+    "seconds": 600,
+    "sample_seconds": 60
   },
   "k6": {
     "_comment": "The k6 pod's CPU limit (ADR-053 §2), the VUs the arrival rate may use and each request's timeout.",
