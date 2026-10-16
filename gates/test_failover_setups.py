@@ -27,11 +27,13 @@ class Setups(unittest.TestCase):
         self.assertEqual(setups.SETUPS, ("C0", "C1", "C2"))
         self.assertEqual(setups.VARIANTS, ("C1q",))
         self.assertEqual(setups.SCENARIOS, ("S1", "S2", "S3"))
+        self.assertEqual(setups.NAMED_SCENARIOS, ("S4", "S5"))
         setups.check("C1q", "S3")
+        setups.check("C1q", "S5")
         with self.assertRaises(ValueError):
             setups.check("C3a", "S1")
         with self.assertRaises(ValueError):
-            setups.check("C0", "S4")
+            setups.check("C0", "S6")
 
     def test_c0_is_the_chart_as_released(self):
         self.assertIsNone(setups.cluster_patch("C0"))
@@ -180,6 +182,61 @@ class Commands(unittest.TestCase):
         with self.assertRaises(ValueError):
             setups.inject_command("S3", NS, "polaris-pg-1", setups.CONTROL_PLANE)
 
+    def test_s4_and_s5_pause_both_workers_and_refuse_the_control_plane(self):
+        for scenario in ("S4", "S5"):
+            self.assertEqual(
+                setups.inject_command(scenario, NS, "polaris-pg-2", "lakehouse-gate-worker",
+                                      "lakehouse-gate-worker2"),
+                ["docker", "pause", "lakehouse-gate-worker", "lakehouse-gate-worker2"])
+            for nodes in (("lakehouse-gate-worker", None),
+                          ("lakehouse-gate-worker", "lakehouse-gate-worker"),
+                          ("lakehouse-gate-worker", setups.CONTROL_PLANE)):
+                with self.assertRaises(ValueError):
+                    setups.inject_command(scenario, NS, "polaris-pg-2", *nodes)
+        self.assertEqual(setups.resume_command("lakehouse-gate-worker", "lakehouse-gate-worker2"),
+                         ["docker", "unpause", "lakehouse-gate-worker", "lakehouse-gate-worker2"])
+
+    def test_s5_cuts_the_survivor_from_the_primary_both_ways_on_the_control_plane(self):
+        add, remove = setups.cut_commands("10.244.0.7", "10.244.1.5")
+        exec_ = ["docker", "exec", setups.CONTROL_PLANE, "iptables"]
+        self.assertEqual(add, [
+            exec_ + ["-I", "FORWARD", "1", "-s", "10.244.0.7", "-d", "10.244.1.5", "-j", "DROP"],
+            exec_ + ["-I", "FORWARD", "1", "-s", "10.244.1.5", "-d", "10.244.0.7", "-j", "DROP"]])
+        self.assertEqual(remove, [
+            exec_ + ["-D", "FORWARD", "-s", "10.244.0.7", "-d", "10.244.1.5", "-j", "DROP"],
+            exec_ + ["-D", "FORWARD", "-s", "10.244.1.5", "-d", "10.244.0.7", "-j", "DROP"]])
+        for ips in (("10.244.0.7", "10.244.0.7"), ("10.244.0.7", "-j ACCEPT"), ("", "10.0.0.1")):
+            with self.assertRaises(ValueError):
+                setups.cut_commands(*ips)
+
+    def test_lsns_compare_as_numbers(self):
+        self.assertEqual(setups.lsn("0/3000060"), 0x3000060)
+        self.assertEqual(setups.lsn("1/0"), 1 << 32)
+        self.assertLess(setups.lsn("0/FFFFFFFF"), setups.lsn("1/0"))
+        for text in ("", "3000060", "0/xyz"):
+            with self.assertRaises(ValueError):
+                setups.lsn(text)
+
+    def test_the_lsn_queries_name_one_instance(self):
+        self.assertEqual(setups.standby_flush_query("polaris-pg-3"),
+                         "SELECT pg_current_wal_lsn(), flush_lsn FROM pg_stat_replication "
+                         "WHERE application_name = 'polaris-pg-3'")
+        self.assertEqual(setups.RECEIVED_QUERY, "SELECT pg_last_wal_receive_lsn()")
+        with self.assertRaises(ValueError):
+            setups.standby_flush_query("x' OR '1'='1")
+
+    def test_the_standbys_not_streaming_from_the_primary(self):
+        self.assertEqual(setups.STREAMING_QUERY,
+                         "SELECT application_name FROM pg_stat_replication "
+                         "WHERE state = 'streaming'")
+        names = ["polaris-pg-1", "polaris-pg-2", "polaris-pg-3"]
+        self.assertEqual(setups.not_streaming(names, "polaris-pg-1", "polaris-pg-3\n"),
+                         ["polaris-pg-2"])
+        self.assertEqual(setups.not_streaming(names, "polaris-pg-1",
+                                              "polaris-pg-2\npolaris-pg-3\n"), [])
+        self.assertEqual(setups.not_streaming(names, "polaris-pg-1", ""),
+                         ["polaris-pg-2", "polaris-pg-3"])
+
     def test_switchover_patches_the_status_as_cnpgs_promote_does(self):
         patch = setups.switchover_patch("polaris-pg-3", "2026-10-13T05:00:00.000000Z")
         self.assertEqual(patch, {"status": {
@@ -231,6 +288,34 @@ class Switchover(unittest.TestCase):
             setups.switchover_target(pods, "polaris-pg-1")
 
 
+class Placement(Switchover):
+    """Before S4 and S5: the primary on a worker, the standby lost with it on the other, and
+    the survivor on the control plane (ADR-058 §1)."""
+
+    def test_the_standby_on_the_other_worker_and_the_survivor(self):
+        pods = self.pods(("polaris-pg-1", setups.CONTROL_PLANE, "True"),
+                         ("polaris-pg-2", "lakehouse-gate-worker", "True"),
+                         ("polaris-pg-3", "lakehouse-gate-worker2", "True"))
+        self.assertEqual(setups.placement(pods, "polaris-pg-3"),
+                         {"standby": "polaris-pg-2", "standby_node": "lakehouse-gate-worker",
+                          "survivor": "polaris-pg-1"})
+
+    def test_a_primary_on_the_control_plane_or_two_instances_on_a_node_are_refused(self):
+        pods = self.pods(("polaris-pg-1", setups.CONTROL_PLANE, "True"),
+                         ("polaris-pg-2", "lakehouse-gate-worker", "True"),
+                         ("polaris-pg-3", "lakehouse-gate-worker2", "True"))
+        with self.assertRaises(ValueError):
+            setups.placement(pods, "polaris-pg-1")
+        pods = self.pods(("polaris-pg-1", "lakehouse-gate-worker", "True"),
+                         ("polaris-pg-2", "lakehouse-gate-worker", "True"),
+                         ("polaris-pg-3", "lakehouse-gate-worker2", "True"))
+        with self.assertRaises(ValueError):
+            setups.placement(pods, "polaris-pg-3")
+
+    def test_s3_to_s5_lose_nodes(self):
+        self.assertEqual(setups.NODE_LOSSES, ("S3", "S4", "S5"))
+
+
 class Matrix(unittest.TestCase):
     def test_every_setup_and_the_grace_job_by_default(self):
         self.assertEqual(setups.matrix("", "", True), [
@@ -251,6 +336,14 @@ class Matrix(unittest.TestCase):
             {"name": "C1q", "setup": "C1q", "grace": "", "scenarios": "S1,S2,S3"}])
         self.assertEqual([j["name"] for j in setups.matrix("C1q,C1", "S1", False)],
                          ["C1", "C1q"])
+
+    def test_s4_and_s5_run_only_when_named(self):
+        self.assertEqual(setups.matrix("C1,C1q", "S4,S5", True), [
+            {"name": "C1", "setup": "C1", "grace": "", "scenarios": "S4,S5"},
+            {"name": "C1q", "setup": "C1q", "grace": "", "scenarios": "S4,S5"}])
+        for job in setups.matrix("", "", True):
+            self.assertNotIn("S4", job["scenarios"])
+            self.assertNotIn("S5", job["scenarios"])
 
     def test_unknown_inputs_are_refused(self):
         with self.assertRaises(ValueError):

@@ -12,12 +12,15 @@ never run here.
 - C3a, C3b and C4 need the target's PG-HA and Pgpool versions (#31) and come in their own PR.
 
 Failures: S1 deletes the primary pod, S2 kills its postmaster, S3 pauses the kind node that
-holds it. Everything but the instances runs on the control plane, so that S3 takes only the
-database's node: the operator, cert-manager, the plugin, CoreDNS, the provisioner, the
-stand-ins, the pooler and the probe.
+holds it. S4 pauses both workers, the primary's and a standby's, and leaves the standby on the
+control plane; S5 is S4 after that survivor was cut off from the primary, so that it fell
+behind (ADR-058 §1). S4 and S5 run only when named. Everything but the instances runs on the
+control plane, so that S3 to S5 take only the database's nodes: the operator, cert-manager,
+the plugin, CoreDNS, the provisioner, the stand-ins, the pooler and the probe.
 """
 
 import hashlib
+import ipaddress
 import os
 import re
 import sys
@@ -34,6 +37,15 @@ SETUPS = ("C0", "C1", "C2")
 # Variants run only when named, so that "all setups" stays ADR-047 §2's (ADR-056 §4).
 VARIANTS = ("C1q",)
 SCENARIOS = ("S1", "S2", "S3")
+# Failures run only when named, so that "all failures" stays ADR-047 §3's (ADR-058 §1).
+NAMED_SCENARIOS = ("S4", "S5")
+# The failures that pause kind nodes, before which the primary moves to a worker.
+NODE_LOSSES = ("S3", "S4", "S5")
+# S5: how long the survivor is cut off from the primary before both workers are paused.
+CUT_S = 10
+RECEIVED_QUERY = "SELECT pg_last_wal_receive_lsn()"
+STREAMING_QUERY = ("SELECT application_name FROM pg_stat_replication "
+                   "WHERE state = 'streaming'")
 CONTROL_PLANE = f"{gate.CLUSTER}-control-plane"
 HOSTNAME = "kubernetes.io/hostname"
 PROBE_DIR = os.path.join(HERE, "probe")
@@ -73,8 +85,9 @@ def check(setup, scenario=None):
     if setup not in SETUPS + VARIANTS:
         raise ValueError(f"{setup}: not a setup of this harness "
                          f"({', '.join(SETUPS + VARIANTS)})")
-    if scenario is not None and scenario not in SCENARIOS:
-        raise ValueError(f"{scenario}: not a failure ({', '.join(SCENARIOS)})")
+    if scenario is not None and scenario not in SCENARIOS + NAMED_SCENARIOS:
+        raise ValueError(f"{scenario}: not a failure "
+                         f"({', '.join(SCENARIOS + NAMED_SCENARIOS)})")
 
 
 def matrix(setups_csv, scenarios_csv, grace_job):
@@ -191,8 +204,9 @@ def pin_patch():
     return {"spec": {"template": {"spec": {"nodeSelector": {HOSTNAME: CONTROL_PLANE}}}}}
 
 
-def inject_command(scenario, namespace, primary, node):
-    """The failure, on the primary `primary` running on `node`."""
+def inject_command(scenario, namespace, primary, node, standby_node=None):
+    """The failure, on the primary `primary` running on `node`; for S4 and S5 also on the
+    standby's node `standby_node`, paused in the same command."""
     check("C0", scenario)
     kubectl = ["kubectl", "--context", gate.CONTEXT, "-n", namespace]
     if scenario == "S1":
@@ -200,13 +214,47 @@ def inject_command(scenario, namespace, primary, node):
     if scenario == "S2":
         return kubectl + ["exec", primary, "-c", "postgres", "--", "sh", "-c",
                           f"kill -9 $(head -n 1 {PGDATA}/postmaster.pid)"]
-    if node == CONTROL_PLANE:
-        raise ValueError("S3 pauses a worker only: the control plane holds the API server")
-    return ["docker", "pause", node]
+    nodes = [node] if scenario == "S3" else [node, standby_node]
+    if CONTROL_PLANE in nodes:
+        raise ValueError(f"{scenario} pauses workers only: the control plane holds the API "
+                         "server")
+    if None in nodes or len(set(nodes)) != len(nodes):
+        raise ValueError(f"{scenario} pauses two workers: the primary's and a standby's")
+    return ["docker", "pause", *nodes]
 
 
-def resume_command(node):
-    return ["docker", "unpause", node]
+def resume_command(*nodes):
+    return ["docker", "unpause", *nodes]
+
+
+def cut_commands(survivor_ip, primary_ip):
+    """S5: (add, remove), the commands that drop and then let through every packet between
+    the survivor's pod and the primary's, both ways. The survivor runs on the control plane,
+    so its traffic to and from a worker passes that node's FORWARD chain."""
+    ips = [str(ipaddress.ip_address(ip)) for ip in (survivor_ip, primary_ip)]
+    if ips[0] == ips[1]:
+        raise ValueError("the survivor and the primary are one pod")
+    iptables = ["docker", "exec", CONTROL_PLANE, "iptables"]
+    pairs = [(ips[0], ips[1]), (ips[1], ips[0])]
+    add = [iptables + ["-I", "FORWARD", "1", "-s", a, "-d", b, "-j", "DROP"] for a, b in pairs]
+    remove = [iptables + ["-D", "FORWARD", "-s", a, "-d", b, "-j", "DROP"] for a, b in pairs]
+    return add, remove
+
+
+def lsn(text):
+    """A PostgreSQL LSN, `X/Y` in hex, as a number."""
+    high, sep, low = text.strip().partition("/")
+    if not sep:
+        raise ValueError(f"{text!r}: not an LSN")
+    return (int(high, 16) << 32) + int(low, 16)
+
+
+def standby_flush_query(standby):
+    """On the primary: its current LSN and what the standby `standby` has flushed."""
+    if not RUN_ID.match(standby):
+        raise ValueError(f"{standby}: an instance's name is letters, digits and dashes")
+    return ("SELECT pg_current_wal_lsn(), flush_lsn FROM pg_stat_replication "
+            f"WHERE application_name = '{standby}'")
 
 
 def switchover_patch(target, timestamp):
@@ -222,8 +270,8 @@ def _ready(pod):
 
 
 def switchover_target(pods, primary):
-    """Before S3: None when the primary already runs on a worker; else a ready standby on a
-    worker to switch over to."""
+    """Before S3 to S5: None when the primary already runs on a worker; else a ready standby
+    on a worker to switch over to."""
     placed = {p["metadata"]["name"]: p for p in pods["items"]}
     if placed[primary]["spec"].get("nodeName") != CONTROL_PLANE:
         return None
@@ -231,6 +279,29 @@ def switchover_target(pods, primary):
         if name != primary and pod["spec"].get("nodeName") != CONTROL_PLANE and _ready(pod):
             return name
     raise ValueError(f"no ready standby on a worker to take over from {primary}")
+
+
+def not_streaming(names, primary, streaming):
+    """The instances in `names`, but the primary, absent from STREAMING_QUERY's output."""
+    up = set(streaming.split())
+    return sorted(n for n in names if n != primary and n not in up)
+
+
+def placement(pods, primary):
+    """Before S4 and S5, with the primary on a worker: the standby on the other worker, lost
+    with it, and the survivor on the control plane."""
+    nodes = {p["metadata"]["name"]: p["spec"].get("nodeName") for p in pods["items"]}
+    if nodes.get(primary) in (None, CONTROL_PLANE):
+        raise ValueError(f"{primary}, the primary, is not on a worker")
+    if len(set(nodes.values())) != len(nodes):
+        raise ValueError(f"the instances do not each have a node of their own: {nodes}")
+    standbys = sorted(n for n in nodes if n != primary and nodes[n] != CONTROL_PLANE)
+    survivors = sorted(n for n in nodes if nodes[n] == CONTROL_PLANE)
+    if len(standbys) != 1 or len(survivors) != 1:
+        raise ValueError(f"want one standby on the other worker and one on the control "
+                         f"plane: {nodes}")
+    return {"standby": standbys[0], "standby_node": nodes[standbys[0]],
+            "survivor": survivors[0]}
 
 
 def rows_query(run_id):

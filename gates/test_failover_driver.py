@@ -86,5 +86,103 @@ class C1qApplied(C1Applied):
             self.assertTrue(driver.c1_applied(ENV, "C1q"))
 
 
+
+class FellBehind(unittest.TestCase):
+    """S5 counts only if the survivor fell behind the standby lost with the primary
+    (ADR-058 §1)."""
+
+    def setUp(self):
+        p = mock.patch.object(driver, "primary_of", return_value="polaris-pg-2")
+        p.start()
+        self.addCleanup(p.stop)
+
+    @staticmethod
+    def answers(primary="0/3001000,0/3001000\n", survivor="0/3000000\n"):
+        def call(argv, stdin=None):
+            pod = argv[argv.index("exec") + 1]
+            if pod == "polaris-pg-2":
+                return 0, primary
+            if pod == "polaris-pg-1":
+                return 0, survivor
+            raise AssertionError(argv)
+        return call
+
+    def check(self, **answers):
+        with mock.patch.object(driver, "call", side_effect=self.answers(**answers)):
+            return driver.fell_behind(ENV, "polaris-pg-3", "polaris-pg-1")
+
+    def test_valid_when_the_survivor_received_less_than_the_standby_flushed(self):
+        self.assertEqual(self.check(), (True, None, {
+            "primary_lsn": "0/3001000", "standby_lsn": "0/3001000",
+            "survivor_lsn": "0/3000000"}))
+
+    def test_invalid_when_the_survivor_kept_up(self):
+        valid, reason, _ = self.check(survivor="0/3001000\n")
+        self.assertFalse(valid)
+        self.assertIn("polaris-pg-1 received 0/3001000", reason)
+
+    def test_invalid_when_the_primary_lists_no_such_standby(self):
+        valid, reason, lsns = self.check(primary="\n")
+        self.assertFalse(valid)
+        self.assertIn("polaris-pg-3", reason)
+        self.assertIsNone(lsns["standby_lsn"])
+
+    def test_invalid_when_the_standby_reported_no_flush(self):
+        valid, reason, _ = self.check(primary="0/3001000,\n")
+        self.assertFalse(valid)
+        self.assertIn("no flushed LSN", reason)
+
+    def test_invalid_when_an_instance_does_not_answer(self):
+        with mock.patch.object(driver, "call", return_value=(2, "psql: error")):
+            valid, reason, _ = driver.fell_behind(ENV, "polaris-pg-3", "polaris-pg-1")
+        self.assertFalse(valid)
+        self.assertIn("psql: error", reason)
+
+
+
+class Streaming(unittest.TestCase):
+    """Every standby streams from the primary before a run, or is rebuilt."""
+
+    def setUp(self):
+        names = ["polaris-pg-1", "polaris-pg-2", "polaris-pg-3"]
+        patches = [mock.patch.object(driver, "primary_of", return_value="polaris-pg-1"),
+                   mock.patch.object(driver, "instances", return_value={"items": [
+                       {"metadata": {"name": n}} for n in names]}),
+                   mock.patch.object(driver.time, "sleep"),
+                   mock.patch.object(driver, "settle")]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_none_missing_once_both_stream(self):
+        streaming = (0, "polaris-pg-2\npolaris-pg-3\n")
+        with mock.patch.object(driver, "call", return_value=streaming):
+            self.assertEqual(driver.missing_standbys(ENV, timeout_s=0), [])
+
+    def test_a_standby_that_never_streams_is_missing(self):
+        with mock.patch.object(driver, "call", return_value=(0, "polaris-pg-3\n")):
+            self.assertEqual(driver.missing_standbys(ENV, timeout_s=0), ["polaris-pg-2"])
+
+    def test_a_primary_that_does_not_answer_misses_every_standby(self):
+        with mock.patch.object(driver, "call", return_value=(2, "psql: error")):
+            self.assertEqual(driver.missing_standbys(ENV, timeout_s=0),
+                             ["polaris-pg-2", "polaris-pg-3"])
+
+    def test_rebuild_deletes_each_missing_standby_with_its_volume(self):
+        ran = []
+        def must(argv, stdin=None):
+            ran.append(argv)
+        with mock.patch.object(driver, "must", side_effect=must), \
+                mock.patch.object(driver, "missing_standbys", return_value=[]):
+            driver.rebuild(ENV, ["polaris-pg-2"])
+        self.assertEqual(ran, driver.gate.rebuild_commands("catalog-polaris", "polaris-pg-2"))
+
+    def test_rebuild_stops_when_a_standby_still_does_not_stream(self):
+        with mock.patch.object(driver, "must"), \
+                mock.patch.object(driver, "missing_standbys", return_value=["polaris-pg-4"]):
+            with self.assertRaises(SystemExit):
+                driver.rebuild(ENV, ["polaris-pg-2"])
+
+
 if __name__ == "__main__":
     unittest.main()
