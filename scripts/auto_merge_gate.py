@@ -7,8 +7,8 @@ them) and prints one word:
   succeeded, every required check succeeded, and no commit status is pending or failed;
 - `wait`: something is still running, nothing has reported yet, or a required check has not
   succeeded (not started yet, or skipped);
-- `stop`: something failed, or the PR is left to Kade (ADR-030): it is a draft, it changes a
-  protected path (PROTECTED below), or its file list was not read whole.
+- `stop`: something failed, or the PR is left to Kade (ADR-030, ADR-059): it is a draft, it
+  changes a protected path (PROTECTED below), or its file list was not read whole.
 
 Usage: python3 auto_merge_gate.py [--require NAME]... [--pr PR_JSON [--files FILES_JSON]]
            CHECK_RUNS_JSON COMBINED_STATUS_JSON
@@ -33,9 +33,10 @@ import sys
 
 GREEN = {"success", "neutral", "skipped"}
 
-# ADR-030: the merge rules and the checks; a PR that changes them is left to Kade.
-PROTECTED_DIRS = (".github/workflows/",)
-PROTECTED_FILES = ("scripts/auto_merge_gate.py", "scripts/gate_check.py")
+# A PR that changes these is left to Kade: the merge rules and the checks (ADR-030), the
+# decisions and the agent rules (ADR-059).
+PROTECTED_DIRS = (".github/workflows/", "docs/adr/", ".claude/rules/")
+PROTECTED_FILES = ("scripts/auto_merge_gate.py", "scripts/gate_check.py", "CLAUDE.md")
 
 
 def protected_paths(files):
