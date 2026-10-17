@@ -105,7 +105,17 @@ class Cases(unittest.TestCase):
     def test_an_unlabelled_pod_in_polaris_namespace_reaches_only_the_recorder(self):
         expected = {c.target: c.allowed for c in network.CASES if c.source == "polaris"}
         self.assertEqual(expected, {"polaris-api": False, "polaris-pg": False,
-                                    "seaweedfs": False, "opa": False, "recorder": True})
+                                    "seaweedfs": False, "opa": False, "recorder": True,
+                                    "datahub-pg": False})
+
+    def test_datahub_pg_from_its_clients_and_join_pods_in_datahubs_namespace_only(self):
+        # ADR-066 §4: datahub-pg's rules as polaris-pg's, for Datahub's own label.
+        expected = {(c.source, c.target): c.allowed for c in network.CASES}
+        self.assertIs(expected[("datahub-client", "datahub-pg")], True)
+        self.assertIs(expected[("datahub-join", "datahub-pg")], True)
+        for source in ("datahub", "none", "none-join", "polaris"):
+            with self.subTest(source=source):
+                self.assertIs(expected[(source, "datahub-pg")], False)
 
     def test_a_join_pod_reaches_polaris_pg_only_from_polaris_namespace(self):
         # ADR-048 §6: CNPG's join pods clone the primary; the label admits no other namespace.
@@ -128,6 +138,8 @@ class Cases(unittest.TestCase):
         self.assertEqual(addresses["recorder"], "recorder.standins.svc.cluster.local:8333")
         self.assertEqual(addresses["seaweedfs"], "seaweedfs.standins.svc.cluster.local:8333")
         self.assertEqual(addresses["opa"], "opa.standins.svc.cluster.local:8181")
+        self.assertEqual(addresses["datahub-pg"],
+                         "datahub-pg-rw.catalog-datahub.svc.cluster.local:5432")
         self.assertEqual({c.target for c in network.CASES}, set(addresses))
 
 
@@ -143,11 +155,16 @@ class Sources(unittest.TestCase):
             "datahub": ("catalog-datahub", {}),
             "polaris": ("catalog-polaris", None),
             "polaris-join": ("catalog-polaris", None),
-            "none-join": ("gate-net-none", None)})
+            "none-join": ("gate-net-none", None),
+            "datahub-client": ("catalog-datahub", None),
+            "datahub-join": ("catalog-datahub", None)})
 
-    def test_the_join_sources_carry_cnpgs_join_label_and_no_other_does(self):
-        self.assertEqual(network.POD_LABELS, {"polaris-join": {"cnpg.io/jobRole": "join"},
-                                              "none-join": {"cnpg.io/jobRole": "join"}})
+    def test_the_join_sources_carry_cnpgs_join_label_and_datahubs_client_its_own(self):
+        self.assertEqual(network.POD_LABELS, {
+            "polaris-join": {"cnpg.io/jobRole": "join"},
+            "none-join": {"cnpg.io/jobRole": "join"},
+            "datahub-join": {"cnpg.io/jobRole": "join"},
+            "datahub-client": {"lakehouse/datahub-pg-client": "true"}})
 
     def test_the_namespaces_manifest_leaves_polaris_alone(self):
         manifest = network.namespaces_manifest(ENV)
