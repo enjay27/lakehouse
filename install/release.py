@@ -76,6 +76,10 @@ PLUGIN_LABEL = f"cnpg.io/pluginName={PLUGIN_NAME}"
 POLARIS_NETPOL_RELEASE = "polaris-network-policies"
 POLARIS_NETPOL_CHART = os.path.join(ROOT, "charts", POLARIS_NETPOL_RELEASE)
 PG_CLIENT_LABEL = "lakehouse/polaris-pg-client"
+# Datahub's network policies and the label of datahub-pg's clients (ADR-048, ADR-066 §4).
+DATAHUB_NETPOL_RELEASE = "datahub-network-policies"
+DATAHUB_NETPOL_CHART = os.path.join(ROOT, "charts", DATAHUB_NETPOL_RELEASE)
+DATAHUB_PG_CLIENT_LABEL = "lakehouse/datahub-pg-client"
 # Polaris's pods, by the labels upstream's chart sets with release name POLARIS.
 POLARIS_POD_SELECTOR = "app.kubernetes.io/name=polaris,app.kubernetes.io/instance=polaris"
 # One namespace label per caller class in other teams' namespaces (ADR-048 §2).

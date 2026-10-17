@@ -1,0 +1,51 @@
+# datahub-pg's instances, 5432: pods of this namespace labelled as its clients (Datahub, when its
+# chart enters), the other instances, which replicate from each other, and CNPG's join pods, which
+# clone the primary to make a new replica (ADR-048 §3, ADR-066 §4).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: datahub-pg-clients
+  labels:
+    {{- include "datahub-network-policies.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    {{- include "datahub-network-policies.instances" . | nindent 4 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 5432
+      from:
+        - podSelector:
+            matchLabels:
+              lakehouse/datahub-pg-client: "true"
+        - podSelector:
+            {{- include "datahub-network-policies.instances" . | nindent 12 }}
+        - podSelector:
+            matchLabels:
+              cnpg.io/jobRole: join
+---
+# The CNPG operator reads each instance's status on 8000 and connects on 5432; backups through
+# the plugin start through the status port too (ADR-043, ADR-048 §3).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: datahub-pg-operator
+  labels:
+    {{- include "datahub-network-policies.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    {{- include "datahub-network-policies.instances" . | nindent 4 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 8000
+      from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.namespaces.operator | quote }}
