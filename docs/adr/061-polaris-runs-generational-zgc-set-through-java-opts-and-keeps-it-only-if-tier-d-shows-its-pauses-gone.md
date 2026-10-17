@@ -1,6 +1,6 @@
 # ADR-061: Polaris runs generational ZGC, set through `JAVA_OPTS`, and keeps it only if Tier D shows its pauses gone
 
-- **Status:** Accepted
+- **Status:** Amended by ADR-062
 - **Date:** 2026-10-17
 - **Related:** ADR-003, ADR-009, ADR-015, ADR-016, ADR-028, ADR-039, ADR-046, ADR-053, ADR-054, ADR-059
 
