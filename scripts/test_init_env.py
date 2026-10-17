@@ -29,6 +29,8 @@ SMOKE_S3_ACCESS_KEY_ID=
 SMOKE_S3_SECRET_ACCESS_KEY=
 POLARIS_BACKUP_S3_ACCESS_KEY_ID=
 POLARIS_BACKUP_S3_SECRET_ACCESS_KEY=
+DATAHUB_BACKUP_S3_ACCESS_KEY_ID=
+DATAHUB_BACKUP_S3_SECRET_ACCESS_KEY=
 
 # Credentials generated per clone.
 POLARIS_DB_PASSWORD=
@@ -43,7 +45,8 @@ CREDENTIALS = ["POLARIS_DB_PASSWORD", "POLARIS_ROOT_CLIENT_ID", "POLARIS_ROOT_CL
 # Credentials of other teams' services: typed into .env by hand, never generated (ADR-031).
 BY_HAND = ["POLARIS_S3_ACCESS_KEY_ID", "POLARIS_S3_SECRET_ACCESS_KEY", "SMOKE_S3_ACCESS_KEY_ID",
            "SMOKE_S3_SECRET_ACCESS_KEY", "POLARIS_BACKUP_S3_ACCESS_KEY_ID",
-           "POLARIS_BACKUP_S3_SECRET_ACCESS_KEY"]
+           "POLARIS_BACKUP_S3_SECRET_ACCESS_KEY", "DATAHUB_BACKUP_S3_ACCESS_KEY_ID",
+           "DATAHUB_BACKUP_S3_SECRET_ACCESS_KEY"]
 
 
 def counter():
@@ -123,6 +126,8 @@ class Merge(unittest.TestCase):
                                  "SMOKE_S3_ACCESS_KEY_ID", "SMOKE_S3_SECRET_ACCESS_KEY",
                                  "POLARIS_BACKUP_S3_ACCESS_KEY_ID",
                                  "POLARIS_BACKUP_S3_SECRET_ACCESS_KEY",
+                                 "DATAHUB_BACKUP_S3_ACCESS_KEY_ID",
+                                 "DATAHUB_BACKUP_S3_SECRET_ACCESS_KEY",
                                  "POLARIS_DB_PASSWORD", "POLARIS_ROOT_CLIENT_ID",
                                  "POLARIS_TOKEN_SIGNING_KEY", "DATAHUB_DB_PASSWORD"])
         self.assertEqual(env["NS_CATALOG_DATAHUB"], "catalog-datahub")
@@ -179,6 +184,8 @@ class Manifests(unittest.TestCase):
             (polaris, "Namespace", polaris, "smoke-s3", polaris),
             (polaris, "Namespace", polaris, "polaris-backup-s3", polaris),
             ("catalog-datahub", "Namespace", "catalog-datahub", "datahub-db", "catalog-datahub"),
+            ("catalog-datahub", "Namespace", "catalog-datahub", "datahub-backup-s3",
+             "catalog-datahub"),
         ])
 
     def test_keys_and_values_come_from_env(self):
@@ -208,6 +215,12 @@ class Manifests(unittest.TestCase):
         self.assertEqual(decode(by_name["datahub-db"]), {
             "username": "datahub", "password": env["DATAHUB_DB_PASSWORD"]})
         self.assertEqual(by_name["datahub-db"]["items"][1]["type"], "kubernetes.io/basic-auth")
+        # ADR-066 §3: Datahub's backups have their own key, never Polaris's, and the same region.
+        self.assertEqual(decode(by_name["datahub-backup-s3"]), {
+            "accessKeyId": env["DATAHUB_BACKUP_S3_ACCESS_KEY_ID"],
+            "secretAccessKey": env["DATAHUB_BACKUP_S3_SECRET_ACCESS_KEY"],
+            "region": "eu-test-1"})
+        self.assertEqual(by_name["datahub-backup-s3"]["items"][1]["type"], "Opaque")
         self.assertEqual(by_name["polaris-root"]["items"][1]["type"], "Opaque")
 
 
@@ -229,12 +242,14 @@ class Problems(unittest.TestCase):
         self.assertEqual(ie.secret_problems(env), [
             "polaris-s3: POLARIS_S3_SECRET_ACCESS_KEY is empty",
             "datahub-db: NS_CATALOG_DATAHUB is empty",
+            "datahub-backup-s3: NS_CATALOG_DATAHUB is empty",
         ])
 
     def test_an_empty_region_stops_the_backup_secret(self):
         env = full_env()
         env["S3_REGION"] = ""
-        self.assertEqual(ie.secret_problems(env), ["polaris-backup-s3: S3_REGION is empty"])
+        self.assertEqual(ie.secret_problems(env), ["polaris-backup-s3: S3_REGION is empty",
+                                                   "datahub-backup-s3: S3_REGION is empty"])
 
 
 class ApplySecrets(unittest.TestCase):
