@@ -9,8 +9,8 @@
   short-lived pod in each, and from an unlabelled pod in Polaris's namespace, PROBE tries a TCP
   connection to each target of CASES. Three more pods carry CNPG's join label (POD_LABELS), in
   Polaris's namespace, the unlabelled one and Datahub's (ADR-048 §6), and one in Datahub's
-  namespace datahub-pg's client label (ADR-066 §4). An allowed case must connect; a refused one must time
-  out or be reset. A refused case that connects means the cluster does not enforce
+  namespace datahub-pg's client label (ADR-066 §4). An allowed case must connect; a refused one
+  must time out or be reset. A refused case that connects means the cluster does not enforce
   NetworkPolicy: ADR-048 says to stop there. polaris-pg's own Services expose 5432 only, so
   the gate adds one, METRICS_SERVICE, for the instances' exporter on 9187.
 """
@@ -44,11 +44,11 @@ PG_METRICS_PORT = 9187
 NAME = "kubernetes.io/metadata.name"
 
 Case = collections.namedtuple("Case", "source target allowed")
-# One allowed and one refused connection per rule of ADR-048 §3 and ADR-066 §4, by source: a
-# caller class, `none` (a namespace with no label), `datahub` (NS_CATALOG_DATAHUB), `polaris` (a
-# pod in NS_CATALOG_POLARIS without the check label), `polaris-join`, `none-join` and
-# `datahub-join` (a pod with CNPG's join label in those namespaces), or `datahub-client` (a pod
-# in NS_CATALOG_DATAHUB with datahub-pg's client label).
+# One allowed and one refused connection per rule of ADR-048 §3, ADR-066 §4 and ADR-067, by
+# source: a caller class, `none` (a namespace with no label), `datahub` (NS_CATALOG_DATAHUB),
+# `polaris` (a pod in NS_CATALOG_POLARIS without the check label), `polaris-join`, `none-join`
+# and `datahub-join` (a pod with CNPG's join label in those namespaces), or `datahub-client` (a
+# pod in NS_CATALOG_DATAHUB with datahub-pg's client label).
 CASES = [
     Case("gateway", "polaris-api", True),
     Case("gateway", "polaris-management", False),
@@ -82,6 +82,9 @@ CASES = [
     Case("datahub-client", "datahub-pg", True),
     Case("datahub-join", "datahub-pg", True),
     Case("datahub", "datahub-pg", False),
+    Case("datahub", "recorder", True),
+    Case("datahub", "recorder-pg", False),
+    Case("datahub", "opa", False),
     Case(UNLABELLED, "datahub-pg", False),
     Case("none-join", "datahub-pg", False),
     Case("polaris", "datahub-pg", False),
@@ -127,6 +130,7 @@ def targets(env):
         "polaris-pg": _svc(release.POLARIS_PG_SERVICE, pol, standins.PG_PORT),
         "polaris-pg-metrics": _svc(METRICS_SERVICE, pol, PG_METRICS_PORT),
         "recorder": _svc("recorder", si, standins.S3_PORT),
+        "recorder-pg": _svc("recorder", si, standins.PG_PORT),
         "seaweedfs": _svc("seaweedfs", si, standins.S3_PORT),
         "opa": _svc("opa", si, standins.OPA_PORT),
         "datahub-pg": _svc(f"{release.DATAHUB_PG}-rw", dh, standins.PG_PORT),

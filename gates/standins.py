@@ -109,19 +109,25 @@ def _policy(name, namespace, pod_selector, ingress=None):
 
 
 def network_policies(env, direct=False):
-    """NS_STANDINS's rows of ADR-048 §3 (from ADR-034, ADR-046 §4): default deny; the recorder
-    from Polaris's namespace; SeaweedFS and OPA from the recorder and the gate's check pods, and
-    with `direct` from Polaris's namespace too (ADR-053 §4); Prometheus from the gate's check
-    pods."""
+    """NS_STANDINS's rows of ADR-048 §3 (from ADR-034, ADR-046 §4), as ADR-067 amends them:
+    default deny; the recorder from Polaris's namespace, and on its S3 port from Datahub's;
+    SeaweedFS and OPA from the recorder and the gate's check pods, and with `direct` from
+    Polaris's namespace too (ADR-053 §4), SeaweedFS also from Datahub's; Prometheus from the
+    gate's check pods."""
     ns, polaris = env["NS_STANDINS"], env["NS_CATALOG_POLARIS"]
+    datahub = env["NS_CATALOG_DATAHUB"]
     tcp = [{"protocol": "TCP", "port": p} for p in (OPA_PORT, S3_PORT, PG_PORT)]
     checks = {**_named(polaris),
               "podSelector": {"matchLabels": {CHECK_LABEL: "true"}}}
     policies = [_policy("default-deny-ingress", ns, {}),
                 _policy("recorder", ns, _app("recorder")["podSelector"],
-                        [{"ports": tcp, "from": [_named(polaris)]}])]
+                        [{"ports": tcp, "from": [_named(polaris)]},
+                         {"ports": [{"protocol": "TCP", "port": S3_PORT}],
+                          "from": [_named(datahub)]}])]
     for name, port in DIRECT:
         sources = [_app("recorder"), checks] + ([_named(polaris)] if direct else [])
+        if direct and port == S3_PORT:
+            sources.append(_named(datahub))
         policies.append(_policy(name, ns, _app(name)["podSelector"], [{
             "ports": [{"protocol": "TCP", "port": port}], "from": sources}]))
     policies.append(_policy("prometheus", ns, _app("prometheus")["podSelector"], [{
