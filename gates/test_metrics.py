@@ -28,14 +28,30 @@ def sample(name, job, pod, value):
                        "namespace": "catalog-polaris"}, "value": [1760000000, value]}
 
 
-def answer(up=None, http=None, cnpg=None, targets=()):
+ZGC = ("ZGC Young Generation", "ZGC Old Generation")
+PARALLEL = ("PS Eden Space", "PS Survivor Space", "PS Old Gen")
+
+
+def pools(pod, ids):
+    """jvm_memory_used_bytes{area="heap"} of one Polaris pod, one sample per pool."""
+    found = []
+    for pool in ids:
+        s = sample("jvm_memory_used_bytes", "polaris", pod, "1048576")
+        s["metric"].update({"area": "heap", "id": pool})
+        found.append(s)
+    return found
+
+
+def answer(up=None, http=None, cnpg=None, heap=None, targets=()):
     up = up if up is not None else [sample("up", job, pod, "1")
                                     for job, pods in PODS.items() for pod in pods]
     http = http if http is not None else [sample("http_server_requests_seconds_count",
                                                  "polaris", "polaris-a", "12")]
     cnpg = cnpg if cnpg is not None else [sample("cnpg_collector_up", "polaris-pg", pod, "1")
                                           for pod in PODS["polaris-pg"]]
-    return {"answers": {"up": up, "http": http, "cnpg": cnpg}, "targets": list(targets)}
+    heap = heap if heap is not None else [s for pod in PODS["polaris"] for s in pools(pod, ZGC)]
+    return {"answers": {"up": up, "http": http, "cnpg": cnpg, "heap": heap},
+            "targets": list(targets)}
 
 
 class Contract(unittest.TestCase):
@@ -144,6 +160,38 @@ class Problems(unittest.TestCase):
         problems, _ = metrics.problems(answer(cnpg=cnpg), PODS)
         self.assertEqual(len(problems), 2)
         self.assertTrue(all("cnpg_collector_up" in p for p in problems))
+
+    def test_a_polaris_pod_on_another_collector_is_a_problem(self):
+        heap = pools("polaris-a", ZGC) + pools("polaris-b", PARALLEL)
+        problems, _ = metrics.problems(answer(heap=heap), PODS)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("polaris-b", problems[0])
+        self.assertIn("PS Old Gen", problems[0])
+
+    def test_a_polaris_pod_without_heap_pools_is_a_problem(self):
+        problems, _ = metrics.problems(answer(heap=pools("polaris-a", ZGC)), PODS)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("polaris-b", problems[0])
+
+    def test_the_expected_pools_are_the_collector_in_values_lakehouse(self):
+        self.assertEqual(metrics.java_opts(), "-XX:MaxRAMPercentage=70.0 -XX:+UseZGC "
+                         "-XX:+ZGenerational -XX:+ExitOnOutOfMemoryError")
+        self.assertEqual(metrics.heap_pools(metrics.java_opts()), set(ZGC))
+
+    def test_a_collector_without_known_pools_is_refused(self):
+        for opts in ("-XX:+UseParallelGC", "-XX:+UseZGC", ""):
+            with self.subTest(opts=opts), self.assertRaises(ValueError):
+                metrics.heap_pools(opts)
+
+    def test_values_without_java_opts_are_refused(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+            f.write("extraEnv:\n  - name: TZ\n    value: UTC\n")
+        try:
+            with self.assertRaises(ValueError):
+                metrics.java_opts(f.name)
+        finally:
+            os.unlink(f.name)
 
     def test_no_running_pod_for_a_job_is_a_problem(self):
         problems, _ = metrics.problems(answer(), {"polaris": PODS["polaris"], "polaris-pg": []})
