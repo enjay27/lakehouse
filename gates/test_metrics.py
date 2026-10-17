@@ -174,7 +174,7 @@ class Problems(unittest.TestCase):
         self.assertIn("polaris-b", problems[0])
 
     def test_the_expected_pools_are_the_collector_in_values_lakehouse(self):
-        self.assertEqual(metrics.java_opts(), "-XX:MaxRAMPercentage=70.0 -XX:+UseZGC "
+        self.assertEqual(metrics.java_opts(), "-XX:MaxRAMPercentage=50.0 -XX:+UseZGC "
                          "-XX:+ZGenerational -XX:+ExitOnOutOfMemoryError")
         self.assertEqual(metrics.heap_pools(metrics.java_opts()), set(ZGC))
 
