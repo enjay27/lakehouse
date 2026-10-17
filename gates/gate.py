@@ -16,14 +16,16 @@
                   log claim (ADR-036).
   secrets [--direct]
                   writes `.env` for the gate (its context, the stand-ins' endpoints and
-                  the S3 stand-in's three keys, Polaris's, the smoke tests' and the backups',
-                  which are the gate's own, ADR-031, ADR-043), then runs
+                  the S3 stand-in's four keys, Polaris's, the smoke tests' and each
+                  PostgreSQL's backups', which are the gate's own, ADR-031, ADR-043, ADR-066),
+                  then runs
                   scripts/init_env.py --apply-secrets (ADR-006). Refuses an existing `.env`.
                   With --direct, for a stress install (ADR-053 §4), the endpoints name
                   SeaweedFS, OPA and polaris-pg's read-write service, never the recorder.
   standins        applies the stand-ins (gates/standins.py: SeaweedFS for S3, OPA with
                   gates/opa/policy.rego) in NS_STANDINS and waits for them (ADR-031), then
-                  creates the backup bucket in SeaweedFS and checks it (ADR-043). Never
+                  creates the backup buckets, Polaris's and Datahub's, in SeaweedFS and checks
+                  them (ADR-043, ADR-066). Never
                   part of a release; the install's endpoint check needs them on the gate.
                   With them the recorder (ADR-034), with a TLS certificate made here, and
                   Prometheus loading docs/contracts/polaris-prometheus-scrape.yaml (ADR-046).
@@ -82,6 +84,12 @@
                   them (ADR-056), and checks its instances run on different nodes (ADR-016).
                   When the values turn on failoverQuorum, its `FailoverQuorum` object must
                   report quorum over `number` standbys (ADR-058 §3).
+  check-datahub-pg
+                  compares the running `Cluster` datahub-pg with the values its helm release
+                  was installed with, requires it asynchronous with every instance ready on
+                  its own node, then switches WAL on its primary and waits until the segment
+                  is archived through the plugin, then takes an on-demand `Backup` and waits
+                  until it completes (ADR-066 §5).
   check-polaris   compares the running Polaris (its Deployment, pods and ConfigMap) with the
                   values its helm release was installed with and with `.env`, checks its
                   replicas run on different nodes (ADR-016), then runs gates/check_polaris.sh
@@ -154,7 +162,7 @@
 Every kubectl and helm call names the gate's context, and a namespace where the object has
 one. Nothing here reaches any cluster but the kind cluster it creates (ADR-017).
 
-Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | seed | check-migration | rebuild-replica | check-polaris-pg | check-polaris | console-image [--build|--load] | batch-image | check-logs | check-console | check-iceberg | check-restore | gate-policies | check-network | check-metrics
+Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | seed | check-migration | rebuild-replica | check-polaris-pg | check-datahub-pg | check-polaris | console-image [--build|--load] | batch-image | check-logs | check-console | check-iceberg | check-restore | gate-policies | check-network | check-metrics
 """
 
 import concurrent.futures
@@ -198,11 +206,12 @@ CERT_MANAGER_NAMESPACE = "cert-manager"
 CERT_MANAGER_DEPLOYMENTS = ("cert-manager", "cert-manager-cainjector", "cert-manager-webhook")
 PLUGIN_DEPLOYMENT = "barman-cloud"
 # On the gate the S3 stand-in is the gate's own, so the gate makes up its credentials, Polaris's
-# the smoke tests' and the backups'; on a test or target cluster they are another team's and
-# typed in by hand (ADR-031, ADR-043).
+# the smoke tests' and each PostgreSQL's backups'; on a test or target cluster they are another
+# team's and typed in by hand (ADR-031, ADR-043, ADR-066).
 GATE_ENV_GENERATED = ("POLARIS_S3_ACCESS_KEY_ID", "POLARIS_S3_SECRET_ACCESS_KEY",
                       "SMOKE_S3_ACCESS_KEY_ID", "SMOKE_S3_SECRET_ACCESS_KEY",
-                      "POLARIS_BACKUP_S3_ACCESS_KEY_ID", "POLARIS_BACKUP_S3_SECRET_ACCESS_KEY")
+                      "POLARIS_BACKUP_S3_ACCESS_KEY_ID", "POLARIS_BACKUP_S3_SECRET_ACCESS_KEY",
+                      "DATAHUB_BACKUP_S3_ACCESS_KEY_ID", "DATAHUB_BACKUP_S3_SECRET_ACCESS_KEY")
 # On the gate, the endpoints of other teams' services are the stand-ins' (ADR-031).
 STANDIN_REGION = "us-east-1"
 # The stress scenario's tuning values (ADR-053, ADR-000 rule 11).
@@ -217,6 +226,7 @@ STRESS_OVERLAY_KEYS = {"step_seconds": True,
                        "k6": {"pre_vus": True, "max_vus": True}}
 STANDIN_BUCKET = "polaris-warehouse"
 STANDIN_BACKUP_BUCKET = "polaris-backup"
+STANDIN_DATAHUB_BACKUP_BUCKET = "datahub-backup"
 # Polaris's own S3 key, as the AWS SDK reads it: catalogs without STS are read and written with
 # it (charts/polaris/values-lakehouse.yaml).
 POLARIS_S3_ENV = {"AWS_ACCESS_KEY_ID": "accessKeyId", "AWS_SECRET_ACCESS_KEY": "secretAccessKey"}
@@ -370,6 +380,7 @@ def standin_endpoints(ns, direct=False):
         "S3_REGION": STANDIN_REGION,
         "POLARIS_WAREHOUSE_BUCKET": STANDIN_BUCKET,
         "POLARIS_BACKUP_BUCKET": STANDIN_BACKUP_BUCKET,
+        "DATAHUB_BACKUP_BUCKET": STANDIN_DATAHUB_BACKUP_BUCKET,
         "POLARIS_OPA_URL": f"http://{opa}:{standins.OPA_PORT}{standins.OPA_PACKAGE_PATH}",
         "POLARIS_DB_HOST": release.POLARIS_PG_SERVICE if direct else recorder,
     }
@@ -459,20 +470,24 @@ def write_gate_env(path, template_text, direct=False):
 
 def standins_commands(env, manifest):
     """(argv, stdin) in order: apply the stand-ins' List `manifest`, wait until all four are
-    ready, then create the backup bucket with SeaweedFS's shell (`weed mini -bucket` makes only
-    the warehouse's) and check that its filer lists it (ADR-043)."""
+    ready, then create each backup bucket, Polaris's then Datahub's, with SeaweedFS's shell
+    (`weed mini -bucket` makes only the warehouse's) and check that its filer lists it (ADR-043,
+    ADR-066 §3)."""
     ns = ["kubectl", "--context", CONTEXT, "-n", env["NS_STANDINS"]]
-    bucket = env["POLARIS_BACKUP_BUCKET"]
-    return [
+    commands = [
         (["kubectl", "--context", CONTEXT, "apply", "--server-side", "--field-manager=gate",
           "-f", "-"], manifest),
         (ns + ["rollout", "status", "deployment/seaweedfs", "deployment/opa",
                "deployment/recorder", "deployment/prometheus", "--timeout=5m"], None),
-        (ns + ["exec", "-i", "deployment/seaweedfs", "--", "weed", "shell"],
-         f"s3.bucket.create -name {bucket}\n"),
-        (ns + ["exec", "deployment/seaweedfs", "--", "curl", "-sf", "-o", "/dev/null",
-               f"http://127.0.0.1:{standins.FILER_PORT}/buckets/{bucket}/"], None),
     ]
+    for bucket in (env["POLARIS_BACKUP_BUCKET"], env["DATAHUB_BACKUP_BUCKET"]):
+        commands += [
+            (ns + ["exec", "-i", "deployment/seaweedfs", "--", "weed", "shell"],
+             f"s3.bucket.create -name {bucket}\n"),
+            (ns + ["exec", "deployment/seaweedfs", "--", "curl", "-sf", "-o", "/dev/null",
+                   f"http://127.0.0.1:{standins.FILER_PORT}/buckets/{bucket}/"], None),
+        ]
+    return commands
 
 
 def recorder_certificate(env, directory):
@@ -1275,11 +1290,12 @@ RESTORE_POLL = 3
 ARCHIVE_TIMEOUT = 120
 
 
-def backup_manifest(env, name):
-    """An on-demand Backup of polaris-pg through the Barman Cloud Plugin."""
+def backup_manifest(env, name, namespace_var="NS_CATALOG_POLARIS", cluster=release.POLARIS_PG):
+    """An on-demand Backup of `cluster` (polaris-pg unless told otherwise) through the Barman
+    Cloud Plugin."""
     return {"apiVersion": "postgresql.cnpg.io/v1", "kind": "Backup",
-            "metadata": {"name": name, "namespace": env["NS_CATALOG_POLARIS"]},
-            "spec": {"cluster": {"name": release.POLARIS_PG}, "method": "plugin",
+            "metadata": {"name": name, "namespace": env[namespace_var]},
+            "spec": {"cluster": {"name": cluster}, "method": "plugin",
                      "pluginConfiguration": {"name": release.PLUGIN_NAME}}}
 
 
@@ -1312,19 +1328,17 @@ def wal_archived(segment, last):
     return bool(last) and last >= segment
 
 
-def switch_wal(kubectl, namespace):
-    """(problem, note): switches WAL on polaris-pg's primary and waits until the segment it
-    closed is archived. A backup from a standby, CNPG's default target, is consistent only past
-    the WAL archived when it ended; without this the restore failed until the primary's
-    archive_timeout (#86, smoke 38515945485)."""
-    cluster = json.loads(output(kubectl + ["get", f"cluster/{release.POLARIS_PG}", "-o",
-                                           "json"]))
-    primary = cluster["status"]["currentPrimary"]
+def switch_wal(kubectl, namespace, cluster=release.POLARIS_PG, when="before the restore"):
+    """(problem, note): switches WAL on `cluster`'s primary (polaris-pg unless told otherwise)
+    and waits until the segment it closed is archived. A backup from a standby, CNPG's default
+    target, is consistent only past the WAL archived when it ended; without this the restore
+    failed until the primary's archive_timeout (#86, smoke 38515945485)."""
+    status = json.loads(output(kubectl + ["get", f"cluster/{cluster}", "-o", "json"]))
+    primary = status["status"]["currentPrimary"]
     segment = output(wal_switch_command(namespace, primary)).strip()
     for _ in range(ARCHIVE_TIMEOUT // RESTORE_POLL):
         if wal_archived(segment, output(archived_wal_command(namespace, primary)).strip()):
-            return None, (f"WAL switched on {primary}: {segment} archived before the "
-                          "restore.")
+            return None, f"WAL switched on {primary}: {segment} archived {when}."
         time.sleep(RESTORE_POLL)
     return (f"WAL segment {segment} from {primary} was not archived within "
             f"{ARCHIVE_TIMEOUT} s"), None
@@ -1346,6 +1360,72 @@ def restore_cluster(env, image):
                          "plugin": {"name": release.PLUGIN_NAME, "parameters": {
                              "barmanObjectName": release.POLARIS_BACKUP_STORE,
                              "serverName": source}}}]}}
+
+
+def datahub_pg_commands(namespace):
+    """datahub-pg's helm values, its Cluster and its instances, as JSON (ADR-066 §5)."""
+    kubectl = ["kubectl", "--context", CONTEXT, "-n", namespace, "get"]
+    return [
+        ["helm", "--kube-context", CONTEXT, "-n", namespace, "get", "values",
+         release.DATAHUB_PG_RELEASE, "--all", "-o", "json"],
+        kubectl + [f"cluster/{release.DATAHUB_PG}", "-o", "json"],
+        kubectl + ["pods", "-l", f"cnpg.io/cluster={release.DATAHUB_PG},cnpg.io/podRole=instance",
+                   "-o", "json"],
+    ]
+
+
+def datahub_pg_problems(values, cluster, pods):
+    """The running Cluster datahub-pg against the values it was installed with, and
+    asynchronous whatever they say (ADR-066 §2, ADR-016)."""
+    spec, problems = cluster["spec"], []
+    for field, running, wanted in (
+            ("instances", spec["instances"], values["instances"]),
+            ("image", spec["imageName"], values["image"]),
+            ("podAntiAffinityType", spec["affinity"]["podAntiAffinityType"],
+             values["podAntiAffinityType"]),
+            ("smartShutdownTimeout", spec.get("smartShutdownTimeout"),
+             values["smartShutdownTimeout"])):
+        if running != wanted:
+            problems.append(f"{field}: {running} running, {wanted} in the values")
+    if spec.get("postgresql", {}).get("synchronous"):
+        problems.append("replication: synchronous running, asynchronous in ADR-066")
+    ready = cluster.get("status", {}).get("readyInstances", 0)
+    if ready != values["instances"]:
+        problems.append(f"{ready} instances ready of {values['instances']}")
+    nodes = sorted({p["spec"].get("nodeName") for p in pods["items"]})
+    if len(nodes) != len(pods["items"]) or len(nodes) != values["instances"]:
+        problems.append(f"{len(pods['items'])} instances on {len(nodes)} nodes: "
+                        + ", ".join(str(n) for n in nodes))
+    return problems, [f"Cluster {release.DATAHUB_PG}: {ready} instances ready on "
+                      f"{len(nodes)} nodes ({', '.join(str(n) for n in nodes)}), image "
+                      f"{spec['imageName']}, anti-affinity "
+                      f"{spec['affinity']['podAntiAffinityType']}, replication asynchronous."]
+
+
+def check_datahub_pg(env):
+    """ADR-066 §5: datahub-pg as its values say; then a WAL switch on its primary, waited for
+    until archived through the plugin; then an on-demand Backup, waited for until completed.
+    Returns (problems, notes)."""
+    ns = env["NS_CATALOG_DATAHUB"]
+    kubectl = ["kubectl", "--context", CONTEXT, "-n", ns]
+    values, cluster, pods = (json.loads(output(c)) for c in datahub_pg_commands(ns))
+    problems, notes = datahub_pg_problems(values, cluster, pods)
+    if problems:
+        return problems, notes
+    problem, note = switch_wal(kubectl, ns, release.DATAHUB_PG,
+                               f"through the plugin to {release.DATAHUB_BACKUP_STORE}")
+    if problem:
+        return [problem], notes
+    notes.append(note)
+    name = f"{release.DATAHUB_PG}-gate-{os.getpid()}"
+    run(kubectl + ["apply", "--server-side", "--field-manager=gate", "-f", "-"],
+        json.dumps(backup_manifest(env, name, "NS_CATALOG_DATAHUB", release.DATAHUB_PG)))
+    phase, error = wait_for(kubectl + ["get", f"backup/{name}", "-o", "json"], backup_outcome,
+                            f"Backup {name}", timeout=BACKUP_TIMEOUT)
+    if phase != "completed":
+        return [f"Backup {name} of {release.DATAHUB_PG} failed: {error}"], notes
+    notes.append(f"Backup {name} of {release.DATAHUB_PG} completed through the plugin.")
+    return [], notes
 
 
 def check_restore_command(env, image, database, name):
@@ -2163,6 +2243,11 @@ def main(argv):
                                                 for o in outputs))
         for line in notes + problems:
             print(line)
+        return 1 if problems else 0
+    if argv[1:] == ["check-datahub-pg"]:
+        problems, notes = check_datahub_pg(release.load_env(ROOT, os.environ))
+        for line in notes + problems:
+            print(line, flush=True)
         return 1 if problems else 0
     if argv[1:] == ["check-polaris"]:
         env = release.load_env(ROOT, os.environ)

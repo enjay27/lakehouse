@@ -6,9 +6,9 @@
    `NS_CNPG_SYSTEM`: its Service, labelled as CNPG finds plugins, has a ready pod (ADR-043).
    On the target clusters the operator and the plugin are the operator team's; on the gate,
    gates/gate.py installs them first.
-1. Polaris, in `NS_CATALOG_POLARIS`. Its Secrets come first (scripts/init_env.py
-   --apply-secrets, ADR-006). Datahub adds its steps in P3. The gates run this same script
-   (ADR-038).
+1. Polaris, in `NS_CATALOG_POLARIS`, then Datahub, in `NS_CATALOG_DATAHUB` (ADR-045). Their
+   Secrets come first (scripts/init_env.py --apply-secrets, ADR-006). The gates run this same
+   script (ADR-038).
    a. Its PostgreSQL: the `Cluster` polaris-pg from charts/polaris-postgres (ADR-008,
       ADR-010), installed with helm and waited on until Ready, then until it reads healthy
       several times in a row, since a change can restart its instances; once, when the
@@ -26,6 +26,12 @@
       from `.env` (the database host, the policy endpoint, and the console's origin, allowed
       by CORS only while the console is enabled), waited on until rolled out. Its pods write
       their log files to the claim.
+   f. Datahub's network policies (ADR-048 §4, ADR-066 §4): charts/datahub-network-policies,
+      default deny in its namespace, datahub-pg open to its clients and the operator.
+   g. Datahub's PostgreSQL: the `Cluster` datahub-pg from charts/datahub-postgres (ADR-066),
+      asynchronous, waited on as polaris-pg is. Its backups go to `DATAHUB_BACKUP_BUCKET` on
+      `S3_ENDPOINT` with the key in `datahub-backup-s3`. Kafka, OpenSearch and Datahub itself
+      follow here when their charts enter (ADR-025).
 2. After every service of step 1 (ADR-029, ADR-037):
    a. The log batch (ADR-036): charts/polaris-log-batch with the image built from this
       checkout (batch_image), pulled from `IMAGE_REGISTRY` or, when it is empty, the GitHub
@@ -59,6 +65,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections import namedtuple
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -76,6 +83,10 @@ PLUGIN_LABEL = f"cnpg.io/pluginName={PLUGIN_NAME}"
 POLARIS_NETPOL_RELEASE = "polaris-network-policies"
 POLARIS_NETPOL_CHART = os.path.join(ROOT, "charts", POLARIS_NETPOL_RELEASE)
 PG_CLIENT_LABEL = "lakehouse/polaris-pg-client"
+# Datahub's network policies and the label of datahub-pg's clients (ADR-048, ADR-066 §4).
+DATAHUB_NETPOL_RELEASE = "datahub-network-policies"
+DATAHUB_NETPOL_CHART = os.path.join(ROOT, "charts", DATAHUB_NETPOL_RELEASE)
+DATAHUB_PG_CLIENT_LABEL = "lakehouse/datahub-pg-client"
 # Polaris's pods, by the labels upstream's chart sets with release name POLARIS.
 POLARIS_POD_SELECTOR = "app.kubernetes.io/name=polaris,app.kubernetes.io/instance=polaris"
 # One namespace label per caller class in other teams' namespaces (ADR-048 §2).
@@ -90,6 +101,13 @@ POLARIS_DB_SECRET = "polaris-db"
 # polaris-pg's backups (ADR-043): the chart's ObjectStore and the Secret with their key.
 POLARIS_BACKUP_STORE = "polaris-backup"
 POLARIS_BACKUP_SECRET = "polaris-backup-s3"
+# Datahub's PostgreSQL and its backups (ADR-066): its own chart, Secrets and ObjectStore.
+DATAHUB_PG = "datahub-pg"
+DATAHUB_PG_RELEASE = "datahub-postgres"
+DATAHUB_PG_CHART = os.path.join(ROOT, "charts", DATAHUB_PG_RELEASE)
+DATAHUB_DB_SECRET = "datahub-db"
+DATAHUB_BACKUP_STORE = "datahub-backup"
+DATAHUB_BACKUP_SECRET = "datahub-backup-s3"
 # Step 1 reads the Secrets it needs for their key names only, one line per Secret, never a value.
 SECRET_KEYS_TEMPLATE = ('go-template={{range .items}}{{.metadata.name}}:'
                         '{{range $key, $value := .data}} {{$key}}{{end}}{{println}}{{end}}')
@@ -331,18 +349,70 @@ def postgres_values(env):
                        "bucket": env["POLARIS_BACKUP_BUCKET"]}}
 
 
+def datahub_postgres_values(env):
+    """charts/datahub-postgres's values from `.env`: where Datahub's backups go (ADR-066 §3)."""
+    return {"backup": {"endpointURL": env["S3_ENDPOINT"],
+                       "bucket": env["DATAHUB_BACKUP_BUCKET"]}}
+
+
+# One service's PostgreSQL for step 1: its Cluster, chart and Secrets, the .env variables naming
+# its namespace and backup bucket, its values from .env, and the ADRs its messages cite.
+Postgres = namedtuple("Postgres", "service namespace_var bucket_var cluster release chart "
+                                  "db_secret backup_secret values backup_adr region_adr")
+POLARIS_POSTGRES = Postgres("Polaris", "NS_CATALOG_POLARIS", "POLARIS_BACKUP_BUCKET", POLARIS_PG,
+                            POLARIS_PG_RELEASE, POLARIS_PG_CHART, POLARIS_DB_SECRET,
+                            POLARIS_BACKUP_SECRET, postgres_values, "ADR-043", "ADR-060")
+DATAHUB_POSTGRES = Postgres("Datahub", "NS_CATALOG_DATAHUB", "DATAHUB_BACKUP_BUCKET", DATAHUB_PG,
+                            DATAHUB_PG_RELEASE, DATAHUB_PG_CHART, DATAHUB_DB_SECRET,
+                            DATAHUB_BACKUP_SECRET, datahub_postgres_values, "ADR-066", "ADR-066")
+
+
 def polaris_postgres(env, run, dry_run=False):
-    """Step 1, Polaris's PostgreSQL. Returns (problems, notes); no call without a namespace or
-    the backups' endpoint and bucket."""
-    namespace = env.get("NS_CATALOG_POLARIS", "")
+    """Step 1, Polaris's PostgreSQL (ADR-043, ADR-060)."""
+    return postgres(env, run, POLARIS_POSTGRES, dry_run)
+
+
+def datahub_postgres(env, run, dry_run=False):
+    """Step 1, Datahub's PostgreSQL, after its network policies (ADR-066 §4)."""
+    return postgres(env, run, DATAHUB_POSTGRES, dry_run)
+
+
+def datahub_network_policies(env, run, dry_run=False):
+    """Step 1, Datahub's part, first: its network policies (ADR-048 §4, ADR-066 §4), in
+    NS_CATALOG_DATAHUB, admitting the operator's namespace to datahub-pg. Returns (problems,
+    notes)."""
+    problems = [f"{var} is empty: Datahub's network policies need it in .env (ADR-066)"
+                for var in ("NS_CATALOG_DATAHUB", "NS_CNPG_SYSTEM") if not env.get(var)]
+    if problems:
+        return problems, []
+    namespace, context = env["NS_CATALOG_DATAHUB"], env["KUBE_CONTEXT"]
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+        json.dump({"namespaces": {"operator": env["NS_CNPG_SYSTEM"]}}, f)
+    try:
+        helm = ["helm", "--kube-context", context, "-n", namespace, "upgrade", "--install",
+                DATAHUB_NETPOL_RELEASE, DATAHUB_NETPOL_CHART, "-f", f.name]
+        code, out = run(helm + (["--dry-run=server"] if dry_run else []))
+    finally:
+        os.unlink(f.name)
+    if code != 0:
+        return [f"helm upgrade {DATAHUB_NETPOL_RELEASE} in {namespace} failed: "
+                f"{out.strip()}"], []
+    done = "server-side dry-run passed" if dry_run else "installed"
+    return [], [f"Step 1: Datahub's network policies in {namespace}, {done} (ADR-048, ADR-066)."]
+
+
+def postgres(env, run, pg, dry_run=False):
+    """Step 1, one service's PostgreSQL `pg`. Returns (problems, notes); no call without a
+    namespace or the backups' endpoint and bucket."""
+    namespace = env.get(pg.namespace_var, "")
     if not namespace:
-        return ["NS_CATALOG_POLARIS is empty: set Polaris's namespace in .env (ADR-007)"], []
-    empty = [var for var in ("S3_ENDPOINT", "POLARIS_BACKUP_BUCKET") if not env.get(var)]
+        return [f"{pg.namespace_var} is empty: set {pg.service}'s namespace in .env (ADR-007)"], []
+    empty = [var for var in ("S3_ENDPOINT", pg.bucket_var) if not env.get(var)]
     if empty:
-        return [f"{var} is empty: polaris-pg's backups need it in .env (ADR-043)"
+        return [f"{var} is empty: {pg.cluster}'s backups need it in .env ({pg.backup_adr})"
                 for var in empty], []
     context = env["KUBE_CONTEXT"]
-    secrets_needed = (POLARIS_DB_SECRET, POLARIS_BACKUP_SECRET)
+    secrets_needed = (pg.db_secret, pg.backup_secret)
     generation = None
     code, out = run(["kubectl", "--context", context, "-n", namespace, "get", "secret",
                      *secrets_needed, "-o", SECRET_KEYS_TEMPLATE])
@@ -351,38 +421,38 @@ def polaris_postgres(env, run, dry_run=False):
                 "scripts/init_env.py --apply-secrets first (ADR-006)"], []
     keys = {name.strip(): set(rest.split())
             for name, _, rest in (line.partition(":") for line in out.splitlines()) if name}
-    if POLARIS_BACKUP_REGION_KEY not in keys.get(POLARIS_BACKUP_SECRET, set()):
-        return [f"Secret {POLARIS_BACKUP_SECRET} in {namespace} has no key "
+    if POLARIS_BACKUP_REGION_KEY not in keys.get(pg.backup_secret, set()):
+        return [f"Secret {pg.backup_secret} in {namespace} has no key "
                 f"{POLARIS_BACKUP_REGION_KEY}: run scripts/init_env.py --apply-secrets with this "
-                "release first (ADR-060)"], []
+                f"release first ({pg.region_adr})"], []
     if not dry_run:
-        generation = cluster_generation(run, context, namespace)
+        generation = cluster_generation(run, context, namespace, pg.cluster)
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
-        json.dump(postgres_values(env), f)
+        json.dump(pg.values(env), f)
     try:
         helm = ["helm", "--kube-context", context, "-n", namespace, "upgrade", "--install",
-                POLARIS_PG_RELEASE, POLARIS_PG_CHART, "-f", f.name]
+                pg.release, pg.chart, "-f", f.name]
         code, out = run(helm + (["--dry-run=server"] if dry_run else []))
     finally:
         os.unlink(f.name)
     if code != 0:
-        return [f"helm upgrade {POLARIS_PG_RELEASE} in {namespace} failed: {out.strip()}"], []
+        return [f"helm upgrade {pg.release} in {namespace} failed: {out.strip()}"], []
     if dry_run:
-        return [], [f"Step 1: Cluster {POLARIS_PG} in {namespace}, server-side dry-run passed."]
+        return [], [f"Step 1: Cluster {pg.cluster} in {namespace}, server-side dry-run passed."]
     code, out = run(["kubectl", "--context", context, "-n", namespace, "wait",
-                     "--for=condition=Ready", f"cluster/{POLARIS_PG}",
+                     "--for=condition=Ready", f"cluster/{pg.cluster}",
                      f"--timeout={READY_TIMEOUT}"])
     if code != 0:
-        return [f"Cluster {POLARIS_PG} in {namespace} is not Ready: {out.strip()}"], []
-    unchanged = generation is not None and \
-        cluster_generation(run, context, namespace) == generation
-    problem = settle(run, context, namespace, needed=1 if unchanged else SETTLE_READS)
+        return [f"Cluster {pg.cluster} in {namespace} is not Ready: {out.strip()}"], []
+    unchanged = generation is not None and         cluster_generation(run, context, namespace, pg.cluster) == generation
+    problem = settle(run, context, namespace, pg.cluster,
+                     needed=1 if unchanged else SETTLE_READS)
     if problem:
         return [problem], []
     if unchanged:
-        return [], [f"Step 1: Cluster {POLARIS_PG} in {namespace} is Ready, healthy on one "
+        return [], [f"Step 1: Cluster {pg.cluster} in {namespace} is Ready, healthy on one "
                     f"read; its spec is unchanged by the upgrade (generation {generation})."]
-    return [], [f"Step 1: Cluster {POLARIS_PG} in {namespace} is Ready, healthy on "
+    return [], [f"Step 1: Cluster {pg.cluster} in {namespace} is Ready, healthy on "
                 f"{SETTLE_READS} reads {SETTLE_INTERVAL} s apart."]
 
 
@@ -703,6 +773,8 @@ def install(env, run, supported, dry_run):
                  lambda: bootstrap(env, run, dry_run=dry_run),
                  lambda: logs_claim(env, run, dry_run),
                  lambda: polaris(env, run, dry_run),
+                 lambda: datahub_network_policies(env, run, dry_run),
+                 lambda: datahub_postgres(env, run, dry_run),
                  lambda: log_batch(env, run, dry_run)):
         problems, more = step()
         notes += more

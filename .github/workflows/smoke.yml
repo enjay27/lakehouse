@@ -53,6 +53,7 @@ jobs:
       KUBE_CONTEXT: kind-lakehouse-gate
       NS_CNPG_SYSTEM: cnpg-system
       NS_CATALOG_POLARIS: catalog-polaris
+      NS_CATALOG_DATAHUB: catalog-datahub
       NS_STANDINS: standins
     steps:
       - uses: actions/checkout@v7
@@ -130,6 +131,11 @@ jobs:
         run: |
           set -euo pipefail
           python3 gates/gate.py check-polaris-pg | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: The running Cluster datahub-pg matches its values, archives its WAL and backs up (ADR-066)
+        run: |
+          set -euo pipefail
+          python3 gates/gate.py check-datahub-pg | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: The stand-ins answer as Polaris needs them to (ADR-026, ADR-031)
         run: |
@@ -213,6 +219,9 @@ jobs:
           kubectl --context "$KUBE_CONTEXT" get pods -A -o wide || true
           kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_POLARIS" get cluster,pods,pvc -o wide || true
           kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_POLARIS" get events --sort-by=.lastTimestamp || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_DATAHUB" get cluster,backup,pods,pvc -o wide || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_DATAHUB" get events --sort-by=.lastTimestamp || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_DATAHUB" logs -l cnpg.io/cluster=datahub-pg,cnpg.io/podRole=instance --all-containers --prefix --tail=60 || true
           kubectl --context "$KUBE_CONTEXT" get networkpolicies -A || true
           kubectl --context "$KUBE_CONTEXT" -n "$NS_STANDINS" exec deployment/prometheus -- wget -qO- 'http://127.0.0.1:9090/api/v1/targets?state=active' || true
           kubectl --context "$KUBE_CONTEXT" -n "$NS_STANDINS" get pods -o wide || true

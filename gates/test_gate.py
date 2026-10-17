@@ -667,12 +667,15 @@ POLARIS_CONSOLE_API_URL=
 POLARIS_LOGS_STORAGE_CLASS=
 POLARIS_LOGS_SIZE=
 POLARIS_BACKUP_BUCKET=
+DATAHUB_BACKUP_BUCKET=
 POLARIS_S3_ACCESS_KEY_ID=
 POLARIS_S3_SECRET_ACCESS_KEY=
 SMOKE_S3_ACCESS_KEY_ID=
 SMOKE_S3_SECRET_ACCESS_KEY=
 POLARIS_BACKUP_S3_ACCESS_KEY_ID=
 POLARIS_BACKUP_S3_SECRET_ACCESS_KEY=
+DATAHUB_BACKUP_S3_ACCESS_KEY_ID=
+DATAHUB_BACKUP_S3_SECRET_ACCESS_KEY=
 POLARIS_DB_PASSWORD=
 """
 
@@ -714,6 +717,11 @@ class GateEnv(unittest.TestCase):
                          "gen-POLARIS_BACKUP_S3_ACCESS_KEY_ID")
         self.assertEqual(env["POLARIS_BACKUP_S3_SECRET_ACCESS_KEY"],
                          "gen-POLARIS_BACKUP_S3_SECRET_ACCESS_KEY")
+        # ADR-066 §3: Datahub's backups' own key, the gate's own on its stand-in.
+        self.assertEqual(env["DATAHUB_BACKUP_S3_ACCESS_KEY_ID"],
+                         "gen-DATAHUB_BACKUP_S3_ACCESS_KEY_ID")
+        self.assertEqual(env["DATAHUB_BACKUP_S3_SECRET_ACCESS_KEY"],
+                         "gen-DATAHUB_BACKUP_S3_SECRET_ACCESS_KEY")
 
     def test_the_endpoints_name_the_recorder_in_the_stand_ins_namespace(self):
         env = gate.init_env.parse(gate.gate_env(TEMPLATE.replace("NS_STANDINS=standins",
@@ -722,6 +730,7 @@ class GateEnv(unittest.TestCase):
         self.assertEqual(env["S3_REGION"], "us-east-1")
         self.assertEqual(env["POLARIS_WAREHOUSE_BUCKET"], "polaris-warehouse")
         self.assertEqual(env["POLARIS_BACKUP_BUCKET"], "polaris-backup")
+        self.assertEqual(env["DATAHUB_BACKUP_BUCKET"], "datahub-backup")
         self.assertEqual(env["POLARIS_OPA_URL"],
                          "http://recorder.si.svc.cluster.local:8181/v1/data/polaris/authz")
         self.assertEqual(env["POLARIS_DB_HOST"], "recorder.si.svc.cluster.local")
@@ -774,7 +783,8 @@ class GateEnv(unittest.TestCase):
             env = gate.init_env.parse(gate.gate_env(f.read()))
         for name in gate.GATE_ENV_GENERATED + ("KUBE_CONTEXT", "S3_ENDPOINT", "S3_REGION",
                                                "POLARIS_WAREHOUSE_BUCKET", "POLARIS_OPA_URL",
-                                               "POLARIS_BACKUP_BUCKET", "POLARIS_DB_HOST", "POLARIS_CONSOLE_ORIGIN",
+                                               "POLARIS_BACKUP_BUCKET", "DATAHUB_BACKUP_BUCKET",
+                                               "POLARIS_DB_HOST", "POLARIS_CONSOLE_ORIGIN",
                                                "POLARIS_CONSOLE_API_URL",
                                                "POLARIS_LOGS_STORAGE_CLASS", "POLARIS_LOGS_SIZE"):
             with self.subTest(name=name):
@@ -1229,6 +1239,7 @@ STANDIN_ENV = {"NS_STANDINS": "standins", "NS_CATALOG_POLARIS": "catalog-polaris
                "S3_ENDPOINT": "http://seaweedfs.standins.svc.cluster.local:8333",
                "S3_REGION": "us-east-1", "POLARIS_WAREHOUSE_BUCKET": "polaris-warehouse",
                "POLARIS_BACKUP_BUCKET": "polaris-backup",
+               "DATAHUB_BACKUP_BUCKET": "datahub-backup",
                "POLARIS_OPA_URL": "http://opa.standins.svc.cluster.local:8181/v1/data/polaris/authz",
                "POLARIS_DB_HOST": "recorder.standins.svc.cluster.local"}
 CURL = "curlimages/curl:8.22.0@sha256:" + "c" * 64
@@ -1822,13 +1833,26 @@ class Standins(unittest.TestCase):
     def test_then_the_backup_bucket_is_created_in_seaweedfs_and_checked(self):
         # ADR-043 §2: `weed mini -bucket` makes one bucket; the backups get their own.
         (create, stdin), (check, none) = gate.standins_commands(
-            STANDIN_ENV, "the stand-ins list")[2:]
+            STANDIN_ENV, "the stand-ins list")[2:4]
         exec_ = ["kubectl", "--context", gate.CONTEXT, "-n", "standins", "exec"]
         self.assertEqual(create, exec_ + ["-i", "deployment/seaweedfs", "--", "weed", "shell"])
         self.assertEqual(stdin, "s3.bucket.create -name polaris-backup\n")
         self.assertEqual(check, exec_ + ["deployment/seaweedfs", "--", "curl", "-sf",
                                          "-o", "/dev/null",
                                          "http://127.0.0.1:8888/buckets/polaris-backup/"])
+        self.assertIsNone(none)
+
+    def test_then_datahubs_backup_bucket_is_created_and_checked_too(self):
+        # ADR-066 §3: on the gate the S3 stand-in gets Datahub's bucket as well.
+        commands = gate.standins_commands(STANDIN_ENV, "the stand-ins list")
+        self.assertEqual(len(commands), 6)
+        (create, stdin), (check, none) = commands[4:]
+        exec_ = ["kubectl", "--context", gate.CONTEXT, "-n", "standins", "exec"]
+        self.assertEqual(create, exec_ + ["-i", "deployment/seaweedfs", "--", "weed", "shell"])
+        self.assertEqual(stdin, "s3.bucket.create -name datahub-backup\n")
+        self.assertEqual(check, exec_ + ["deployment/seaweedfs", "--", "curl", "-sf",
+                                         "-o", "/dev/null",
+                                         "http://127.0.0.1:8888/buckets/datahub-backup/"])
         self.assertIsNone(none)
 
     def test_direct_stand_ins_take_their_cpu_limits_from_the_stress_config(self):
@@ -2035,6 +2059,117 @@ class CheckStandins(unittest.TestCase):
     def test_the_committed_cases_load(self):
         cases = gate.standins.load_cases(os.path.join(HERE, "opa", "cases.json"))
         self.assertGreater(len(cases), 1)
+
+
+DATAHUB_IMAGE = "ghcr.io/cloudnative-pg/postgresql:16.15-1@sha256:" + "d" * 64
+DATAHUB_VALUES = {"instances": 3, "image": DATAHUB_IMAGE, "podAntiAffinityType": "required",
+                  "smartShutdownTimeout": 0}
+
+
+def datahub_cluster(ready=3, synchronous=None, instances=3, image=DATAHUB_IMAGE):
+    spec = {"instances": instances, "imageName": image, "smartShutdownTimeout": 0,
+            "affinity": {"podAntiAffinityType": "required"}}
+    if synchronous:
+        spec["postgresql"] = {"synchronous": synchronous}
+    return {"spec": spec, "status": {"readyInstances": ready, "currentPrimary": "datahub-pg-1"}}
+
+
+def datahub_pods(*nodes):
+    return {"items": [{"metadata": {"name": f"datahub-pg-{i + 1}"}, "spec": {"nodeName": n}}
+                      for i, n in enumerate(nodes)]}
+
+
+class CheckDatahubPg(unittest.TestCase):
+    """ADR-066 §5: datahub-pg as its values say, asynchronous, three instances on three nodes;
+    then WAL archived and an on-demand backup completed through the plugin."""
+
+    def test_reads_its_values_cluster_and_instances_in_datahubs_namespace(self):
+        values, cluster, pods = gate.datahub_pg_commands("catalog-datahub")
+        self.assertEqual(values, ["helm", "--kube-context", gate.CONTEXT, "-n", "catalog-datahub",
+                                  "get", "values", "datahub-postgres", "--all", "-o", "json"])
+        self.assertEqual(cluster, ["kubectl", "--context", gate.CONTEXT, "-n", "catalog-datahub",
+                                   "get", "cluster/datahub-pg", "-o", "json"])
+        self.assertEqual(pods[:6], ["kubectl", "--context", gate.CONTEXT, "-n",
+                                    "catalog-datahub", "get"])
+        self.assertIn("cnpg.io/cluster=datahub-pg,cnpg.io/podRole=instance", pods)
+
+    def test_three_ready_asynchronous_instances_on_three_nodes_pass(self):
+        problems, notes = gate.datahub_pg_problems(
+            DATAHUB_VALUES, datahub_cluster(), datahub_pods("a", "b", "c"))
+        self.assertEqual(problems, [])
+        self.assertEqual(notes, ["Cluster datahub-pg: 3 instances ready on 3 nodes (a, b, c), "
+                                 f"image {DATAHUB_IMAGE}, anti-affinity required, replication "
+                                 "asynchronous."])
+
+    def test_synchronous_replication_running_is_a_problem(self):
+        problems, _ = gate.datahub_pg_problems(
+            DATAHUB_VALUES, datahub_cluster(synchronous={"method": "any", "number": 1}),
+            datahub_pods("a", "b", "c"))
+        self.assertEqual(problems, ["replication: synchronous running, asynchronous in ADR-066"])
+
+    def test_a_value_the_cluster_does_not_run_is_a_problem(self):
+        problems, _ = gate.datahub_pg_problems(
+            DATAHUB_VALUES, datahub_cluster(instances=2, ready=2), datahub_pods("a", "b"))
+        self.assertIn("instances: 2 running, 3 in the values", problems)
+        self.assertIn("2 instances ready of 3", problems)
+
+    def test_two_instances_on_one_node_is_a_problem(self):
+        problems, _ = gate.datahub_pg_problems(
+            DATAHUB_VALUES, datahub_cluster(), datahub_pods("a", "a", "b"))
+        self.assertEqual(problems, ["3 instances on 2 nodes: a, b"])
+
+    def test_the_backup_is_of_datahub_pg_in_datahubs_namespace(self):
+        backup = gate.backup_manifest({"NS_CATALOG_DATAHUB": "catalog-datahub"},
+                                      "datahub-pg-gate-1", "NS_CATALOG_DATAHUB",
+                                      gate.release.DATAHUB_PG)
+        self.assertEqual(backup["metadata"], {"name": "datahub-pg-gate-1",
+                                              "namespace": "catalog-datahub"})
+        self.assertEqual(backup["spec"]["cluster"], {"name": "datahub-pg"})
+        self.assertEqual(backup["spec"]["method"], "plugin")
+
+    def test_check_datahub_pg_switches_wal_then_backs_up_and_reports_both(self):
+        events = []
+
+        def fake_output(argv):
+            if "helm" == argv[0]:
+                return json.dumps(DATAHUB_VALUES)
+            if "cluster/datahub-pg" in argv:
+                return json.dumps(datahub_cluster())
+            if "pods" in argv:
+                return json.dumps(datahub_pods("a", "b", "c"))
+            raise AssertionError(argv)
+
+        def fake_switch(kubectl, namespace, cluster, when):
+            events.append(("switch", namespace, cluster))
+            return None, f"WAL switched on datahub-pg-1: 0001 archived {when}."
+
+        def fake_run(argv, stdin=None):
+            events.append(("apply", json.loads(stdin)["spec"]["cluster"]["name"]))
+
+        with mock.patch.object(gate, "output", side_effect=fake_output), \
+                mock.patch.object(gate, "switch_wal", side_effect=fake_switch), \
+                mock.patch.object(gate, "run", side_effect=fake_run), \
+                mock.patch.object(gate, "wait_for", return_value=("completed", "")):
+            problems, notes = gate.check_datahub_pg({"NS_CATALOG_DATAHUB": "catalog-datahub"})
+        self.assertEqual(problems, [])
+        self.assertEqual(events, [("switch", "catalog-datahub", "datahub-pg"),
+                                  ("apply", "datahub-pg")])
+        self.assertIn("archived through the plugin", notes[1])
+        self.assertIn("completed through the plugin", notes[2])
+
+    def test_a_failed_backup_is_a_problem(self):
+        with mock.patch.object(gate, "output", side_effect=lambda argv: json.dumps(
+                DATAHUB_VALUES if argv[0] == "helm" else datahub_cluster()
+                if "cluster/datahub-pg" in argv else datahub_pods("a", "b", "c"))), \
+                mock.patch.object(gate, "switch_wal", return_value=(None, "ok")), \
+                mock.patch.object(gate, "run"), \
+                mock.patch.object(gate, "wait_for", return_value=("failed", "no credentials")):
+            problems, _ = gate.check_datahub_pg({"NS_CATALOG_DATAHUB": "catalog-datahub"})
+        self.assertEqual(len(problems), 1)
+        self.assertIn("no credentials", problems[0])
+
+    def test_it_is_a_command_of_the_gate(self):
+        self.assertIn("| check-datahub-pg |", gate.__doc__.strip().splitlines()[-1])
 
 
 if __name__ == "__main__":

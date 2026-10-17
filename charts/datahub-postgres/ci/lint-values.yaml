@@ -1,0 +1,6 @@
+# What install/release.py passes from .env (ADR-066 §3), with example values that name no real
+# system (ADR-002): read by helm lint in .github/workflows/static.yml and by the chart's
+# tests, never installed. The chart has no default for these, so it is linted with them.
+backup:
+  endpointURL: http://s3.example.invalid:8333
+  bucket: datahub-backup

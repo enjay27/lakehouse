@@ -1,0 +1,5 @@
+# What install/release.py passes from .env: read by helm lint in .github/workflows/static.yml and
+# by the chart's tests, never installed. The chart has no default for the operator's namespace,
+# so it is linted with one.
+namespaces:
+  operator: cnpg-system

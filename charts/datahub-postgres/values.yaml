@@ -1,0 +1,45 @@
+# Defaults are the target clusters' (docs/plans/roadmap.md, pinned versions); an environment
+# that cannot afford them overrides sizes only (ADR-008, ADR-017). values.schema.json refuses
+# unknown keys, so a misspelt value fails instead of being ignored (ADR-016).
+
+# Three instances, as polaris-pg and the target clusters (#9; ADR-066 §2). CNPG's default is one.
+instances: 3
+
+# CNPG's PostgreSQL 16 image, pinned by tag and digest (ADR-010), the same as polaris-pg's.
+image: ghcr.io/cloudnative-pg/postgresql:16.15-202610050823-minimal-trixie@sha256:37a7225a2577af6e7e274b50b278f89dcdaf7c2cf005a66402872f6ed39d58e3
+
+# `required`: two instances never share a node, so losing a node loses one copy at most. It
+# needs as many schedulable nodes as instances. CNPG's default is `preferred`.
+podAntiAffinityType: required
+
+# Seconds a stopping instance lets open sessions finish before a fast shutdown, which rolls open
+# transactions back. 0, as polaris-pg's (ADR-047 §8): a deleted primary shuts down at once instead
+# of refusing connections for up to CNPG's default of 180 s. A tuning value (ADR-066 §2).
+smartShutdownTimeout: 0
+
+# Replication stays CNPG's default, asynchronous: a lost or slow standby never stops a commit,
+# and a failover can lose the last commits a standby had not received (ADR-066 §2). There is no
+# value for it: synchronous commits for Datahub would be a decision of their own.
+
+storage:
+  size: 10Gi
+  # Empty: the cluster's default StorageClass.
+  storageClass: ""
+
+# The database Datahub uses, owned by the user of the `datahub-db` Secret (basic-auth),
+# created by scripts/init_env.py --apply-secrets (ADR-006).
+database: datahub
+owner: datahub
+credentialsSecret: datahub-db
+
+# Backups through the Barman Cloud Plugin (ADR-043, ADR-066 §3). The endpoint and bucket have no
+# default: install/release.py passes S3_ENDPOINT and DATAHUB_BACKUP_BUCKET from .env. The key is
+# the `datahub-backup-s3` Secret from scripts/init_env.py --apply-secrets, never Polaris's.
+backup:
+  endpointURL: ""
+  bucket: ""
+  credentialsSecret: datahub-backup-s3
+  # Base backups and WAL older than this are deleted by the plugin: <n>d, <n>w or <n>m.
+  retention: 30d
+  # CNPG's cron has seconds first: every day at 02:00 in the operator's time zone.
+  schedule: "0 0 2 * * *"
