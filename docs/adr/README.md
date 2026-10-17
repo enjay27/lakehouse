@@ -111,6 +111,7 @@ flowchart LR
 | [060](060-polaris-pgs-backups-sign-for-s3-region-from-the-backup-secret.md) | polaris-pg's backups sign for `S3_REGION`, read from the backup Secret | Accepted |
 | [061](061-polaris-runs-generational-zgc-set-through-java-opts-and-keeps-it-only-if-tier-d-shows-its-pauses-gone.md) | Polaris runs generational ZGC, set through `JAVA_OPTS`, and keeps it only if Tier D shows its pauses gone | Amended by ADR-062 |
 | [062](062-zgc-is-retried-at-a-50-percent-heap-share-before-g1-its-first-run-was-killed-by-its-memory-limit-not-its-pauses.md) | ZGC is retried at a 50% heap share before G1: its first run was killed by its memory limit, not its pauses | Accepted |
+| [063](063-the-collectors-criterion-leaves-out-ordinary-commits-that-ran-out-of-409-retries.md) | The collector's criterion leaves out ordinary commits that ran out of 409 retries | Proposed |
 
 ## Not ADRs
 
