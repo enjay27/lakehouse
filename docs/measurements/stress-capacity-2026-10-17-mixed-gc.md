@@ -16,8 +16,8 @@ steps 1 to 5 and 7 to 8. The raw records stay on the Linux test server, as in
 **In short:** yes, ZGC stalls allocation at a 4 GiB heap, 3,093 times over the two ramps. The
 stalls come at the start of a step, never later in it:
 - **Every stall fell in the first 2 to 6 s of its step,** except in ramp 1's failing step,
-  where they went on for 32 s. The heap was full (4,096 of 4,096 MiB) when a collection
-  started on an allocation stall.
+  where they went on for 32 s. Of the 14 collections ZGC started on an allocation stall,
+  11 began with the heap full (4,096 of 4,096 MiB).
 - **They line up with the latency:** Polaris's mean latency rose to 38 to 509 ms in the
   first 45 s of a step, then held at 10.8 to 17.2 ms with at most 8 requests in flight.
 - **Both ramps passed 100, 125 and 150 req/s** and failed at 175 on p99, so the knee was 150
@@ -87,10 +87,15 @@ long one thread waited.
   were Vert.x event-loop threads, each of which serves many connections at once. The rest
   were 51 stalls on 12 other threads.
 - **609 collections:** 552 minor and 29 major on ZGC's allocation-rate rule; 9 major
-  proactive; 5 minor on high usage; and 14 minor on an allocation stall. A typical minor
-  collection took the heap from 3.5 to 3.6 GiB down to 0.6 to 0.7 GiB.
-  - Each collection on an allocation stall started at a full heap, 4,096 MiB. It left 2,390
-    to 3,676 MiB and took 0.95 to 1.59 s.
+  proactive; 5 minor on high usage; and 14 minor on an allocation stall. A collection's
+  time below is its whole concurrent cycle, not a pause.
+  - **The 552 minor collections on the allocation-rate rule** took the heap from a median of
+    3,352 MiB (quartiles 3,180 to 3,478) to 1,075 MiB (876 to 1,280). The median cycle took
+    0.21 s.
+  - **Of the 14 on an allocation stall,** 11 began with the heap full, 4,096 MiB, and three
+    at 2,806 to 3,822 MiB. They left 1,818 to 4,096 MiB and took 0.30 to 1.94 s. The one at
+    14:59:48 UTC freed nothing (4,096 to 4,096 MiB); the one at 15:00:08 ended higher than it
+    began (3,822 to 4,096 MiB).
 - **When in the step:** in ramp 2 the stalls fell 1.9 to 5.8 s after each step's start. In
   ramp 1 they fell 1.7 to 4.5 s after it, up to 150 req/s. At 175 they went on from 2.2 to
   32.2 s, 1,101 of them between 25 and 30 s.
@@ -148,6 +153,12 @@ No correctness fault.
   too, and kept the `[gc]` lines. Ramp 1's steps at 25 and 50 req/s are therefore not in the
   log, as the table shows.
 - **The raw records stay out of the repository,** as on 2026-10-17.
+
+## Corrections
+
+- **2026-10-18:** the figures for ZGC's collections, in *In short* and *ZGC's log*, were first
+  written from three of the 14 collections on an allocation stall, and from the two most
+  frequent minor collections. They now cover all of them, from the same `gc-raw.log`.
 
 ## Open
 
