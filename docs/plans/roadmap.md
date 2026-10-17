@@ -246,6 +246,9 @@ source does not matter for operation. What follows is the list they cover.
   `primaryUpdateMethod`: about 18 s of failed requests on 10.12 → 10.14, measured on a Linux
   test cluster; switchover or restart is Kade's decision
   ([#168](https://github.com/enjay27/lakehouse/issues/168)).
+  Kade parked failover on 2026-10-16, to come back to. CNPG's readiness probe at 1 s, measured
+  the same day, did not shorten an outage and was not merged (#31). Datahub starts before it
+  (Kade, 2026-10-18).
 - **Gate:** dry-run and smoke. **Linux:** the release installed on a test cluster: done on
   2026-10-16, on a three-node kind cluster on Linux built by the gate's own scripts
   (ADR-004), with #95's upgrade and #138's restore above.
@@ -309,6 +312,31 @@ source does not matter for operation. What follows is the list they cover.
   collections paused up to 0.4 s, while Polaris used under half its CPU. The 2-hour hold at 20
   req/s answered all 209,149 requests with no heap growth. The sizing for 12,000 req/s waits on
   that collector's tuning.
+- Polaris's collector (ADR-061, amended by ADR-062 and ADR-063;
+  [#182](https://github.com/enjay27/lakehouse/issues/182)): Polaris runs generational ZGC at a
+  50% heap share, measured by Tier D on 2026-10-17
+  ([#184](https://github.com/enjay27/lakehouse/pull/184)):
+  `docs/measurements/stress-capacity-2026-10-17.md`.
+  - The knees rose to 45 commits/s, 250 and 275 req/s of conditional and full loads, and
+    75 req/s of the mixed profile.
+  - The 2-hour hold at 60 req/s answered all 511,102 requests, its longest pause 1 ms.
+  - The sizing for 12,000 req/s: 160 Polaris replicas and 9.3 cores for polaris-pg's
+    primary, estimates to check against #9's answers.
+  - A first attempt at a 70% share was killed by Polaris's memory limit.
+- ZGC's allocation stalls ([#186](https://github.com/enjay27/lakehouse/issues/186),
+  [#187](https://github.com/enjay27/lakehouse/pull/187)): a mixed-only run with ZGC's log,
+  `docs/measurements/stress-capacity-2026-10-17-mixed-gc.md`. At a 4 GiB heap, ZGC stalled
+  allocation in the first seconds of each step only. On fresh tables, both ramps' knee was
+  150 req/s. Open:
+  - [#188](https://github.com/enjay27/lakehouse/issues/188): whether the knee is set by a
+    step's sudden start;
+  - [#189](https://github.com/enjay27/lakehouse/issues/189): whether the lower knee came from
+    tables grown by the earlier profiles;
+  - [#190](https://github.com/enjay27/lakehouse/issues/190): what the heap share does to the
+    stalls.
+- An overloaded Polaris is restarted by the upstream chart's liveness probe
+  ([#179](https://github.com/enjay27/lakehouse/issues/179)): seen in Tier D on 2026-10-16,
+  open for a decision.
 
 ### P7: first release, then upgrades
 
@@ -353,5 +381,7 @@ when Kade learns the target clusters' version.
 
 - [#9](https://github.com/enjay27/lakehouse/issues/9): versions pinned above; the pooler and the
   CPU architecture are still open (Kade).
+- [#179](https://github.com/enjay27/lakehouse/issues/179): an overloaded Polaris is killed by its
+  liveness probe; keep the probe, loosen it, or size so Polaris never saturates.
 - [#168](https://github.com/enjay27/lakehouse/issues/168): an upgrade that changes polaris-pg's spec
   restarts its primary in place; switchover or restart (Kade).
