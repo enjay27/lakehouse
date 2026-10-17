@@ -59,6 +59,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections import namedtuple
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -348,18 +349,32 @@ def datahub_postgres_values(env):
                        "bucket": env["DATAHUB_BACKUP_BUCKET"]}}
 
 
+# One service's PostgreSQL for step 1: its Cluster, chart and Secrets, the .env variables naming
+# its namespace and backup bucket, its values from .env, and the ADRs its messages cite.
+Postgres = namedtuple("Postgres", "service namespace_var bucket_var cluster release chart "
+                                  "db_secret backup_secret values backup_adr region_adr")
+POLARIS_POSTGRES = Postgres("Polaris", "NS_CATALOG_POLARIS", "POLARIS_BACKUP_BUCKET", POLARIS_PG,
+                            POLARIS_PG_RELEASE, POLARIS_PG_CHART, POLARIS_DB_SECRET,
+                            POLARIS_BACKUP_SECRET, postgres_values, "ADR-043", "ADR-060")
+
+
 def polaris_postgres(env, run, dry_run=False):
-    """Step 1, Polaris's PostgreSQL. Returns (problems, notes); no call without a namespace or
-    the backups' endpoint and bucket."""
-    namespace = env.get("NS_CATALOG_POLARIS", "")
+    """Step 1, Polaris's PostgreSQL (ADR-043, ADR-060)."""
+    return postgres(env, run, POLARIS_POSTGRES, dry_run)
+
+
+def postgres(env, run, pg, dry_run=False):
+    """Step 1, one service's PostgreSQL `pg`. Returns (problems, notes); no call without a
+    namespace or the backups' endpoint and bucket."""
+    namespace = env.get(pg.namespace_var, "")
     if not namespace:
-        return ["NS_CATALOG_POLARIS is empty: set Polaris's namespace in .env (ADR-007)"], []
-    empty = [var for var in ("S3_ENDPOINT", "POLARIS_BACKUP_BUCKET") if not env.get(var)]
+        return [f"{pg.namespace_var} is empty: set {pg.service}'s namespace in .env (ADR-007)"], []
+    empty = [var for var in ("S3_ENDPOINT", pg.bucket_var) if not env.get(var)]
     if empty:
-        return [f"{var} is empty: polaris-pg's backups need it in .env (ADR-043)"
+        return [f"{var} is empty: {pg.cluster}'s backups need it in .env ({pg.backup_adr})"
                 for var in empty], []
     context = env["KUBE_CONTEXT"]
-    secrets_needed = (POLARIS_DB_SECRET, POLARIS_BACKUP_SECRET)
+    secrets_needed = (pg.db_secret, pg.backup_secret)
     generation = None
     code, out = run(["kubectl", "--context", context, "-n", namespace, "get", "secret",
                      *secrets_needed, "-o", SECRET_KEYS_TEMPLATE])
@@ -368,38 +383,38 @@ def polaris_postgres(env, run, dry_run=False):
                 "scripts/init_env.py --apply-secrets first (ADR-006)"], []
     keys = {name.strip(): set(rest.split())
             for name, _, rest in (line.partition(":") for line in out.splitlines()) if name}
-    if POLARIS_BACKUP_REGION_KEY not in keys.get(POLARIS_BACKUP_SECRET, set()):
-        return [f"Secret {POLARIS_BACKUP_SECRET} in {namespace} has no key "
+    if POLARIS_BACKUP_REGION_KEY not in keys.get(pg.backup_secret, set()):
+        return [f"Secret {pg.backup_secret} in {namespace} has no key "
                 f"{POLARIS_BACKUP_REGION_KEY}: run scripts/init_env.py --apply-secrets with this "
-                "release first (ADR-060)"], []
+                f"release first ({pg.region_adr})"], []
     if not dry_run:
-        generation = cluster_generation(run, context, namespace)
+        generation = cluster_generation(run, context, namespace, pg.cluster)
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
-        json.dump(postgres_values(env), f)
+        json.dump(pg.values(env), f)
     try:
         helm = ["helm", "--kube-context", context, "-n", namespace, "upgrade", "--install",
-                POLARIS_PG_RELEASE, POLARIS_PG_CHART, "-f", f.name]
+                pg.release, pg.chart, "-f", f.name]
         code, out = run(helm + (["--dry-run=server"] if dry_run else []))
     finally:
         os.unlink(f.name)
     if code != 0:
-        return [f"helm upgrade {POLARIS_PG_RELEASE} in {namespace} failed: {out.strip()}"], []
+        return [f"helm upgrade {pg.release} in {namespace} failed: {out.strip()}"], []
     if dry_run:
-        return [], [f"Step 1: Cluster {POLARIS_PG} in {namespace}, server-side dry-run passed."]
+        return [], [f"Step 1: Cluster {pg.cluster} in {namespace}, server-side dry-run passed."]
     code, out = run(["kubectl", "--context", context, "-n", namespace, "wait",
-                     "--for=condition=Ready", f"cluster/{POLARIS_PG}",
+                     "--for=condition=Ready", f"cluster/{pg.cluster}",
                      f"--timeout={READY_TIMEOUT}"])
     if code != 0:
-        return [f"Cluster {POLARIS_PG} in {namespace} is not Ready: {out.strip()}"], []
-    unchanged = generation is not None and \
-        cluster_generation(run, context, namespace) == generation
-    problem = settle(run, context, namespace, needed=1 if unchanged else SETTLE_READS)
+        return [f"Cluster {pg.cluster} in {namespace} is not Ready: {out.strip()}"], []
+    unchanged = generation is not None and         cluster_generation(run, context, namespace, pg.cluster) == generation
+    problem = settle(run, context, namespace, pg.cluster,
+                     needed=1 if unchanged else SETTLE_READS)
     if problem:
         return [problem], []
     if unchanged:
-        return [], [f"Step 1: Cluster {POLARIS_PG} in {namespace} is Ready, healthy on one "
+        return [], [f"Step 1: Cluster {pg.cluster} in {namespace} is Ready, healthy on one "
                     f"read; its spec is unchanged by the upgrade (generation {generation})."]
-    return [], [f"Step 1: Cluster {POLARIS_PG} in {namespace} is Ready, healthy on "
+    return [], [f"Step 1: Cluster {pg.cluster} in {namespace} is Ready, healthy on "
                 f"{SETTLE_READS} reads {SETTLE_INTERVAL} s apart."]
 
 
