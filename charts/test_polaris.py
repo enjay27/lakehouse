@@ -33,8 +33,8 @@ GATE_ENV = {"POLARIS_DB_HOST": "recorder.standins.svc.cluster.local",
             "POLARIS_OPA_URL": "http://recorder.standins.svc.cluster.local:8181"
                                "/v1/data/polaris/authz"}
 IMAGE_RE = re.compile(r"^apache/polaris:(\d+\.\d+\.\d+)@sha256:[0-9a-f]{64}$")
-# Every JVM option Polaris runs with (ADR-061).
-JAVA_OPTS = "-XX:MaxRAMPercentage=70.0 -XX:+UseZGC -XX:+ZGenerational -XX:+ExitOnOutOfMemoryError"
+# Every JVM option Polaris runs with (ADR-061, ADR-062).
+JAVA_OPTS = "-XX:MaxRAMPercentage=50.0 -XX:+UseZGC -XX:+ZGenerational -XX:+ExitOnOutOfMemoryError"
 ADMIN_IMAGE_RE = re.compile(r"^apache/polaris-admin-tool:(\d+\.\d+\.\d+)@sha256:[0-9a-f]{64}$")
 
 
