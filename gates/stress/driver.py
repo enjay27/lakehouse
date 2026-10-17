@@ -243,10 +243,12 @@ def pod_cpu(texts, namespace, container):
 def jvm_sample(texts):
     """What the hold watches in Polaris's /q/metrics, summed over its pods (ADR-053 §7): the
     heap used, its maximum, the heap after GC, the GC pauses so far and the longest recent
-    one, and the worker pool's queue and rejections."""
+    one, and the worker pool's queue and rejections. ZGC's generations share one heap and
+    each reports its whole maximum, so a pod's ZGC pools count once (ADR-062)."""
     sample = {"heap_used": 0, "heap_max": 0, "heap_after_gc": 0, "gc_pauses": 0,
               "gc_seconds": 0, "gc_longest": 0, "worker_queue": 0, "worker_rejected": 0}
     for text in texts:
+        zgc_max = 0
         for (name, labels), value in parse_metrics(text).items():
             labels = dict(labels)
             heap = labels.get("area") == "heap"
@@ -254,7 +256,10 @@ def jvm_sample(texts):
             if name == "jvm_memory_used_bytes" and heap:
                 sample["heap_used"] += value
             elif name == "jvm_memory_max_bytes" and heap and value > 0:
-                sample["heap_max"] += value
+                if labels.get("id", "").startswith("ZGC "):
+                    zgc_max = max(zgc_max, value)
+                else:
+                    sample["heap_max"] += value
             elif name == "jvm_gc_live_data_size_bytes":
                 sample["heap_after_gc"] += value
             elif name == "jvm_gc_pause_seconds_count":
@@ -267,6 +272,7 @@ def jvm_sample(texts):
                 sample["worker_queue"] += value
             elif name == "worker_pool_rejected_total" and pool:
                 sample["worker_rejected"] += value
+        sample["heap_max"] += zgc_max
     return sample
 
 

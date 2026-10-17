@@ -489,6 +489,18 @@ class HoldSamples(unittest.TestCase):
             "heap_used": 150, "heap_max": 6000, "heap_after_gc": 70, "gc_pauses": 3,
             "gc_seconds": 0.5, "gc_longest": 0.2, "worker_queue": 4, "worker_rejected": 1})
 
+    def test_zgcs_generations_share_one_heap_so_its_maximum_counts_once(self):
+        # Both of ZGC's pools report the whole heap's maximum (ADR-062): 5,736 MiB read 11,472.
+        a = 'application="Polaris"'
+        text = "\n".join([
+            f'jvm_memory_max_bytes{{{a},area="heap",id="ZGC Old Generation"}} 6000',
+            f'jvm_memory_max_bytes{{{a},area="heap",id="ZGC Young Generation"}} 6000',
+            f'jvm_memory_used_bytes{{{a},area="heap",id="ZGC Old Generation"}} 100',
+            f'jvm_memory_used_bytes{{{a},area="heap",id="ZGC Young Generation"}} 50']) + "\n"
+        sample = driver.jvm_sample([text, text])
+        self.assertEqual((sample["heap_max"], sample["heap_used"]), (12000, 300),
+                         "summed over the two pods, each pod's heap once")
+
     def test_the_hold_is_sampled_every_interval_until_k6_ends(self):
         clock = {"now": 0.0}
 
