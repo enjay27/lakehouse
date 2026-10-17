@@ -1275,11 +1275,12 @@ RESTORE_POLL = 3
 ARCHIVE_TIMEOUT = 120
 
 
-def backup_manifest(env, name):
-    """An on-demand Backup of polaris-pg through the Barman Cloud Plugin."""
+def backup_manifest(env, name, namespace_var="NS_CATALOG_POLARIS", cluster=release.POLARIS_PG):
+    """An on-demand Backup of `cluster` (polaris-pg unless told otherwise) through the Barman
+    Cloud Plugin."""
     return {"apiVersion": "postgresql.cnpg.io/v1", "kind": "Backup",
-            "metadata": {"name": name, "namespace": env["NS_CATALOG_POLARIS"]},
-            "spec": {"cluster": {"name": release.POLARIS_PG}, "method": "plugin",
+            "metadata": {"name": name, "namespace": env[namespace_var]},
+            "spec": {"cluster": {"name": cluster}, "method": "plugin",
                      "pluginConfiguration": {"name": release.PLUGIN_NAME}}}
 
 
@@ -1312,19 +1313,17 @@ def wal_archived(segment, last):
     return bool(last) and last >= segment
 
 
-def switch_wal(kubectl, namespace):
-    """(problem, note): switches WAL on polaris-pg's primary and waits until the segment it
-    closed is archived. A backup from a standby, CNPG's default target, is consistent only past
-    the WAL archived when it ended; without this the restore failed until the primary's
-    archive_timeout (#86, smoke 38515945485)."""
-    cluster = json.loads(output(kubectl + ["get", f"cluster/{release.POLARIS_PG}", "-o",
-                                           "json"]))
-    primary = cluster["status"]["currentPrimary"]
+def switch_wal(kubectl, namespace, cluster=release.POLARIS_PG, when="before the restore"):
+    """(problem, note): switches WAL on `cluster`'s primary (polaris-pg unless told otherwise)
+    and waits until the segment it closed is archived. A backup from a standby, CNPG's default
+    target, is consistent only past the WAL archived when it ended; without this the restore
+    failed until the primary's archive_timeout (#86, smoke 38515945485)."""
+    status = json.loads(output(kubectl + ["get", f"cluster/{cluster}", "-o", "json"]))
+    primary = status["status"]["currentPrimary"]
     segment = output(wal_switch_command(namespace, primary)).strip()
     for _ in range(ARCHIVE_TIMEOUT // RESTORE_POLL):
         if wal_archived(segment, output(archived_wal_command(namespace, primary)).strip()):
-            return None, (f"WAL switched on {primary}: {segment} archived before the "
-                          "restore.")
+            return None, f"WAL switched on {primary}: {segment} archived {when}."
         time.sleep(RESTORE_POLL)
     return (f"WAL segment {segment} from {primary} was not archived within "
             f"{ARCHIVE_TIMEOUT} s"), None
