@@ -114,6 +114,7 @@ flowchart LR
 | [063](063-the-collectors-criterion-leaves-out-ordinary-commits-that-ran-out-of-409-retries.md) | The collector's criterion leaves out ordinary commits that ran out of 409 retries | Accepted |
 | [064](064-measurements-keep-their-raw-records-on-the-linux-test-server-each-file-names-their-checksums-and-every-number-it-uses.md) | Measurements keep their raw records on the Linux test server; each file names their checksums and every number it uses | Proposed |
 | [065](065-the-stress-test-runs-with-k6-only-when-kade-starts-it-tier-a-on-the-gate-tier-d-measures-one-polaris-on-a-linux-test-server.md) | The stress test runs with k6 only when Kade starts it: Tier A on the gate, Tier D measures one Polaris on a Linux test server | Proposed |
+| [066](066-datahubs-postgresql-is-a-chart-of-its-own-with-three-asynchronous-instances-backing-up-to-its-own-bucket-with-its-own-key.md) | Datahub's PostgreSQL is a chart of its own, with three asynchronous instances, backing up to its own bucket with its own key | Proposed |
 
 ## Not ADRs
 
