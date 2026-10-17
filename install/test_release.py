@@ -178,7 +178,8 @@ class Preconditions(unittest.TestCase):
 POLARIS_ENV = {**ENV, "NS_CATALOG_POLARIS": "catalog-polaris",
                "NS_CATALOG_DATAHUB": "catalog-datahub",
                "S3_ENDPOINT": "http://s3.example.invalid:8333",
-               "POLARIS_BACKUP_BUCKET": "polaris-backup"}
+               "POLARIS_BACKUP_BUCKET": "polaris-backup",
+               "DATAHUB_BACKUP_BUCKET": "datahub-backup"}
 
 
 class FakeCalls:
@@ -186,8 +187,12 @@ class FakeCalls:
 
     def __init__(self, secret=True, helm=(0, ""), wait=(0, ""), clusters=None, pods=(0, ""),
                  label=(0, ""), generations=((1, "NotFound"),),
-                 backup_keys=("accessKeyId", "region", "secretAccessKey")):
+                 backup_keys=("accessKeyId", "region", "secretAccessKey"),
+                 pg=release.POLARIS_PG, db_secret=release.POLARIS_DB_SECRET,
+                 backup_secret=release.POLARIS_BACKUP_SECRET):
         self.secret, self.helm, self.wait, self.calls = secret, helm, wait, []
+        # The Cluster and Secrets of the service whose step this answers: Polaris's by default.
+        self.pg, self.db_secret, self.backup_secret = pg, db_secret, backup_secret
         # The key names the Secrets read gives for polaris-backup-s3 (ADR-060).
         self.backup_keys = backup_keys
         self.pods, self.label = pods, label
@@ -210,17 +215,17 @@ class FakeCalls:
         if "secret" in argv:
             if not self.secret:
                 return (1, "NotFound")
-            return (0, f"{release.POLARIS_DB_SECRET}: password username\n"
-                       f"{release.POLARIS_BACKUP_SECRET}: {' '.join(self.backup_keys)}\n")
+            return (0, f"{self.db_secret}: password username\n"
+                       f"{self.backup_secret}: {' '.join(self.backup_keys)}\n")
         if "wait" in argv:
             return self.wait
         if argv[5:7] == ["get", "pods"]:
             return self.pods
         if "label" in argv:
             return self.label
-        if f"cluster/{release.POLARIS_PG}" in argv and "jsonpath={.metadata.generation}" in argv:
+        if f"cluster/{self.pg}" in argv and "jsonpath={.metadata.generation}" in argv:
             return self.generations.pop(0) if len(self.generations) > 1 else self.generations[0]
-        if f"cluster/{release.POLARIS_PG}" in argv and "get" in argv:
+        if f"cluster/{self.pg}" in argv and "get" in argv:
             answer = self.clusters.pop(0) if len(self.clusters) > 1 else self.clusters[0]
             return (0, json.dumps(answer)) if isinstance(answer, dict) else answer
         raise AssertionError(f"unexpected call {argv}")
@@ -551,6 +556,119 @@ class NetworkPolicies(unittest.TestCase):
         self.assertIn("values don't meet the schema", "\n".join(problems))
 
 
+def datahub_calls(**kwargs):
+    """FakeCalls answering Datahub's part of step 1 (ADR-066 §4)."""
+    return FakeCalls(pg=release.DATAHUB_PG, db_secret=release.DATAHUB_DB_SECRET,
+                     backup_secret=release.DATAHUB_BACKUP_SECRET, **kwargs)
+
+
+class DatahubNetworkPolicies(unittest.TestCase):
+    """ADR-066 §4, ADR-048 §4: Datahub's policies first in its part of step 1 (ADR-045)."""
+
+    def step(self, calls, env=POLARIS_ENV, dry_run=False):
+        return release.datahub_network_policies(env, calls, dry_run=dry_run)
+
+    def test_installs_this_repositorys_chart_in_datahubs_namespace_with_the_operators(self):
+        calls = datahub_calls()
+        problems, notes = self.step(calls)
+        self.assertEqual(problems, [])
+        (helm,) = calls.calls
+        self.assertEqual(helm[:3], ["helm", "--kube-context", "kind-lakehouse-gate"])
+        self.assertEqual(helm[helm.index("-n") + 1], "catalog-datahub")
+        self.assertEqual(helm[helm.index("upgrade"):helm.index("upgrade") + 4],
+                         ["upgrade", "--install", release.DATAHUB_NETPOL_RELEASE,
+                          release.DATAHUB_NETPOL_CHART])
+        self.assertTrue(os.path.isfile(os.path.join(release.DATAHUB_NETPOL_CHART, "Chart.yaml")))
+        self.assertNotIn("--dry-run=server", helm)
+        self.assertEqual(calls.values, [{"namespaces": {"operator": "cnpg-system"}}])
+        self.assertEqual(notes, ["Step 1: Datahub's network policies in catalog-datahub, "
+                                 "installed (ADR-048, ADR-066)."])
+
+    def test_an_empty_namespace_stops_before_any_call(self):
+        for var in ("NS_CATALOG_DATAHUB", "NS_CNPG_SYSTEM"):
+            with self.subTest(var=var):
+                calls = datahub_calls()
+                problems, _ = self.step(calls, env={**POLARIS_ENV, var: ""})
+                self.assertIn(var, "\n".join(problems))
+                self.assertEqual(calls.calls, [])
+
+    def test_dry_run_is_server_side(self):
+        calls = datahub_calls()
+        problems, notes = self.step(calls, dry_run=True)
+        self.assertEqual(problems, [])
+        self.assertIn("--dry-run=server", calls.calls[0])
+        self.assertIn("dry-run", "\n".join(notes))
+
+    def test_a_failed_helm_stops_with_its_error(self):
+        problems, _ = self.step(datahub_calls(helm=(1, "values don't meet the schema")))
+        self.assertIn("values don't meet the schema", "\n".join(problems))
+
+
+class DatahubPostgres(unittest.TestCase):
+    """ADR-066 §3, §4: datahub-pg as polaris-pg, from Datahub's chart, Secrets and bucket."""
+
+    def step(self, calls, env=POLARIS_ENV, dry_run=False):
+        return release.datahub_postgres(env, calls, dry_run=dry_run)
+
+    def test_installs_the_chart_in_datahubs_namespace_then_waits_for_datahub_pg(self):
+        calls = datahub_calls()
+        problems, notes = self.step(calls)
+        self.assertEqual(problems, [])
+        helm = next(c for c in calls.calls if c[0] == "helm")
+        self.assertEqual(helm[helm.index("-n") + 1], "catalog-datahub")
+        self.assertEqual(helm[helm.index("upgrade"):helm.index("upgrade") + 4],
+                         ["upgrade", "--install", "datahub-postgres", release.DATAHUB_PG_CHART])
+        wait = next(c for c in calls.calls if "wait" in c)
+        self.assertIn("cluster/datahub-pg", wait)
+        self.assertEqual(wait[wait.index("-n") + 1], "catalog-datahub")
+        self.assertIn("Cluster datahub-pg in catalog-datahub is Ready", "\n".join(notes))
+
+    def test_the_backups_go_to_datahubs_bucket(self):
+        calls = datahub_calls()
+        self.step(calls)
+        self.assertEqual(calls.values, [{"backup": {
+            "endpointURL": "http://s3.example.invalid:8333", "bucket": "datahub-backup"}}])
+
+    def test_datahubs_secrets_are_read_for_their_key_names(self):
+        calls = datahub_calls()
+        self.step(calls)
+        read = next(c for c in calls.calls if "secret" in c)
+        self.assertEqual(read[read.index("get"):read.index("get") + 4],
+                         ["get", "secret", "datahub-db", "datahub-backup-s3"])
+        self.assertEqual(read[read.index("-n") + 1], "catalog-datahub")
+
+    def test_a_backup_secret_without_a_region_stops_before_helm(self):
+        calls = datahub_calls(backup_keys=("accessKeyId", "secretAccessKey"))
+        problems, _ = self.step(calls)
+        self.assertEqual(problems, [
+            "Secret datahub-backup-s3 in catalog-datahub has no key region: run "
+            "scripts/init_env.py --apply-secrets with this release first (ADR-066)"])
+        self.assertFalse(any(c[0] == "helm" for c in calls.calls))
+
+    def test_an_empty_bucket_namespace_or_endpoint_stops_before_any_call(self):
+        cases = {"DATAHUB_BACKUP_BUCKET": "DATAHUB_BACKUP_BUCKET is empty: datahub-pg's backups "
+                                          "need it in .env (ADR-066)",
+                 "S3_ENDPOINT": "S3_ENDPOINT is empty: datahub-pg's backups need it in .env "
+                                "(ADR-066)",
+                 "NS_CATALOG_DATAHUB": "NS_CATALOG_DATAHUB is empty: set Datahub's namespace in "
+                                       ".env (ADR-007)"}
+        for var, problem in cases.items():
+            with self.subTest(var=var):
+                calls = datahub_calls()
+                problems, _ = self.step(calls, env={**POLARIS_ENV, var: ""})
+                self.assertEqual(problems, [problem])
+                self.assertEqual(calls.calls, [])
+
+    def test_dry_run_is_server_side_and_reads_no_cluster(self):
+        calls = datahub_calls()
+        problems, notes = self.step(calls, dry_run=True)
+        self.assertEqual(problems, [])
+        self.assertIn("--dry-run=server", next(c for c in calls.calls if c[0] == "helm"))
+        self.assertFalse([c for c in calls.calls if "cluster/datahub-pg" in c])
+        self.assertIn("Cluster datahub-pg in catalog-datahub, server-side dry-run passed",
+                      "\n".join(notes))
+
+
 class Settle(unittest.TestCase):
     """settle reads the Cluster it is given, polaris-pg unless told otherwise."""
 
@@ -618,13 +736,15 @@ class Steps(unittest.TestCase):
                 return batch(argv, stdin)
             if "polaris-s3" in argv or "rollout" in argv or release.POLARIS_CHART in argv:
                 return pol(argv, stdin)
+            if "catalog-datahub" in argv:
+                return dh(argv)
             return pg(argv)
-        batch = FakeBatch()
+        batch, dh = FakeBatch(), datahub_calls()
         problems, notes = release.install({**BOOTSTRAP_ENV, **LOGS_ENV}, run, ["1.30"],
                                           dry_run=False)
         self.assertEqual(problems, [])
         self.assertEqual([n.split(":")[0] for n in notes],
-                         ["Step 0"] * 2 + ["Step 1"] * 6 + ["Step 2"] * 2)
+                         ["Step 0"] * 2 + ["Step 1"] * 8 + ["Step 2"] * 2)
         self.assertIn("Barman Cloud Plugin", notes[1])
         self.assertIn("network policies", notes[2])
         self.assertIn("polaris-pg", notes[3])
@@ -632,12 +752,18 @@ class Steps(unittest.TestCase):
         self.assertIn("bootstrapped", notes[5])
         self.assertIn("polaris-logs", notes[6])
         self.assertIn("deployment/polaris", notes[7])
-        self.assertIn("cronjob/polaris-log-batch", notes[8])
-        self.assertIn("console is not enabled", notes[9])
+        # ADR-045 step 1, ADR-066 §4: then Datahub, its policies before datahub-pg.
+        self.assertIn("Datahub's network policies", notes[8])
+        self.assertIn("datahub-pg", notes[9])
+        self.assertIn("cronjob/polaris-log-batch", notes[10])
+        self.assertIn("console is not enabled", notes[11])
         # ADR-045 §2: the policies first in step 1, before polaris-pg.
         helms = [c for c in pg.calls if c[0] == "helm"]
         self.assertEqual([h[h.index("--install") + 1] for h in helms],
                          [release.POLARIS_NETPOL_RELEASE, release.POLARIS_PG_RELEASE])
+        helms = [c for c in dh.calls if c[0] == "helm"]
+        self.assertEqual([h[h.index("--install") + 1] for h in helms],
+                         [release.DATAHUB_NETPOL_RELEASE, release.DATAHUB_PG_RELEASE])
 
     def test_failed_network_policies_stop_before_polaris_pg(self):
         step0, pg = FakeKubectl(), FakeCalls(helm=(1, "values don't meet the schema"))
@@ -672,12 +798,45 @@ class Steps(unittest.TestCase):
                 return console(argv, stdin)
             if "polaris-s3" in argv or "rollout" in argv or release.POLARIS_CHART in argv:
                 return pol(argv, stdin)
+            if "catalog-datahub" in argv:
+                return dh(argv)
             return pg(argv)
+        dh = datahub_calls()
         problems, notes = release.install({**BOOTSTRAP_ENV, **LOGS_ENV, **CONSOLE_ENV}, run,
                                           ["1.30"], dry_run=False)
         self.assertIn("image tag invalid", "\n".join(problems))
         self.assertEqual(console.calls, [])
-        self.assertIn("deployment/polaris", notes[-1])
+        self.assertIn("datahub-pg", notes[-1])
+
+    def test_a_failed_datahub_pg_stops_the_install_before_the_log_batch(self):
+        """ADR-045: every service of step 1 before step 2."""
+        step0, pg, endpoints = FakeKubectl(), FakeCalls(), FakeRun()
+        boot, pol, claim, batch = FakeBootstrap(), FakePolaris(), FakeClaim(), FakeBatch()
+        dh = datahub_calls(backup_keys=("accessKeyId", "secretAccessKey"))
+
+        def run(argv, stdin=None):
+            if "crd" in argv or "cnpg-system" in argv:
+                return step0(argv)
+            if "endpoint-check" in " ".join(argv):
+                return endpoints(argv, stdin)
+            if "storageclass" in argv or "apply" in argv:
+                return claim(argv, stdin)
+            if "polaris-root" in argv or "run" in argv:
+                return boot(argv, stdin)
+            if release.BATCH_CHART in argv or "cronjob/polaris-log-batch" in argv:
+                return batch(argv, stdin)
+            if "polaris-s3" in argv or "rollout" in argv or release.POLARIS_CHART in argv:
+                return pol(argv, stdin)
+            if "catalog-datahub" in argv:
+                return dh(argv)
+            return pg(argv)
+        problems, notes = release.install({**BOOTSTRAP_ENV, **LOGS_ENV}, run, ["1.30"],
+                                          dry_run=False)
+        self.assertEqual(problems, [
+            "Secret datahub-backup-s3 in catalog-datahub has no key region: run "
+            "scripts/init_env.py --apply-secrets with this release first (ADR-066)"])
+        self.assertEqual(batch.calls, [])
+        self.assertIn("Datahub's network policies", notes[-1])
 
     def test_a_missing_storage_class_stops_before_polaris(self):
         step0, pg, endpoints = FakeKubectl(), FakeCalls(), FakeRun()
@@ -721,7 +880,10 @@ class Steps(unittest.TestCase):
                 return console(argv, stdin)
             if "polaris-s3" in argv or "rollout" in argv or release.POLARIS_CHART in argv:
                 return pol(argv, stdin)
+            if "catalog-datahub" in argv:
+                return dh(argv)
             return pg(argv)
+        dh = datahub_calls()
         problems, notes = release.install({**BOOTSTRAP_ENV, **LOGS_ENV, **CONSOLE_ENV}, run,
                                           ["1.30"], dry_run=False)
         self.assertEqual(problems, [])
@@ -768,7 +930,10 @@ class Steps(unittest.TestCase):
                 return step0(argv)
             if "storageclass" in argv or "apply" in argv:
                 return claim(argv, stdin)
+            if "catalog-datahub" in argv:
+                return dh(argv)
             return endpoints(argv, stdin) if "run" in argv else step1(argv)
+        dh = datahub_calls()
         problems, _ = release.install({**ENDPOINT_ENV, **LOGS_ENV}, run, ["1.30"], dry_run=True)
         self.assertEqual(problems, [])
         self.assertEqual(len(endpoints.calls), 1)
