@@ -112,6 +112,8 @@ flowchart LR
 | [061](061-polaris-runs-generational-zgc-set-through-java-opts-and-keeps-it-only-if-tier-d-shows-its-pauses-gone.md) | Polaris runs generational ZGC, set through `JAVA_OPTS`, and keeps it only if Tier D shows its pauses gone | Amended by ADR-062 |
 | [062](062-zgc-is-retried-at-a-50-percent-heap-share-before-g1-its-first-run-was-killed-by-its-memory-limit-not-its-pauses.md) | ZGC is retried at a 50% heap share before G1: its first run was killed by its memory limit, not its pauses | Amended by ADR-063 |
 | [063](063-the-collectors-criterion-leaves-out-ordinary-commits-that-ran-out-of-409-retries.md) | The collector's criterion leaves out ordinary commits that ran out of 409 retries | Accepted |
+| [064](064-measurements-keep-their-raw-records-on-the-linux-test-server-each-file-names-their-checksums-and-every-number-it-uses.md) | Measurements keep their raw records on the Linux test server; each file names their checksums and every number it uses | Proposed |
+| [065](065-the-stress-test-runs-with-k6-only-when-kade-starts-it-tier-a-on-the-gate-tier-d-measures-one-polaris-on-a-linux-test-server.md) | The stress test runs with k6 only when Kade starts it: Tier A on the gate, Tier D measures one Polaris on a Linux test server | Proposed |
 
 ## Not ADRs
 
