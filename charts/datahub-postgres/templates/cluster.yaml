@@ -1,0 +1,36 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  # install/release.py waits for this name (DATAHUB_PG).
+  name: datahub-pg
+  labels:
+    app.kubernetes.io/name: datahub-postgres
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+    helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
+spec:
+  instances: {{ .Values.instances }}
+  imageName: {{ .Values.image | quote }}
+  affinity:
+    enablePodAntiAffinity: true
+    podAntiAffinityType: {{ .Values.podAntiAffinityType }}
+    topologyKey: kubernetes.io/hostname
+  smartShutdownTimeout: {{ .Values.smartShutdownTimeout }}
+  # No `postgresql.synchronous`: CNPG's asynchronous replication (ADR-066 §2).
+  bootstrap:
+    initdb:
+      database: {{ .Values.database }}
+      owner: {{ .Values.owner }}
+      secret:
+        name: {{ .Values.credentialsSecret }}
+  # WAL archived continuously through the Barman Cloud Plugin to objectstore.yaml (ADR-043).
+  plugins:
+    - name: barman-cloud.cloudnative-pg.io
+      isWALArchiver: true
+      parameters:
+        barmanObjectName: datahub-backup
+  storage:
+    size: {{ .Values.storage.size }}
+    {{- with .Values.storage.storageClass }}
+    storageClass: {{ . }}
+    {{- end }}

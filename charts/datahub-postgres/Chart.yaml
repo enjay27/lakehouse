@@ -1,0 +1,11 @@
+# The PostgreSQL of Datahub (ADR-066, ADR-025, ADR-010): one CloudNativePG `Cluster`, installed by
+# install/release.py in Datahub's part of step 1 (ADR-045), with its backups: an `ObjectStore` and
+# a daily `ScheduledBackup` through the Barman Cloud Plugin (ADR-043). Copied from
+# charts/polaris-postgres and kept apart from it (ADR-066 §1). The CNPG operator and the plugin
+# are preconditions, never part of this chart.
+apiVersion: v2
+name: datahub-postgres
+description: PostgreSQL for Datahub, one CloudNativePG Cluster and its backups
+type: application
+version: 0.1.0
+appVersion: "16.15"

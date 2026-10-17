@@ -1,0 +1,18 @@
+# A base backup of datahub-pg every day through the Barman Cloud Plugin (ADR-043, ADR-066 §3).
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: datahub-pg-daily
+  labels:
+    app.kubernetes.io/name: datahub-postgres
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+    helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  cluster:
+    name: datahub-pg
+  method: plugin
+  pluginConfiguration:
+    name: barman-cloud.cloudnative-pg.io
+  backupOwnerReference: self

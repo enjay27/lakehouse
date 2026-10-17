@@ -94,6 +94,13 @@ POLARIS_DB_SECRET = "polaris-db"
 # polaris-pg's backups (ADR-043): the chart's ObjectStore and the Secret with their key.
 POLARIS_BACKUP_STORE = "polaris-backup"
 POLARIS_BACKUP_SECRET = "polaris-backup-s3"
+# Datahub's PostgreSQL and its backups (ADR-066): its own chart, Secrets and ObjectStore.
+DATAHUB_PG = "datahub-pg"
+DATAHUB_PG_RELEASE = "datahub-postgres"
+DATAHUB_PG_CHART = os.path.join(ROOT, "charts", DATAHUB_PG_RELEASE)
+DATAHUB_DB_SECRET = "datahub-db"
+DATAHUB_BACKUP_STORE = "datahub-backup"
+DATAHUB_BACKUP_SECRET = "datahub-backup-s3"
 # Step 1 reads the Secrets it needs for their key names only, one line per Secret, never a value.
 SECRET_KEYS_TEMPLATE = ('go-template={{range .items}}{{.metadata.name}}:'
                         '{{range $key, $value := .data}} {{$key}}{{end}}{{println}}{{end}}')
@@ -333,6 +340,12 @@ def postgres_values(env):
     """charts/polaris-postgres's values from `.env`: where the backups go (ADR-043)."""
     return {"backup": {"endpointURL": env["S3_ENDPOINT"],
                        "bucket": env["POLARIS_BACKUP_BUCKET"]}}
+
+
+def datahub_postgres_values(env):
+    """charts/datahub-postgres's values from `.env`: where Datahub's backups go (ADR-066 §3)."""
+    return {"backup": {"endpointURL": env["S3_ENDPOINT"],
+                       "bucket": env["DATAHUB_BACKUP_BUCKET"]}}
 
 
 def polaris_postgres(env, run, dry_run=False):

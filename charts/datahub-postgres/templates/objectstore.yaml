@@ -1,0 +1,27 @@
+# Where datahub-pg's WAL and base backups go (ADR-043 §1, ADR-066 §3): Datahub's own backup
+# bucket on the S3 endpoint from .env, with Datahub's own key, signed for S3_REGION. The Barman
+# Cloud Plugin, in the operator's namespace, reads it.
+apiVersion: barmancloud.cnpg.io/v1
+kind: ObjectStore
+metadata:
+  name: datahub-backup
+  labels:
+    app.kubernetes.io/name: datahub-postgres
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+    helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
+spec:
+  retentionPolicy: {{ .Values.backup.retention | quote }}
+  configuration:
+    destinationPath: {{ printf "s3://%s/" .Values.backup.bucket | quote }}
+    endpointURL: {{ .Values.backup.endpointURL | quote }}
+    s3Credentials:
+      accessKeyId:
+        name: {{ .Values.backup.credentialsSecret }}
+        key: accessKeyId
+      secretAccessKey:
+        name: {{ .Values.backup.credentialsSecret }}
+        key: secretAccessKey
+      region:
+        name: {{ .Values.backup.credentialsSecret }}
+        key: region

@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["instances", "image", "podAntiAffinityType", "smartShutdownTimeout",
+               "storage", "database", "owner", "credentialsSecret", "backup"],
+  "properties": {
+    "instances": {"type": "integer", "minimum": 1},
+    "image": {"type": "string", "pattern": "^[^@\\s]+:[^@\\s]+@sha256:[0-9a-f]{64}$"},
+    "podAntiAffinityType": {"enum": ["required", "preferred"]},
+    "smartShutdownTimeout": {"type": "integer", "minimum": 0},
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["size"],
+      "properties": {
+        "size": {"type": "string", "minLength": 1},
+        "storageClass": {"type": "string"}
+      }
+    },
+    "database": {"type": "string", "minLength": 1},
+    "owner": {"type": "string", "minLength": 1},
+    "credentialsSecret": {"type": "string", "minLength": 1},
+    "backup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["endpointURL", "bucket", "credentialsSecret", "retention", "schedule"],
+      "properties": {
+        "endpointURL": {"type": "string", "pattern": "^https?://[^\\s/]+(/\\S*)?$"},
+        "bucket": {"type": "string", "pattern": "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"},
+        "credentialsSecret": {"type": "string", "minLength": 1},
+        "retention": {"type": "string", "pattern": "^[1-9][0-9]*[dwm]$"},
+        "schedule": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}
