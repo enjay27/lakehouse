@@ -6,9 +6,9 @@
    `NS_CNPG_SYSTEM`: its Service, labelled as CNPG finds plugins, has a ready pod (ADR-043).
    On the target clusters the operator and the plugin are the operator team's; on the gate,
    gates/gate.py installs them first.
-1. Polaris, in `NS_CATALOG_POLARIS`. Its Secrets come first (scripts/init_env.py
-   --apply-secrets, ADR-006). Datahub adds its steps in P3. The gates run this same script
-   (ADR-038).
+1. Polaris, in `NS_CATALOG_POLARIS`, then Datahub, in `NS_CATALOG_DATAHUB` (ADR-045). Their
+   Secrets come first (scripts/init_env.py --apply-secrets, ADR-006). The gates run this same
+   script (ADR-038).
    a. Its PostgreSQL: the `Cluster` polaris-pg from charts/polaris-postgres (ADR-008,
       ADR-010), installed with helm and waited on until Ready, then until it reads healthy
       several times in a row, since a change can restart its instances; once, when the
@@ -26,6 +26,12 @@
       from `.env` (the database host, the policy endpoint, and the console's origin, allowed
       by CORS only while the console is enabled), waited on until rolled out. Its pods write
       their log files to the claim.
+   f. Datahub's network policies (ADR-048 §4, ADR-066 §4): charts/datahub-network-policies,
+      default deny in its namespace, datahub-pg open to its clients and the operator.
+   g. Datahub's PostgreSQL: the `Cluster` datahub-pg from charts/datahub-postgres (ADR-066),
+      asynchronous, waited on as polaris-pg is. Its backups go to `DATAHUB_BACKUP_BUCKET` on
+      `S3_ENDPOINT` with the key in `datahub-backup-s3`. Kafka, OpenSearch and Datahub itself
+      follow here when their charts enter (ADR-025).
 2. After every service of step 1 (ADR-029, ADR-037):
    a. The log batch (ADR-036): charts/polaris-log-batch with the image built from this
       checkout (batch_image), pulled from `IMAGE_REGISTRY` or, when it is empty, the GitHub
@@ -356,11 +362,43 @@ Postgres = namedtuple("Postgres", "service namespace_var bucket_var cluster rele
 POLARIS_POSTGRES = Postgres("Polaris", "NS_CATALOG_POLARIS", "POLARIS_BACKUP_BUCKET", POLARIS_PG,
                             POLARIS_PG_RELEASE, POLARIS_PG_CHART, POLARIS_DB_SECRET,
                             POLARIS_BACKUP_SECRET, postgres_values, "ADR-043", "ADR-060")
+DATAHUB_POSTGRES = Postgres("Datahub", "NS_CATALOG_DATAHUB", "DATAHUB_BACKUP_BUCKET", DATAHUB_PG,
+                            DATAHUB_PG_RELEASE, DATAHUB_PG_CHART, DATAHUB_DB_SECRET,
+                            DATAHUB_BACKUP_SECRET, datahub_postgres_values, "ADR-066", "ADR-066")
 
 
 def polaris_postgres(env, run, dry_run=False):
     """Step 1, Polaris's PostgreSQL (ADR-043, ADR-060)."""
     return postgres(env, run, POLARIS_POSTGRES, dry_run)
+
+
+def datahub_postgres(env, run, dry_run=False):
+    """Step 1, Datahub's PostgreSQL, after its network policies (ADR-066 §4)."""
+    return postgres(env, run, DATAHUB_POSTGRES, dry_run)
+
+
+def datahub_network_policies(env, run, dry_run=False):
+    """Step 1, Datahub's part, first: its network policies (ADR-048 §4, ADR-066 §4), in
+    NS_CATALOG_DATAHUB, admitting the operator's namespace to datahub-pg. Returns (problems,
+    notes)."""
+    problems = [f"{var} is empty: Datahub's network policies need it in .env (ADR-066)"
+                for var in ("NS_CATALOG_DATAHUB", "NS_CNPG_SYSTEM") if not env.get(var)]
+    if problems:
+        return problems, []
+    namespace, context = env["NS_CATALOG_DATAHUB"], env["KUBE_CONTEXT"]
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+        json.dump({"namespaces": {"operator": env["NS_CNPG_SYSTEM"]}}, f)
+    try:
+        helm = ["helm", "--kube-context", context, "-n", namespace, "upgrade", "--install",
+                DATAHUB_NETPOL_RELEASE, DATAHUB_NETPOL_CHART, "-f", f.name]
+        code, out = run(helm + (["--dry-run=server"] if dry_run else []))
+    finally:
+        os.unlink(f.name)
+    if code != 0:
+        return [f"helm upgrade {DATAHUB_NETPOL_RELEASE} in {namespace} failed: "
+                f"{out.strip()}"], []
+    done = "server-side dry-run passed" if dry_run else "installed"
+    return [], [f"Step 1: Datahub's network policies in {namespace}, {done} (ADR-048, ADR-066)."]
 
 
 def postgres(env, run, pg, dry_run=False):
@@ -735,6 +773,8 @@ def install(env, run, supported, dry_run):
                  lambda: bootstrap(env, run, dry_run=dry_run),
                  lambda: logs_claim(env, run, dry_run),
                  lambda: polaris(env, run, dry_run),
+                 lambda: datahub_network_policies(env, run, dry_run),
+                 lambda: datahub_postgres(env, run, dry_run),
                  lambda: log_batch(env, run, dry_run)):
         problems, more = step()
         notes += more
