@@ -1,6 +1,6 @@
 # ADR-062: ZGC is retried at a 50% heap share before G1: its first run was killed by its memory limit, not its pauses
 
-- **Status:** Accepted
+- **Status:** Amended by ADR-063
 - **Date:** 2026-10-17
 - **Related:** ADR-053, ADR-054, ADR-061
 

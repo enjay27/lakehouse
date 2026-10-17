@@ -1,6 +1,6 @@
 # ADR-063: The collector's criterion leaves out ordinary commits that ran out of 409 retries
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-17
 - **Related:** ADR-054, ADR-061, ADR-062
 
