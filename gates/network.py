@@ -7,8 +7,9 @@
 - **check-network (§6, ADR-046 §4):** one namespace per caller class, labelled as the gate's
   `.env` says (GATE_CALLER_LABELS), one without any label, and Datahub's namespace, empty. From a
   short-lived pod in each, and from an unlabelled pod in Polaris's namespace, PROBE tries a TCP
-  connection to each target of CASES. Two more pods carry CNPG's join label (POD_LABELS), one in
-  Polaris's namespace and one in the unlabelled one (ADR-048 §6). An allowed case must connect; a refused one must time
+  connection to each target of CASES. Three more pods carry CNPG's join label (POD_LABELS), in
+  Polaris's namespace, the unlabelled one and Datahub's (ADR-048 §6), and one in Datahub's
+  namespace datahub-pg's client label (ADR-066 §4). An allowed case must connect; a refused one must time
   out or be reset. A refused case that connects means the cluster does not enforce
   NetworkPolicy: ADR-048 says to stop there. polaris-pg's own Services expose 5432 only, so
   the gate adds one, METRICS_SERVICE, for the instances' exporter on 9187.
@@ -35,17 +36,19 @@ INSTANCES = {"cnpg.io/podRole": "instance"}
 # The label CNPG puts on the Job pod that clones the primary to make a replica (ADR-048 §3).
 JOIN = {"cnpg.io/jobRole": "join"}
 # The sources whose probe pod carries labels: CNPG's join label, never the check label.
-POD_LABELS = {"polaris-join": JOIN, "none-join": JOIN}
+POD_LABELS = {"polaris-join": JOIN, "none-join": JOIN, "datahub-join": JOIN,
+              "datahub-client": {release.DATAHUB_PG_CLIENT_LABEL: "true"}}
 # The gate's Service for CNPG's exporter on polaris-pg's instances (ADR-046 §4).
 METRICS_SERVICE = "gate-polaris-pg-metrics"
 PG_METRICS_PORT = 9187
 NAME = "kubernetes.io/metadata.name"
 
 Case = collections.namedtuple("Case", "source target allowed")
-# One allowed and one refused connection per rule of ADR-048 §3, by source: a caller class,
-# `none` (a namespace with no label), `datahub` (NS_CATALOG_DATAHUB), `polaris` (a pod in
-# NS_CATALOG_POLARIS without the check label), or `polaris-join` and `none-join` (a pod with
-# CNPG's join label in those two namespaces).
+# One allowed and one refused connection per rule of ADR-048 §3 and ADR-066 §4, by source: a
+# caller class, `none` (a namespace with no label), `datahub` (NS_CATALOG_DATAHUB), `polaris` (a
+# pod in NS_CATALOG_POLARIS without the check label), `polaris-join`, `none-join` and
+# `datahub-join` (a pod with CNPG's join label in those namespaces), or `datahub-client` (a pod
+# in NS_CATALOG_DATAHUB with datahub-pg's client label).
 CASES = [
     Case("gateway", "polaris-api", True),
     Case("gateway", "polaris-management", False),
@@ -76,6 +79,12 @@ CASES = [
     Case("polaris", "opa", False),
     Case("polaris-join", "polaris-pg", True),
     Case("none-join", "polaris-pg", False),
+    Case("datahub-client", "datahub-pg", True),
+    Case("datahub-join", "datahub-pg", True),
+    Case("datahub", "datahub-pg", False),
+    Case(UNLABELLED, "datahub-pg", False),
+    Case("none-join", "datahub-pg", False),
+    Case("polaris", "datahub-pg", False),
 ]
 
 # Connects to each `host:port` argument at once and prints `host:port RESULT` for each:
@@ -110,7 +119,7 @@ def _svc(name, namespace, port):
 
 def targets(env):
     """Each target of CASES, as host:port through its Service."""
-    pol, si = env["NS_CATALOG_POLARIS"], env["NS_STANDINS"]
+    pol, si, dh = env["NS_CATALOG_POLARIS"], env["NS_STANDINS"], env["NS_CATALOG_DATAHUB"]
     return {
         "polaris-api": _svc(release.POLARIS, pol, 8181),
         "polaris-management": _svc(f"{release.POLARIS}-mgmt", pol, 8182),
@@ -120,6 +129,7 @@ def targets(env):
         "recorder": _svc("recorder", si, standins.S3_PORT),
         "seaweedfs": _svc("seaweedfs", si, standins.S3_PORT),
         "opa": _svc("opa", si, standins.OPA_PORT),
+        "datahub-pg": _svc(f"{release.DATAHUB_PG}-rw", dh, standins.PG_PORT),
     }
 
 
@@ -136,6 +146,8 @@ def source_namespaces(env):
     sources["polaris"] = (env["NS_CATALOG_POLARIS"], None)
     sources["polaris-join"] = (env["NS_CATALOG_POLARIS"], None)
     sources["none-join"] = (SOURCE_PREFIX + UNLABELLED, None)
+    sources["datahub-client"] = (env["NS_CATALOG_DATAHUB"], None)
+    sources["datahub-join"] = (env["NS_CATALOG_DATAHUB"], None)
     return sources
 
 

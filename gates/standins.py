@@ -187,6 +187,7 @@ def manifests(env, pins, policy_text, recorder_code, tls, prometheus_config, dir
     svc = f"{ns}.svc.cluster.local"
     bucket = env["POLARIS_WAREHOUSE_BUCKET"]
     backup_bucket = env["POLARIS_BACKUP_BUCKET"]
+    datahub_backup_bucket = env["DATAHUB_BACKUP_BUCKET"]
     images = pins["standin_images"]
     s3_config = {"identities": [
         {"name": "polaris",
@@ -201,6 +202,11 @@ def manifests(env, pins, policy_text, recorder_code, tls, prometheus_config, dir
          "credentials": [{"accessKey": env["POLARIS_BACKUP_S3_ACCESS_KEY_ID"],
                           "secretKey": env["POLARIS_BACKUP_S3_SECRET_ACCESS_KEY"]}],
          "actions": [f"{action}:{backup_bucket}" for action in ("Read", "Write", "List")]},
+        {"name": "datahub-backup",
+         "credentials": [{"accessKey": env["DATAHUB_BACKUP_S3_ACCESS_KEY_ID"],
+                          "secretKey": env["DATAHUB_BACKUP_S3_SECRET_ACCESS_KEY"]}],
+         "actions": [f"{action}:{datahub_backup_bucket}"
+                     for action in ("Read", "Write", "List")]},
     ]}
     seaweedfs = {
         "image": images["seaweedfs"]["image"],
