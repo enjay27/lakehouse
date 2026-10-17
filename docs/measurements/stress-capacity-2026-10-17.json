@@ -1,0 +1,1543 @@
+{
+ "commit": "19181999d3470e95275fc20e85ee80d703ccf97d",
+ "config": {
+  "_comment": "Tuning values for the stress scenario (ADR-053; ADR-000 rule 11). Every number is a placeholder until calibration, a run recorded in docs/measurements/, gives evidence for it; each change names its evidence in the PR that makes it. Read by gates/stress/driver.py, seed.py and scenario.js.",
+  "commit_retries": 4,
+  "etag_ttl_s": 300,
+  "hold": {
+   "_comment": "After the ramps, the mixed profile at fraction of its knee (ADR-053 \u00a75, ADR-054 \u00a71), Polaris's heap, GC and worker queue sampled every sample_seconds while it runs (ADR-053 \u00a77).",
+   "fraction": 0.8,
+   "profile": "mixed",
+   "sample_seconds": 60,
+   "seconds": 7200
+  },
+  "hot": {
+   "_comment": "The first tables are the hot set: commits from the arrival rate never go there; writers_per_table writers per table commit in a loop with pause_ms between commits, so commits collide and the 409 path runs. They run whenever a profile commits. pause_ms was 2000 until Tier D's attempt 5 on 2026-10-16 (#174): the hot set then sent about 19 commits/s whatever the profile's rate, and one Polaris replica's mixed profile failed its first step at 25 req/s.",
+   "pause_ms": 10000,
+   "tables": 10,
+   "writers_per_table": 4
+  },
+  "k6": {
+   "_comment": "The k6 pod's CPU limit (ADR-053 \u00a72), the VUs the arrival rate may use and each request's timeout.",
+   "cpu": "2",
+   "max_vus": 2000,
+   "pre_vus": 200,
+   "timeout": "10s"
+  },
+  "pass": {
+   "_comment": "A step passes when k6 dropped at most 5% of the requests offered, at most 0.1% failed (409s on the hot set not counted) and each kind's p99 is within its cap (ADR-053 \u00a74).",
+   "answered_min": 0.95,
+   "error_max": 0.001,
+   "p99_ms": {
+    "commit": 5000,
+    "conditional_load": 500,
+    "config": 500,
+    "full_load": 3000,
+    "head_table": 500,
+    "list_namespaces": 500,
+    "list_tables": 500,
+    "token": 1000
+   }
+  },
+  "profiles": {
+   "_comment": "Each profile's request mix (shares sum to 1) and its step ramp: start, start + step, ... for max_steps steps of step_seconds each. The mixed profile's shares are ADR-053's assumption until the target's metrics give the real ones (#142).",
+   "commits": {
+    "max_steps": 30,
+    "shares": {
+     "commit": 1.0
+    },
+    "start": 5,
+    "step": 5
+   },
+   "mixed": {
+    "max_steps": 30,
+    "shares": {
+     "commit": 0.05,
+     "conditional_load": 0.85,
+     "config": 0.02,
+     "head_table": 0.02,
+     "list_namespaces": 0.02,
+     "list_tables": 0.02,
+     "token": 0.02
+    },
+    "start": 25,
+    "step": 25
+   },
+   "queries-conditional": {
+    "max_steps": 30,
+    "shares": {
+     "conditional_load": 0.9,
+     "config": 0.02,
+     "head_table": 0.02,
+     "list_namespaces": 0.02,
+     "list_tables": 0.02,
+     "token": 0.02
+    },
+    "start": 25,
+    "step": 25
+   },
+   "queries-full": {
+    "max_steps": 30,
+    "shares": {
+     "config": 0.02,
+     "full_load": 0.9,
+     "head_table": 0.02,
+     "list_namespaces": 0.02,
+     "list_tables": 0.02,
+     "token": 0.02
+    },
+    "start": 25,
+    "step": 25
+   }
+  },
+  "seed": {
+   "_comment": "100 tables in 10 namespaces, each grown to a load of about 1 MB by batches of add-snapshot updates (ADR-053 \u00a73). Each table keeps only its last previous_versions_max metadata files, so the runner's disk stays bounded: a deviation from the target's defaults.",
+   "batch": 500,
+   "max_batches": 20,
+   "metadata_bytes": 1000000,
+   "namespaces": 10,
+   "previous_versions_max": 5,
+   "tables_per_namespace": 10
+  },
+  "settle": {
+   "_comment": "Before each ramp and the hold, Polaris's pods must be Ready with no restart for seconds, within timeout_seconds: a ramp's last step can overload Polaris until its liveness probe restarts it, and the next ramp would measure the restart (#174, #179).",
+   "seconds": 60,
+   "timeout_seconds": 900
+  },
+  "standin_cpu": {
+   "_comment": "The CPU limit of each stand-in Polaris reaches directly on a stress install (ADR-053 \u00a74): a knee reached while one of them is throttled is that stand-in's, not Polaris's.",
+   "opa": "2",
+   "seaweedfs": "2"
+  },
+  "step_seconds": 120,
+  "throttle_max": 0.05,
+  "token_refresh_s": 1800
+ },
+ "hold": {
+  "answered": 0.9999953703703703,
+  "collector_cpu_seconds": 415.85,
+  "commits": {
+   "commit": {
+    "conflict": 0,
+    "failed": 0,
+    "ok": 21659,
+    "unknown": 0
+   },
+   "commit_hot": {
+    "conflict": 0,
+    "failed": 0,
+    "ok": 28600,
+    "unknown": 0
+   }
+  },
+  "cpu_seconds": {
+   "k6": 1397.78,
+   "opa": 311.0,
+   "polaris": 6449.51,
+   "polaris-pg": 601.43,
+   "seaweedfs": 1756.82
+  },
+  "cpu_seconds_by_pod": {
+   "polaris-pg-1": 455.11,
+   "polaris-pg-2": 73.17,
+   "polaris-pg-3": 73.15
+  },
+  "dropped": 2,
+  "ended": "2026-10-17T13:01:29Z",
+  "error_rate": 0.0,
+  "errors": 0,
+  "latency_ms": {
+   "commit": {
+    "count": 43372,
+    "max": 4502.942461,
+    "p50": 38.88999,
+    "p95": 44.4066249,
+    "p99": 47.7156068
+   },
+   "commit_hot": {
+    "count": 57390,
+    "max": 4078.211894,
+    "p50": 42.228331999999995,
+    "p95": 61.640804749999994,
+    "p99": 67.15409257
+   },
+   "conditional_load": {
+    "count": 366940,
+    "max": 4589.920095,
+    "p50": 10.518177999999999,
+    "p95": 15.281505049999998,
+    "p99": 18.64019097999999
+   },
+   "config": {
+    "count": 8702,
+    "max": 1289.639939,
+    "p50": 1.6384850000000002,
+    "p95": 2.42444835,
+    "p99": 2.84356951
+   },
+   "head_table": {
+    "count": 8641,
+    "max": 3848.561076,
+    "p50": 7.713895,
+    "p95": 11.594472,
+    "p99": 13.645749600000007
+   },
+   "list_namespaces": {
+    "count": 8663,
+    "max": 1257.344372,
+    "p50": 2.348102,
+    "p95": 3.2815976,
+    "p99": 3.82100554
+   },
+   "list_tables": {
+    "count": 8757,
+    "max": 1048.791116,
+    "p50": 2.386476,
+    "p95": 3.324110599999999,
+    "p99": 3.8521845200000002
+   },
+   "token": {
+    "count": 8637,
+    "max": 1306.397773,
+    "p50": 1.248071,
+    "p95": 1.8270292,
+    "p99": 2.0880722799999996
+   }
+  },
+  "name": "hold",
+  "p99_ms": {
+   "commit": 47.7156068,
+   "commit_hot": 67.15409257,
+   "conditional_load": 18.64019097999999,
+   "config": 2.84356951,
+   "head_table": 13.645749600000007,
+   "list_namespaces": 3.82100554,
+   "list_tables": 3.8521845200000002,
+   "token": 2.0880722799999996
+  },
+  "passed": true,
+  "primary": "polaris-pg-1",
+  "rate": 60,
+  "reasons": [],
+  "requests": 511102,
+  "restarts": [],
+  "seconds": 7200,
+  "server": {
+   "GET /api/catalog/v1/config 200": {
+    "count": 8702,
+    "mean_ms": 4.6
+   },
+   "GET /api/catalog/v1/{prefix}/namespaces 200": {
+    "count": 8663,
+    "mean_ms": 5.5
+   },
+   "GET /api/catalog/v1/{prefix}/namespaces/{namespace}/tables 200": {
+    "count": 8757,
+    "mean_ms": 4.8
+   },
+   "GET /api/catalog/v1/{prefix}/namespaces/{namespace}/tables/{table} 200": {
+    "count": 395016,
+    "mean_ms": 14.0
+   },
+   "GET /api/catalog/v1/{prefix}/namespaces/{namespace}/tables/{table} 304": {
+    "count": 22305,
+    "mean_ms": 3.9
+   },
+   "HEAD /api/catalog/v1/{prefix}/namespaces/{namespace}/tables/{table} 204": {
+    "count": 8641,
+    "mean_ms": 10.6
+   },
+   "POST /api/catalog/v1/oauth/tokens 200": {
+    "count": 9365,
+    "mean_ms": 2.8
+   },
+   "POST /api/catalog/v1/{prefix}/namespaces/{namespace}/tables/{table} 200": {
+    "count": 50259,
+    "mean_ms": 49.3
+   },
+   "POST /api/catalog/v1/{prefix}/namespaces/{namespace}/tables/{table} 409": {
+    "count": 122,
+    "mean_ms": 299.7
+   },
+   "POST /api/management/v1/principals/{principalName}/rotate 200": {
+    "count": 1,
+    "mean_ms": 19.6
+   }
+  },
+  "server_errors": 0,
+  "started": "2026-10-17T11:01:23Z",
+  "throttle": {
+   "k6": 0.0,
+   "opa": 0.0,
+   "seaweedfs": 0.0
+  },
+  "throttled": []
+ },
+ "hold_series": {
+  "failed_samples": 0,
+  "gc": {
+   "longest": 0.001,
+   "pauses": 5799.0,
+   "seconds": 0.044
+  },
+  "heap_after_gc": {
+   "first": 213909504.0,
+   "last": 247463936.0,
+   "max": 559939584.0
+  },
+  "heap_max": 4294967296.0,
+  "heap_used_max": 4028628992.0,
+  "memory": {
+   "k6": {
+    "first": 353218560.0,
+    "last": 602984448.0,
+    "max": 605675520.0
+   },
+   "opa": {
+    "first": 16384000.0,
+    "last": 16531456.0,
+    "max": 16646144.0
+   },
+   "polaris": {
+    "first": 6346764288.0,
+    "last": 6357553152.0,
+    "max": 6370000896.0
+   },
+   "polaris-pg": {
+    "first": 284041216.0,
+    "last": 302645248.0,
+    "max": 302645248.0
+   },
+   "seaweedfs": {
+    "first": 1176748032.0,
+    "last": 1458712576.0,
+    "max": 1458712576.0
+   }
+  },
+  "samples": 120,
+  "worker_queue_max": 1.0,
+  "worker_rejected": 0.0
+ },
+ "k6": "grafana/k6:2.3.0@sha256:9c2dee7f8ed74d317e4027c06a10f169b625638189de8d4555d0b3486a5aeb34",
+ "overlay": "gates/stress/capacity.json",
+ "polaris": "1.6.0",
+ "polaris_size": {
+  "heap_max_bytes": 4294967296.0,
+  "replicas": 1,
+  "resources": {
+   "limits": {
+    "cpu": "4",
+    "memory": "8Gi"
+   },
+   "requests": {
+    "cpu": "4",
+    "memory": "8Gi"
+   }
+  }
+ },
+ "profiles": {
+  "commits": {
+   "cpu_per_request": {
+    "polaris": 0.0174082,
+    "polaris collector": 0.0015011,
+    "polaris without collector": 0.015907,
+    "polaris-pg": 0.0018222,
+    "polaris-pg primary": 0.0013191
+   },
+   "knee": 45,
+   "limited_by": [],
+   "reached": true,
+   "steps": [
+    {
+     "answered": 1.0,
+     "cpu_per_request": {
+      "polaris": 0.0219305,
+      "polaris collector": 0.0015523,
+      "polaris without collector": 0.0203782,
+      "polaris-pg": 0.0033861,
+      "polaris-pg primary": 0.0021196
+     },
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "commit": 143.1913231200003,
+      "commit_hot": 488.25016437999966
+     },
+     "passed": true,
+     "rate": 5,
+     "reasons": [],
+     "requests": 2274,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "cpu_per_request": {
+      "polaris": 0.0202945,
+      "polaris collector": 0.0012385,
+      "polaris without collector": 0.019056,
+      "polaris-pg": 0.0027338,
+      "polaris-pg primary": 0.0017927
+     },
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "commit": 49.553955829999595,
+      "commit_hot": 494.1712187899995
+     },
+     "passed": true,
+     "rate": 10,
+     "reasons": [],
+     "requests": 3464,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0009
+     }
+    },
+    {
+     "answered": 1.0,
+     "cpu_per_request": {
+      "polaris": 0.0164258,
+      "polaris collector": 0.0011921,
+      "polaris without collector": 0.0152337,
+      "polaris-pg": 0.0023521,
+      "polaris-pg primary": 0.0015909
+     },
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "commit": 46.954360649999956,
+      "commit_hot": 405.73081035000007
+     },
+     "passed": true,
+     "rate": 15,
+     "reasons": [],
+     "requests": 4664,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0008
+     }
+    },
+    {
+     "answered": 1.0,
+     "cpu_per_request": {
+      "polaris": 0.0163763,
+      "polaris collector": 0.0013593,
+      "polaris without collector": 0.015017,
+      "polaris-pg": 0.0023443,
+      "polaris-pg primary": 0.0017013
+     },
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "commit": 99.928698850001,
+      "commit_hot": 603.9850372599998
+     },
+     "passed": true,
+     "rate": 20,
+     "reasons": [],
+     "requests": 5878,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "cpu_per_request": {
+      "polaris": 0.0146426,
+      "polaris collector": 0.0011962,
+      "polaris without collector": 0.0134464,
+      "polaris-pg": 0.0020771,
+      "polaris-pg primary": 0.0014199
+     },
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "commit": 124.59338508000096,
+      "commit_hot": 571.7726749500001
+     },
+     "passed": true,
+     "rate": 25,
+     "reasons": [],
+     "requests": 7106,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "cpu_per_request": {
+      "polaris": 0.016559,
+      "polaris collector": 0.0013313,
+      "polaris without collector": 0.0152277,
+      "polaris-pg": 0.0019654,
+      "polaris-pg primary": 0.0014017
+     },
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "commit": 180.69653056999977,
+      "commit_hot": 590.7504532099996
+     },
+     "passed": true,
+     "rate": 30,
+     "reasons": [],
+     "requests": 8390,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "cpu_per_request": {
+      "polaris": 0.0167769,
+      "polaris collector": 0.0012859,
+      "polaris without collector": 0.0154911,
+      "polaris-pg": 0.0018664,
+      "polaris-pg primary": 0.0013348
+     },
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "commit": 188.5362761499998,
+      "commit_hot": 691.98825475
+     },
+     "passed": true,
+     "rate": 35,
+     "reasons": [],
+     "requests": 9612,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "cpu_per_request": {
+      "polaris": 0.0162794,
+      "polaris collector": 0.0014274,
+      "polaris without collector": 0.014852,
+      "polaris-pg": 0.0019164,
+      "polaris-pg primary": 0.0013842
+     },
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "commit": 468.394362799999,
+      "commit_hot": 872.729231
+     },
+     "passed": true,
+     "rate": 40,
+     "reasons": [],
+     "requests": 10880,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "cpu_per_request": {
+      "polaris": 0.0174082,
+      "polaris collector": 0.0015011,
+      "polaris without collector": 0.015907,
+      "polaris-pg": 0.0018222,
+      "polaris-pg primary": 0.0013191
+     },
+     "error_rate": 0.00024382314694408323,
+     "errors": 3,
+     "p99_ms": {
+      "commit": 604.1223085700001,
+      "commit_hot": 881.4127611099996
+     },
+     "passed": true,
+     "rate": 45,
+     "reasons": [],
+     "requests": 12304,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 0.8643333333333334,
+     "cpu_per_request": {
+      "polaris": 0.021644,
+      "polaris collector": 0.006359,
+      "polaris without collector": 0.015285,
+      "polaris-pg": 0.0013707,
+      "polaris-pg primary": 0.0011145
+     },
+     "error_rate": 0.23430847411069908,
+     "errors": 3412,
+     "p99_ms": {
+      "commit": 10001.06622654,
+      "commit_hot": 10000.96132837
+     },
+     "passed": false,
+     "rate": 50,
+     "reasons": [
+      "answered 86.4% < 95%",
+      "errors 23.43% > 0.1%",
+      "commit p99 10001.1 ms > 5000 ms"
+     ],
+     "requests": 14562,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0009,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    }
+   ],
+   "valid": true
+  },
+  "mixed": {
+   "cpu_per_request": {
+    "polaris": 0.0116539,
+    "polaris collector": 0.0008738,
+    "polaris without collector": 0.0107801,
+    "polaris-pg": 0.001027,
+    "polaris-pg primary": 0.0007773
+   },
+   "knee": 75,
+   "limited_by": [],
+   "reached": true,
+   "steps": [
+    {
+     "answered": 1.0,
+     "cpu_per_request": {
+      "polaris": 0.0145649,
+      "polaris collector": 0.0011359,
+      "polaris without collector": 0.013429,
+      "polaris-pg": 0.0016931,
+      "polaris-pg primary": 0.0011382
+     },
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "commit": 101.14575656999999,
+      "commit_hot": 466.4154320399999,
+      "conditional_load": 43.06966359999982,
+      "config": 3.48661745,
+      "head_table": 32.73987780999999,
+      "list_namespaces": 13.50458806000007,
+      "list_tables": 4.400841669999999,
+      "token": 2.4611808
+     },
+     "passed": true,
+     "rate": 25,
+     "reasons": [],
+     "requests": 4217,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "cpu_per_request": {
+      "polaris": 0.0129597,
+      "polaris collector": 0.0008339,
+      "polaris without collector": 0.0121258,
+      "polaris-pg": 0.0014026,
+      "polaris-pg primary": 0.0010649
+     },
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "commit": 89.99098624999999,
+      "commit_hot": 628.61159375,
+      "conditional_load": 50.620120119998894,
+      "config": 3.122371880000003,
+      "head_table": 51.31502819999962,
+      "list_namespaces": 4.236706600000001,
+      "list_tables": 43.29807666000018,
+      "token": 4.960740370000002
+     },
+     "passed": true,
+     "rate": 50,
+     "reasons": [],
+     "requests": 7315,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "cpu_per_request": {
+      "polaris": 0.0116539,
+      "polaris collector": 0.0008738,
+      "polaris without collector": 0.0107801,
+      "polaris-pg": 0.001027,
+      "polaris-pg primary": 0.0007773
+     },
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "commit": 102.1083170499995,
+      "commit_hot": 485.47726735,
+      "conditional_load": 72.34920624999934,
+      "config": 19.044681989999983,
+      "head_table": 11.940518750000034,
+      "list_namespaces": 4.08659852,
+      "list_tables": 5.822637439999955,
+      "token": 4.52551138999975
+     },
+     "passed": true,
+     "rate": 75,
+     "reasons": [],
+     "requests": 10575,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 0.9835,
+     "cpu_per_request": {
+      "polaris": 0.0125639,
+      "polaris collector": 0.001083,
+      "polaris without collector": 0.0114809,
+      "polaris-pg": 0.0010095,
+      "polaris-pg primary": 0.0008025
+     },
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "commit": 3684.905285159998,
+      "commit_hot": 4538.683616789999,
+      "conditional_load": 5659.40446588,
+      "config": 1568.494802949999,
+      "head_table": 5122.0104284,
+      "list_namespaces": 1680.2499454799995,
+      "list_tables": 2212.097879909996,
+      "token": 2415.749850439999
+     },
+     "passed": false,
+     "rate": 100,
+     "reasons": [
+      "conditional_load p99 5659.4 ms > 500 ms",
+      "config p99 1568.5 ms > 500 ms",
+      "head_table p99 5122 ms > 500 ms",
+      "list_namespaces p99 1680.2 ms > 500 ms",
+      "list_tables p99 2212.1 ms > 500 ms",
+      "token p99 2415.7 ms > 1000 ms"
+     ],
+     "requests": 13620,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    }
+   ],
+   "valid": true
+  },
+  "queries-conditional": {
+   "cpu_per_request": {
+    "polaris": 0.0066661,
+    "polaris collector": 0.000419,
+    "polaris without collector": 0.0062471,
+    "polaris-pg": 0.0005373,
+    "polaris-pg primary": 0.0004737
+   },
+   "knee": 250,
+   "limited_by": [],
+   "reached": true,
+   "steps": [
+    {
+     "answered": 1.0,
+     "cpu_per_request": {
+      "polaris": 0.0128424,
+      "polaris collector": 0.0007164,
+      "polaris without collector": 0.012126,
+      "polaris-pg": 0.0018427,
+      "polaris-pg primary": 0.0012429
+     },
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "conditional_load": 15.656500090000002,
+      "config": 3.2919690800000003,
+      "head_table": 12.33338204,
+      "list_namespaces": 4.79336744,
+      "list_tables": 5.930548560000003,
+      "token": 3.178865799999998
+     },
+     "passed": true,
+     "rate": 25,
+     "reasons": [],
+     "requests": 3001,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "cpu_per_request": {
+      "polaris": 0.0103249,
+      "polaris collector": 0.0006399,
+      "polaris without collector": 0.0096851,
+      "polaris-pg": 0.0012115,
+      "polaris-pg primary": 0.0009015
+     },
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "conditional_load": 14.702985129999998,
+      "config": 3.277984979999999,
+      "head_table": 10.841946000000004,
+      "list_namespaces": 4.2339349199999985,
+      "list_tables": 4.131670020000004,
+      "token": 2.3819939199999998
+     },
+     "passed": true,
+     "rate": 50,
+     "reasons": [],
+     "requests": 6001,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "cpu_per_request": {
+      "polaris": 0.0093012,
+      "polaris collector": 0.0005788,
+      "polaris without collector": 0.0087224,
+      "polaris-pg": 0.0008921,
+      "polaris-pg primary": 0.0006844
+     },
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "conditional_load": 14.344468219999996,
+      "config": 2.5925640199999997,
+      "head_table": 10.449449959999997,
+      "list_namespaces": 3.883208399999999,
+      "list_tables": 3.896957729999998,
+      "token": 2.30879334
+     },
+     "passed": true,
+     "rate": 75,
+     "reasons": [],
+     "requests": 9001,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "cpu_per_request": {
+      "polaris": 0.0087858,
+      "polaris collector": 0.0005517,
+      "polaris without collector": 0.0082342,
+      "polaris-pg": 0.000825,
+      "polaris-pg primary": 0.00068
+     },
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "conditional_load": 13.993341080000002,
+      "config": 2.5084407599999987,
+      "head_table": 10.01928472,
+      "list_namespaces": 3.8195623999999992,
+      "list_tables": 3.5674138799999993,
+      "token": 2.5129608900000004
+     },
+     "passed": true,
+     "rate": 100,
+     "reasons": [],
+     "requests": 12000,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "cpu_per_request": {
+      "polaris": 0.0080861,
+      "polaris collector": 0.0005306,
+      "polaris without collector": 0.0075555,
+      "polaris-pg": 0.0007193,
+      "polaris-pg primary": 0.0005953
+     },
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "conditional_load": 13.289604899999999,
+      "config": 2.8689014999999998,
+      "head_table": 9.776215249999991,
+      "list_namespaces": 3.2605252200000003,
+      "list_tables": 3.0480123399999997,
+      "token": 2.0652097499999984
+     },
+     "passed": true,
+     "rate": 125,
+     "reasons": [],
+     "requests": 15001,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "cpu_per_request": {
+      "polaris": 0.0072056,
+      "polaris collector": 0.0004983,
+      "polaris without collector": 0.0067072,
+      "polaris-pg": 0.0007594,
+      "polaris-pg primary": 0.0006572
+     },
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "conditional_load": 12.84003915,
+      "config": 2.549726899999999,
+      "head_table": 9.397479959999998,
+      "list_namespaces": 3.159423199999999,
+      "list_tables": 3.3490393999999992,
+      "token": 2.4212776000000007
+     },
+     "passed": true,
+     "rate": 150,
+     "reasons": [],
+     "requests": 18000,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "cpu_per_request": {
+      "polaris": 0.0067906,
+      "polaris collector": 0.0004828,
+      "polaris without collector": 0.0063078,
+      "polaris-pg": 0.0006657,
+      "polaris-pg primary": 0.0005781
+     },
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "conditional_load": 12.62831759999999,
+      "config": 2.118241300000002,
+      "head_table": 9.321806120000003,
+      "list_namespaces": 3.341833159999999,
+      "list_tables": 3.3781296000000025,
+      "token": 1.819402550000001
+     },
+     "passed": true,
+     "rate": 175,
+     "reasons": [],
+     "requests": 21001,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "cpu_per_request": {
+      "polaris": 0.0069551,
+      "polaris collector": 0.0004612,
+      "polaris without collector": 0.0064939,
+      "polaris-pg": 0.0005933,
+      "polaris-pg primary": 0.0005133
+     },
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "conditional_load": 12.45516875,
+      "config": 1.9738916000000009,
+      "head_table": 9.024092000000001,
+      "list_namespaces": 3.42569584,
+      "list_tables": 3.52209156,
+      "token": 1.8075868399999981
+     },
+     "passed": true,
+     "rate": 200,
+     "reasons": [],
+     "requests": 24001,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "cpu_per_request": {
+      "polaris": 0.0066857,
+      "polaris collector": 0.0004233,
+      "polaris without collector": 0.0062624,
+      "polaris-pg": 0.0005974,
+      "polaris-pg primary": 0.0005326
+     },
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "conditional_load": 12.542901400000002,
+      "config": 2.112905,
+      "head_table": 9.189272289999991,
+      "list_namespaces": 3.154349199999998,
+      "list_tables": 3.2595270799999976,
+      "token": 2.01983246
+     },
+     "passed": true,
+     "rate": 225,
+     "reasons": [],
+     "requests": 27001,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "cpu_per_request": {
+      "polaris": 0.0066661,
+      "polaris collector": 0.000419,
+      "polaris without collector": 0.0062471,
+      "polaris-pg": 0.0005373,
+      "polaris-pg primary": 0.0004737
+     },
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "conditional_load": 12.681828359999999,
+      "config": 2.2165232,
+      "head_table": 9.343343159999998,
+      "list_namespaces": 3.1669868800000045,
+      "list_tables": 2.997402919999997,
+      "token": 2.306250600000002
+     },
+     "passed": true,
+     "rate": 250,
+     "reasons": [],
+     "requests": 30001,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 0.7533636363636363,
+     "cpu_per_request": {
+      "polaris": 0.0106604,
+      "polaris collector": 0.0046215,
+      "polaris without collector": 0.0060389,
+      "polaris-pg": 0.0005752,
+      "polaris-pg primary": 0.0004963
+     },
+     "error_rate": 0.7210200305687394,
+     "errors": 17926,
+     "p99_ms": {
+      "conditional_load": 10000.91679956,
+      "config": 10000.9668894,
+      "head_table": 10001.02702923,
+      "list_namespaces": 10000.61834864,
+      "list_tables": 10000.91925624,
+      "token": 8476.82487886
+     },
+     "passed": false,
+     "rate": 275,
+     "reasons": [
+      "answered 75.3% < 95%",
+      "errors 72.10% > 0.1%",
+      "conditional_load p99 10000.9 ms > 500 ms",
+      "config p99 10001 ms > 500 ms",
+      "head_table p99 10001 ms > 500 ms",
+      "list_namespaces p99 10000.6 ms > 500 ms",
+      "list_tables p99 10000.9 ms > 500 ms",
+      "token p99 8476.8 ms > 1000 ms"
+     ],
+     "requests": 24862,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    }
+   ],
+   "valid": true
+  },
+  "queries-full": {
+   "cpu_per_request": {
+    "polaris": 0.0111982,
+    "polaris collector": 0.0008042,
+    "polaris without collector": 0.0103939,
+    "polaris-pg": 0.0005418,
+    "polaris-pg primary": 0.0004836
+   },
+   "knee": 275,
+   "limited_by": [],
+   "reached": true,
+   "steps": [
+    {
+     "answered": 1.0,
+     "cpu_per_request": {
+      "polaris": 0.0132656,
+      "polaris collector": 0.0008697,
+      "polaris without collector": 0.0123959,
+      "polaris-pg": 0.0019527,
+      "polaris-pg primary": 0.0012762
+     },
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "config": 3.388068,
+      "full_load": 15.515251719999995,
+      "head_table": 11.086033,
+      "list_namespaces": 4.364671179999999,
+      "list_tables": 4.19922725,
+      "token": 2.6964805499999973
+     },
+     "passed": true,
+     "rate": 25,
+     "reasons": [],
+     "requests": 3001,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "cpu_per_request": {
+      "polaris": 0.0119847,
+      "polaris collector": 0.0007365,
+      "polaris without collector": 0.0112481,
+      "polaris-pg": 0.0011531,
+      "polaris-pg primary": 0.0008549
+     },
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "config": 2.96337941,
+      "full_load": 14.645757,
+      "head_table": 10.630202079999998,
+      "list_namespaces": 3.6946392,
+      "list_tables": 3.88407,
+      "token": 2.393289700000001
+     },
+     "passed": true,
+     "rate": 50,
+     "reasons": [],
+     "requests": 6001,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "cpu_per_request": {
+      "polaris": 0.00951,
+      "polaris collector": 0.0006856,
+      "polaris without collector": 0.0088244,
+      "polaris-pg": 0.0009156,
+      "polaris-pg primary": 0.0007056
+     },
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "config": 2.45301852,
+      "full_load": 14.093680329999998,
+      "head_table": 10.010312300000002,
+      "list_namespaces": 3.309836,
+      "list_tables": 3.46179076,
+      "token": 1.9552571600000008
+     },
+     "passed": true,
+     "rate": 75,
+     "reasons": [],
+     "requests": 9000,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "cpu_per_request": {
+      "polaris": 0.01064,
+      "polaris collector": 0.0007383,
+      "polaris without collector": 0.0099017,
+      "polaris-pg": 0.0008167,
+      "polaris-pg primary": 0.0006725
+     },
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "config": 2.4525341999999997,
+      "full_load": 13.435276300000002,
+      "head_table": 9.25526038,
+      "list_namespaces": 3.043840239999999,
+      "list_tables": 3.04356919,
+      "token": 1.9559634499999998
+     },
+     "passed": true,
+     "rate": 100,
+     "reasons": [],
+     "requests": 12000,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "cpu_per_request": {
+      "polaris": 0.0092161,
+      "polaris collector": 0.000732,
+      "polaris without collector": 0.0084841,
+      "polaris-pg": 0.0007653,
+      "polaris-pg primary": 0.0006486
+     },
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "config": 2.499894,
+      "full_load": 12.25212529,
+      "head_table": 8.28570118,
+      "list_namespaces": 3.1421574900000016,
+      "list_tables": 2.8745552700000006,
+      "token": 2.3167885999999998
+     },
+     "passed": true,
+     "rate": 125,
+     "reasons": [],
+     "requests": 15001,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "cpu_per_request": {
+      "polaris": 0.0104055,
+      "polaris collector": 0.0007222,
+      "polaris without collector": 0.0096834,
+      "polaris-pg": 0.0006772,
+      "polaris-pg primary": 0.0005716
+     },
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "config": 2.88143477,
+      "full_load": 12.006289270000003,
+      "head_table": 8.1012174,
+      "list_namespaces": 3.6207949199999985,
+      "list_tables": 3.347221710000003,
+      "token": 2.408243680000001
+     },
+     "passed": true,
+     "rate": 150,
+     "reasons": [],
+     "requests": 18001,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "cpu_per_request": {
+      "polaris": 0.0104781,
+      "polaris collector": 0.000749,
+      "polaris without collector": 0.0097291,
+      "polaris-pg": 0.0007481,
+      "polaris-pg primary": 0.0006619
+     },
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "config": 2.6288337399999993,
+      "full_load": 12.01259701,
+      "head_table": 8.257158899999997,
+      "list_namespaces": 3.6704649999999974,
+      "list_tables": 3.67730274,
+      "token": 2.0603172399999994
+     },
+     "passed": true,
+     "rate": 175,
+     "reasons": [],
+     "requests": 21001,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "cpu_per_request": {
+      "polaris": 0.0103646,
+      "polaris collector": 0.0007654,
+      "polaris without collector": 0.0095992,
+      "polaris-pg": 0.0006404,
+      "polaris-pg primary": 0.0005633
+     },
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "config": 2.52786181,
+      "full_load": 12.392663319999999,
+      "head_table": 8.887033519999992,
+      "list_namespaces": 3.371118,
+      "list_tables": 3.437473,
+      "token": 1.5220714499999999
+     },
+     "passed": true,
+     "rate": 200,
+     "reasons": [],
+     "requests": 24001,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "cpu_per_request": {
+      "polaris": 0.0115918,
+      "polaris collector": 0.0007959,
+      "polaris without collector": 0.0107959,
+      "polaris-pg": 0.0006226,
+      "polaris-pg primary": 0.0005537
+     },
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "config": 2.4256573999999977,
+      "full_load": 12.485829999999998,
+      "head_table": 9.01895367,
+      "list_namespaces": 3.49435289,
+      "list_tables": 2.873339609999995,
+      "token": 1.8945185199999994
+     },
+     "passed": true,
+     "rate": 225,
+     "reasons": [],
+     "requests": 27001,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0008,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "cpu_per_request": {
+      "polaris": 0.0111533,
+      "polaris collector": 0.0007863,
+      "polaris without collector": 0.010367,
+      "polaris-pg": 0.0005603,
+      "polaris-pg primary": 0.0004993
+     },
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "config": 2.6613283999999995,
+      "full_load": 12.916658420000001,
+      "head_table": 9.270025679999993,
+      "list_namespaces": 3.2285417300000003,
+      "list_tables": 3.4716060600000023,
+      "token": 2.1995046000000005
+     },
+     "passed": true,
+     "rate": 250,
+     "reasons": [],
+     "requests": 30001,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 1.0,
+     "cpu_per_request": {
+      "polaris": 0.0111982,
+      "polaris collector": 0.0008042,
+      "polaris without collector": 0.0103939,
+      "polaris-pg": 0.0005418,
+      "polaris-pg primary": 0.0004836
+     },
+     "error_rate": 0.0,
+     "errors": 0,
+     "p99_ms": {
+      "config": 2.66236624,
+      "full_load": 13.794460279999996,
+      "head_table": 9.39782732,
+      "list_namespaces": 3.559127699999998,
+      "list_tables": 3.45323264,
+      "token": 2.27954436
+     },
+     "passed": true,
+     "rate": 275,
+     "reasons": [],
+     "requests": 33000,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    },
+    {
+     "answered": 0.6943333333333334,
+     "cpu_per_request": {
+      "polaris": 0.009734,
+      "polaris collector": 0.0046123,
+      "polaris without collector": 0.0051216,
+      "polaris-pg": 0.0006445,
+      "polaris-pg primary": 0.0005697
+     },
+     "error_rate": 0.7774843975036005,
+     "errors": 19434,
+     "p99_ms": {
+      "config": 10000.8233537,
+      "full_load": 10000.97539636,
+      "head_table": 10000.89881178,
+      "list_namespaces": 10000.81393106,
+      "list_tables": 10000.94447025,
+      "token": 10000.44124532
+     },
+     "passed": false,
+     "rate": 300,
+     "reasons": [
+      "answered 69.4% < 95%",
+      "errors 77.75% > 0.1%",
+      "config p99 10000.8 ms > 500 ms",
+      "full_load p99 10001 ms > 3000 ms",
+      "head_table p99 10000.9 ms > 500 ms",
+      "list_namespaces p99 10000.8 ms > 500 ms",
+      "list_tables p99 10000.9 ms > 500 ms",
+      "token p99 10000.4 ms > 1000 ms"
+     ],
+     "requests": 24996,
+     "restarts": [],
+     "throttle": {
+      "k6": 0.0007,
+      "opa": 0.0,
+      "seaweedfs": 0.0
+     }
+    }
+   ],
+   "valid": true
+  }
+ },
+ "sizing": {
+  "polaris_pg_primary_cores": 9.3,
+  "polaris_replicas": 160,
+  "target_rps": 12000
+ },
+ "verify": {
+  "commits": {
+   "found": 87226,
+   "ok": 87009,
+   "unknown": 1248
+  },
+  "metadata": {
+   "after": {
+    "hot": {
+     "max": 2760324,
+     "min": 2180098
+    },
+    "ordinary": {
+     "max": 1377513,
+     "min": 1334744
+    }
+   },
+   "seeded": {
+    "max": 1134486,
+    "min": 1127432
+   }
+  },
+  "polaris_pg": {
+   "primary_after": "polaris-pg-1",
+   "primary_before": "polaris-pg-1",
+   "readiness_failures": {}
+  },
+  "problems": [
+   "commits at 45 req/s: 3 failed request(s), 0 of them 5xx"
+  ]
+ }
+}
