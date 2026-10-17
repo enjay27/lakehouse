@@ -1,6 +1,6 @@
 # ADR-067: Datahub's namespace reaches the gate's S3 stand-in on its S3 port only
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-18
 - **Related:** ADR-031, ADR-034, ADR-043, ADR-048, ADR-053, ADR-066
 

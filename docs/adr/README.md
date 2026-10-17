@@ -96,7 +96,7 @@ flowchart LR
 | [045](045-the-cnpg-operator-and-its-backup-plugin-are-the-operator-teams-and-a-release-installs-in-a-fixed-order.md) | The CNPG operator and its backup plugin are the operator team's; a release installs in a fixed order | Accepted |
 | [046](046-metrics-are-a-scrape-contract-for-the-observability-teams-prometheus-proven-by-a-stand-in-on-the-gate.md) | Metrics are a scrape contract for the observability team's Prometheus, proven by a stand-in on the gate | Accepted |
 | [047](047-failover-is-measured-on-the-gate-before-it-is-tuned-a-pgjdbc-probe-times-each-setup-under-three-failures.md) | Failover is measured on the gate before it is tuned: a pgjdbc probe times each setup under three failures | Amended by ADR-058 |
-| [048](048-ingress-is-denied-by-default-allowed-per-caller-cnpgs-join-pods-included-and-smoke-rebuilds-a-replica.md) | Ingress is denied by default and allowed per caller, CNPG's join pods included; smoke rebuilds a replica under the policies | Accepted |
+| [048](048-ingress-is-denied-by-default-allowed-per-caller-cnpgs-join-pods-included-and-smoke-rebuilds-a-replica.md) | Ingress is denied by default and allowed per caller, CNPG's join pods included; smoke rebuilds a replica under the policies | Amended by ADR-067 |
 | [049](049-a-gate-run-deletes-its-own-gate-branch-when-it-ends-pass-or-fail.md) | A gate run deletes its own gate branch when it ends, pass or fail | Accepted |
 | [050](050-gates-run-from-throwaway-gate-branches-before-the-pr-opens-and-smoke-fresh-installs-a-commit-from-nothing.md) | Gates run from throwaway `gate/*` branches before the PR opens; `smoke-fresh` installs a commit from nothing | Amended by ADR-055 |
 | [051](051-gates-upgrade-from-the-last-release-over-seeded-data-and-check-every-seeded-object-after-the-upgrade.md) | Gates upgrade from the last release over seeded data, and check every seeded object after the upgrade | Accepted |
@@ -115,7 +115,7 @@ flowchart LR
 | [064](064-measurements-keep-their-raw-records-on-the-linux-test-server-each-file-names-their-checksums-and-every-number-it-uses.md) | Measurements keep their raw records on the Linux test server; each file names their checksums and every number it uses | Proposed |
 | [065](065-the-stress-test-runs-with-k6-only-when-kade-starts-it-tier-a-on-the-gate-tier-d-measures-one-polaris-on-a-linux-test-server.md) | The stress test runs with k6 only when Kade starts it: Tier A on the gate, Tier D measures one Polaris on a Linux test server | Proposed |
 | [066](066-datahubs-postgresql-is-a-chart-of-its-own-with-three-asynchronous-instances-backing-up-to-its-own-bucket-with-its-own-key.md) | Datahub's PostgreSQL is a chart of its own, with three asynchronous instances, backing up to its own bucket with its own key | Accepted |
-| [067](067-datahubs-namespace-reaches-the-gates-s3-stand-in-on-its-s3-port-only.md) | Datahub's namespace reaches the gate's S3 stand-in on its S3 port only | Proposed |
+| [067](067-datahubs-namespace-reaches-the-gates-s3-stand-in-on-its-s3-port-only.md) | Datahub's namespace reaches the gate's S3 stand-in on its S3 port only | Accepted |
 
 ## Not ADRs
 
