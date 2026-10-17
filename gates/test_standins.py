@@ -13,6 +13,7 @@ import standins  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENV = {"NS_STANDINS": "standins", "NS_CATALOG_POLARIS": "catalog-polaris",
+       "NS_CATALOG_DATAHUB": "catalog-datahub",
        "POLARIS_S3_ACCESS_KEY_ID": "gatekey",
        "POLARIS_S3_SECRET_ACCESS_KEY": "gatesecret",
        "SMOKE_S3_ACCESS_KEY_ID": "smokekey",
@@ -201,14 +202,18 @@ class NetworkPolicies(unittest.TestCase):
         self.assertEqual(self.policies["default-deny-ingress"],
                          {"podSelector": {}, "policyTypes": ["Ingress"]})
 
-    def test_the_recorder_from_polaris_namespace_on_its_three_ports(self):
+    def test_the_recorder_from_polaris_namespace_on_its_three_ports_datahubs_on_s3_only(self):
+        # ADR-067 §1: datahub-pg's backups reach S3 through the recorder, on its S3 port only.
         spec = self.policies["recorder"]
         self.assertEqual(spec["podSelector"],
                          {"matchLabels": {"app.kubernetes.io/name": "recorder"}})
-        self.assertEqual(spec["ingress"], [{
-            "ports": [{"protocol": "TCP", "port": p} for p in (8181, 8333, 5432)],
-            "from": [{"namespaceSelector": {"matchLabels": {
-                "kubernetes.io/metadata.name": "catalog-polaris"}}}]}])
+        self.assertEqual(spec["ingress"], [
+            {"ports": [{"protocol": "TCP", "port": p} for p in (8181, 8333, 5432)],
+             "from": [{"namespaceSelector": {"matchLabels": {
+                 "kubernetes.io/metadata.name": "catalog-polaris"}}}]},
+            {"ports": [{"protocol": "TCP", "port": 8333}],
+             "from": [{"namespaceSelector": {"matchLabels": {
+                 "kubernetes.io/metadata.name": "catalog-datahub"}}}]}])
 
     def test_seaweedfs_and_opa_from_the_recorder_and_the_gates_check_pods(self):
         for name, port in (("seaweedfs", 8333), ("opa", 8181)):
@@ -306,13 +311,14 @@ class Direct(unittest.TestCase):
                     if kind == "NetworkPolicy"}
         default = {name: o["spec"] for (kind, name), o in objects().items()
                    if kind == "NetworkPolicy"}
-        for name, port in (("seaweedfs", 8333), ("opa", 8181)):
+        named = [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": ns}}}
+                 for ns in ("catalog-polaris", "catalog-datahub")]
+        # ADR-067 §2: in a stress install SeaweedFS admits Datahub's namespace too; OPA does not.
+        for name, port, extra in (("seaweedfs", 8333, named), ("opa", 8181, named[:1])):
             with self.subTest(name=name):
                 (rule,) = policies[name]["ingress"]
                 self.assertEqual(rule["ports"], [{"protocol": "TCP", "port": port}])
-                self.assertEqual(rule["from"], default[name]["ingress"][0]["from"] + [
-                    {"namespaceSelector": {"matchLabels": {
-                        "kubernetes.io/metadata.name": "catalog-polaris"}}}])
+                self.assertEqual(rule["from"], default[name]["ingress"][0]["from"] + extra)
         for name in ("default-deny-ingress", "recorder", "prometheus"):
             with self.subTest(name=name):
                 self.assertEqual(policies[name], default[name])

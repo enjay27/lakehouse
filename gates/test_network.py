@@ -117,6 +117,13 @@ class Cases(unittest.TestCase):
             with self.subTest(source=source):
                 self.assertIs(expected[(source, "datahub-pg")], False)
 
+    def test_datahubs_namespace_reaches_the_recorders_s3_port_only(self):
+        # ADR-067 §4: its backups go through the recorder; OPA and the PostgreSQL port stay shut.
+        expected = {(c.source, c.target): c.allowed for c in network.CASES}
+        self.assertIs(expected[("datahub", "recorder")], True)
+        self.assertIs(expected[("datahub", "recorder-pg")], False)
+        self.assertIs(expected[("datahub", "opa")], False)
+
     def test_a_join_pod_reaches_polaris_pg_only_from_polaris_namespace(self):
         # ADR-048 §6: CNPG's join pods clone the primary; the label admits no other namespace.
         expected = {(c.source, c.target): c.allowed for c in network.CASES}
@@ -136,6 +143,7 @@ class Cases(unittest.TestCase):
         self.assertEqual(addresses["polaris-pg-metrics"],
                          "gate-polaris-pg-metrics.catalog-polaris.svc.cluster.local:9187")
         self.assertEqual(addresses["recorder"], "recorder.standins.svc.cluster.local:8333")
+        self.assertEqual(addresses["recorder-pg"], "recorder.standins.svc.cluster.local:5432")
         self.assertEqual(addresses["seaweedfs"], "seaweedfs.standins.svc.cluster.local:8333")
         self.assertEqual(addresses["opa"], "opa.standins.svc.cluster.local:8181")
         self.assertEqual(addresses["datahub-pg"],
