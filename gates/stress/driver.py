@@ -21,7 +21,8 @@ file it keeps goes under OUT, which stress.yml uploads.
                   cannot be read fails, after the same wait. Around each step it reads every node's cAdvisor
                   through the API server (the CPU of k6, OPA, SeaweedFS, Polaris and
                   polaris-pg, and how often the three limited ones were throttled) and
-                  Polaris's /q/metrics on 8182 from the k6 pod. A step passes when k6
+                  Polaris's /q/metrics on 8182 from the k6 pod, and the CPU of the threads
+                  Polaris's JVM names for its collector (ADR-061 §4). A step passes when k6
                   dropped at most 5% of the requests offered, at most 0.1% failed (409s on
                   the hot set not counted) and each kind's p99 is within its cap. The knee is
                   the last step that passed; a knee decided while k6, OPA or SeaweedFS was
@@ -47,7 +48,8 @@ file it keeps goes under OUT, which stress.yml uploads.
   report OUT [BASELINE]
                   writes summary.json and summary.md (printed too) from what OUT holds: each
                   profile's knee and steps, Polaris's and polaris-pg's CPU per request at
-                  it, the sizing for 12,000 req/s from the mixed knee (ADR-053 §7), the
+                  it and at each step (Polaris's also without its collector's threads), the
+                  sizing for 12,000 req/s from the mixed knee (ADR-053 §7), the
                   hold's percentiles and samples, the tables' growth, verify's result and,
                   with BASELINE (an earlier run's OUT), each knee's and the hold's p99's
                   change. Speed is reported, never judged.
@@ -533,7 +535,39 @@ def cpu_per_request(step):
     by_pod = step.get("cpu_seconds_by_pod") or {}
     if step.get("primary") in by_pod:
         cost["polaris-pg primary"] = by_pod[step["primary"]] / n
+    if "collector_cpu_seconds" in step:
+        cost["polaris collector"] = step["collector_cpu_seconds"] / n
+        cost["polaris without collector"] = (cpu["polaris"] - step["collector_cpu_seconds"]) / n
     return {k: round(v, 7) for k, v in cost.items()}
+
+
+# The threads a JDK 21 JVM runs its collector on, by the name /proc gives them (15 characters at
+# most): the Parallel collector's and G1's workers, G1's own, generational ZGC's, read from
+# Polaris's image on 2026-10-17 (ADR-061 §4). The VM Thread, which runs every safepoint
+# operation and not only the collector's, is left out.
+COLLECTOR_THREAD = re.compile(r"^(GC Thread|G1 |RuntimeWorker|Z[A-Z])")
+
+
+def collector_command(env, pod):
+    """The clock rate, then /proc's stat line of each thread of Polaris's JVM (PID 1)."""
+    return _kubectl(env) + ["exec", pod, "--", "sh", "-c",
+                            "getconf CLK_TCK; cat /proc/1/task/*/stat 2>/dev/null; true"]
+
+
+def collector_seconds(text):
+    """CPU-seconds (user and system) of the collector's threads, from collector_command's
+    output. The name sits between the first "(" and the last ")"; utime and stime are the
+    14th and 15th fields."""
+    lines = text.splitlines()
+    tick, total = int(lines[0]), 0
+    for line in lines[1:]:
+        if ")" not in line:
+            continue
+        name = line[line.index("(") + 1:line.rindex(")")]
+        fields = line[line.rindex(")") + 2:].split()
+        if COLLECTOR_THREAD.match(name):
+            total += int(fields[11]) + int(fields[12])
+    return round(total / tick, 2)
 
 
 def sizing(mixed_knee, cost):
@@ -780,10 +814,10 @@ def _restarts(env):
     return pods
 
 
-def _polaris_metrics(env, polaris_ips):
+def _polaris_metrics(env, polaris):
     return [gate.output(_kubectl(env) + [
         "exec", K6_POD, "--", "wget", "-qO-", "-T", "10",
-        f"http://{ip}:{gate.POLARIS_MGMT_PORT}/q/metrics"]) for ip in polaris_ips]
+        f"http://{ip}:{gate.POLARIS_MGMT_PORT}/q/metrics"]) for ip in polaris.values()]
 
 
 def seed(env, pins, config, out, overlay=None):
@@ -812,12 +846,15 @@ def seed(env, pins, config, out, overlay=None):
     return 0
 
 
-def sample(env, nodes, polaris_ips):
+def sample(env, nodes, polaris):
+    """`polaris` is {pod name: pod IP} of Polaris's running pods."""
     texts = [gate.output(["kubectl", "--context", gate.CONTEXT, "get", "--raw",
                           f"/api/v1/nodes/{node}/proxy/metrics/cadvisor"]) for node in nodes]
     targets = {name: (env[var], container) for name, (var, container) in CONTAINERS.items()}
-    return {"cpu": container_cpu(texts, targets), "polaris": _polaris_metrics(env, polaris_ips),
-            "pg_pods": pod_cpu(texts, env["NS_CATALOG_POLARIS"], "postgres")}
+    return {"cpu": container_cpu(texts, targets), "polaris": _polaris_metrics(env, polaris),
+            "pg_pods": pod_cpu(texts, env["NS_CATALOG_POLARIS"], "postgres"),
+            "collector": round(sum(collector_seconds(gate.output(collector_command(env, pod)))
+                                   for pod in polaris), 2)}
 
 
 def probe(env, nodes, polaris_ips, seconds):
@@ -862,7 +899,9 @@ def measure(result, before, after, throttle_max):
         return result | {"passed": False, "reasons": result["reasons"] + [UNREAD],
                          "throttle": {}, "throttled": []}
     ratios, over = throttle(before["cpu"], after["cpu"], throttle_max)
-    return result | {
+    collector = ({"collector_cpu_seconds": round(after["collector"] - before["collector"], 2)}
+                 if "collector" in before and "collector" in after else {})
+    return result | collector | {
         "throttle": ratios, "throttled": over,
         "cpu_seconds": {k: round(after["cpu"][k]["usage"] - before["cpu"][k]["usage"], 2)
                         for k in CONTAINERS},
@@ -926,7 +965,7 @@ def _targets(env):
         ["kubectl", "--context", gate.CONTEXT, "get", "nodes", "-o", "name"]).split()]
     pods = gate._running(json.loads(gate.output(
         _kubectl(env) + ["get", "pods", "-l", gate.POLARIS_POD_LABELS, "-o", "json"])))
-    return nodes, [p["status"]["podIP"] for p in pods]
+    return nodes, {p["metadata"]["name"]: p["status"]["podIP"] for p in pods}
 
 
 def ramp(env, config, profile, out):
@@ -1026,7 +1065,8 @@ def report(out, pins, baseline=None):
                         "steps": [{k: s[k] for k in ("rate", "passed", "requests", "errors",
                                                      "answered", "error_rate", "p99_ms",
                                                      "throttle", "reasons")}
-                                  | {"restarts": s.get("restarts", [])}
+                                  | {"restarts": s.get("restarts", []),
+                                     "cpu_per_request": cpu_per_request(s)}
                                   for s in p["steps"]]}
                      for name, p in by_profile.items()},
         "hold": held and {k: v for k, v in held.items() if k != "series"},
@@ -1065,6 +1105,17 @@ def report(out, pins, baseline=None):
                   "|---|---|---|---|"]
         lines += [f"| {n} | {ms(c['polaris'])} | {ms(c.get('polaris-pg primary'))} | "
                   f"{ms(c['polaris-pg'])} |" for n, c in costs.items()]
+    stepped = [(n, s) for n, p in summary["profiles"].items() for s in p["steps"]
+               if s["cpu_per_request"] and "polaris collector" in s["cpu_per_request"]]
+    if stepped:
+        lines += ["", "Polaris's CPU-milliseconds per request at each step, the collector's "
+                      "threads apart (ADR-061 §4):", "",
+                  "| Profile | Rate (req/s) | Polaris | Its collector | The rest |",
+                  "|---|---|---|---|---|"]
+        lines += [f"| {n} | {s['rate']} | {_num(s['cpu_per_request']['polaris'] * 1000)} | "
+                  f"{_num(s['cpu_per_request']['polaris collector'] * 1000)} | "
+                  f"{_num(s['cpu_per_request']['polaris without collector'] * 1000)} |"
+                  for n, s in stepped]
     if summary["sizing"]:
         s = summary["sizing"]
         lines += ["", f"For {s['target_rps']:,} req/s: {s['polaris_replicas']} Polaris replicas, "

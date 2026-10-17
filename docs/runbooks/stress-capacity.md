@@ -225,6 +225,8 @@ python3 gates/stress/driver.py timeline "$OUT"
   - It also prints each table's load after the run, for the metadata growth.
 - **report** writes `summary.json` and `summary.md` under `OUT`, and prints the summary:
   - the knees and their CPU per request;
+  - each step's Polaris CPU per request, with the share of the threads its JVM names for its
+    collector (ADR-061 §4);
   - each step's rate, requests, errors and error rate, and its highest p99;
   - the sizing for 12,000 req/s;
   - Polaris's size, and the hold's percentiles, heap and GC;
@@ -247,11 +249,15 @@ git rev-parse HEAD
 kubectl --context "$KUBE_CONTEXT" get pods -A \
   -o jsonpath='{range .items[*]}{.spec.containers[*].image}{"\n"}{end}' | sort -u
 k exec deploy/polaris -- java -version 2>&1 | head -1
+k exec deploy/polaris -- sh -c 'tr "\0" " " < /proc/1/cmdline; echo'
 ```
+
+The last line is the JVM's command line: its options must be `values-lakehouse.yaml`'s
+`JAVA_OPTS` (ADR-061).
 
 In a PR, from a branch of the measured commit:
 - **`docs/measurements/stress-capacity-<date>.md`** names:
-  - the commit and every image;
+  - the commit and every image, and the JVM's options;
   - the overlay's values and Polaris's size;
   - the server, by cores, threads and memory only (ADR-002), and what else it ran;
   - each profile's knee, CPU per request and what limited it;
