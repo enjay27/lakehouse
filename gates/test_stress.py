@@ -489,6 +489,18 @@ class HoldSamples(unittest.TestCase):
             "heap_used": 150, "heap_max": 6000, "heap_after_gc": 70, "gc_pauses": 3,
             "gc_seconds": 0.5, "gc_longest": 0.2, "worker_queue": 4, "worker_rejected": 1})
 
+    def test_zgcs_generations_share_one_heap_so_its_maximum_counts_once(self):
+        # Both of ZGC's pools report the whole heap's maximum (ADR-062): 5,736 MiB read 11,472.
+        a = 'application="Polaris"'
+        text = "\n".join([
+            f'jvm_memory_max_bytes{{{a},area="heap",id="ZGC Old Generation"}} 6000',
+            f'jvm_memory_max_bytes{{{a},area="heap",id="ZGC Young Generation"}} 6000',
+            f'jvm_memory_used_bytes{{{a},area="heap",id="ZGC Old Generation"}} 100',
+            f'jvm_memory_used_bytes{{{a},area="heap",id="ZGC Young Generation"}} 50']) + "\n"
+        sample = driver.jvm_sample([text, text])
+        self.assertEqual((sample["heap_max"], sample["heap_used"]), (12000, 300),
+                         "summed over the two pods, each pod's heap once")
+
     def test_the_hold_is_sampled_every_interval_until_k6_ends(self):
         clock = {"now": 0.0}
 
@@ -564,6 +576,14 @@ class Capacity(unittest.TestCase):
         self.assertEqual(driver.cpu_per_request(step), {
             "polaris": 0.002, "polaris-pg": 0.00075, "polaris-pg primary": 0.0005})
 
+    def test_with_the_collectors_cpu_the_cost_is_also_given_without_it(self):
+        # ADR-061 §4: the collector's share answers whether a step's cost is the requests'.
+        step = self.step(200, True, polaris=8.0, pg=3.0, requests=4000)
+        step["collector_cpu_seconds"] = 2.0
+        cost = driver.cpu_per_request(step)
+        self.assertEqual((cost["polaris"], cost["polaris collector"],
+                          cost["polaris without collector"]), (0.002, 0.0005, 0.0015))
+
     def test_a_step_without_cpu_or_requests_has_no_cost(self):
         self.assertIsNone(driver.cpu_per_request(None))
         self.assertIsNone(driver.cpu_per_request(self.step(1, True)))
@@ -601,6 +621,48 @@ class Capacity(unittest.TestCase):
             "after": {"hot": {"min": 5000, "max": 5000},
                       "ordinary": {"min": 1200, "max": 1500}}})
         self.assertIsNone(driver.metadata_growth(seeded, {"a": {"new": []}}))
+
+
+class Collector(unittest.TestCase):
+    """ADR-061 §4: the CPU of the threads the JVM names for its collector, from /proc."""
+
+    @staticmethod
+    def stat(tid, comm, utime, stime):
+        rest = ["S"] + ["0"] * 10 + [str(utime), str(stime)] + ["0"] * 37
+        return f"{tid} ({comm}) " + " ".join(rest)
+
+    def test_the_collector_threads_cpu_in_seconds(self):
+        text = "\n".join(["100", self.stat(1, "java", 5, 5),
+                          self.stat(20, "GC Thread#0", 150, 50),
+                          self.stat(21, "ZWorkerYoung#0", 30, 10),
+                          self.stat(22, "ZDirector", 1, 1),
+                          self.stat(23, "RuntimeWorker#0", 2, 0),
+                          self.stat(24, "G1 Conc#0", 4, 0),
+                          self.stat(30, "executor-thread", 900, 100),
+                          self.stat(31, "Zoo (keeper) x", 900, 100),
+                          self.stat(32, "VM Thread", 7, 0)]) + "\n"
+        self.assertEqual(driver.collector_seconds(text), 2.48)
+
+    def test_another_clock_rate_is_used_as_read(self):
+        text = "250\n" + self.stat(20, "GC Thread#1", 400, 100) + "\n"
+        self.assertEqual(driver.collector_seconds(text), 2.0)
+
+    def test_the_command_reads_every_thread_of_polaris_java_process(self):
+        argv = driver.collector_command(ENV, "polaris-abc")
+        self.assertEqual(argv[:6], ["kubectl", "--context", driver.gate.CONTEXT, "-n",
+                                    "catalog-polaris", "exec"])
+        self.assertIn("polaris-abc", argv)
+        self.assertIn("/proc/1/task/*/stat", argv[-1])
+
+    def test_a_step_counts_the_collectors_cpu_between_its_samples(self):
+        before, after = Settle.sample(None, 10.0), Settle.sample(None, 12.5)
+        before["collector"], after["collector"] = 3.0, 3.75
+        measured = driver.measure({"passed": True, "requests": 100, "reasons": []},
+                                  before, after, 0.05)
+        self.assertEqual(measured["collector_cpu_seconds"], 0.75)
+        del before["collector"]
+        self.assertNotIn("collector_cpu_seconds", driver.measure(
+            {"passed": True, "requests": 100, "reasons": []}, before, after, 0.05))
 
 
 class Settle(unittest.TestCase):
@@ -767,6 +829,7 @@ class Report(unittest.TestCase):
             steps = [self.step(100, True), self.step(150, False)]
             steps[0].update({"cpu_seconds": {"polaris": 4.0, "polaris-pg": 1.2},
                              "cpu_seconds_by_pod": {"polaris-pg-1": 0.8},
+                             "collector_cpu_seconds": 1.0,
                              "primary": "polaris-pg-1", "requests": 2000})
             self.write(out, "profiles/mixed.json", {"steps": steps, **driver.verdict(steps)})
             hold = self.step(80, True)
@@ -787,7 +850,8 @@ class Report(unittest.TestCase):
             with open(os.path.join(out, "summary.json"), encoding="utf-8") as f:
                 saved = json.load(f)
         self.assertEqual(saved["profiles"]["mixed"]["cpu_per_request"],
-                         {"polaris": 0.002, "polaris-pg": 0.0006, "polaris-pg primary": 0.0004})
+                         {"polaris": 0.002, "polaris-pg": 0.0006, "polaris-pg primary": 0.0004,
+                          "polaris collector": 0.0005, "polaris without collector": 0.0015})
         self.assertEqual(saved["sizing"], {"target_rps": 12000, "polaris_replicas": 120,
                                            "polaris_pg_primary_cores": 4.8})
         self.assertEqual(saved["overlay"], "gates/stress/capacity.json")
@@ -796,8 +860,12 @@ class Report(unittest.TestCase):
         self.assertEqual(saved["polaris_size"]["heap_max_bytes"], 6000)
         self.assertEqual(saved["profiles"]["mixed"]["steps"][0]["restarts"], [],
                          "each step says whether Polaris or polaris-pg restarted in it")
+        self.assertEqual(saved["profiles"]["mixed"]["steps"][0]["cpu_per_request"]["polaris"],
+                         0.002, "each step's cost, not only the knee's")
+        self.assertIsNone(saved["profiles"]["mixed"]["steps"][1]["cpu_per_request"])
         out = text.getvalue()
         self.assertIn("| mixed | 2 | 0.4 | 0.6 |", out)
+        self.assertIn("| mixed | 100 | 2 | 0.5 | 1.5 |", out)
         self.assertIn("For 12,000 req/s: 120 Polaris replicas, polaris-pg primary 4.8 cores",
                       out)
         self.assertIn("Heap after GC over the hold: first 70 B, last 70 B, max 70 B", out)

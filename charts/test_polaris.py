@@ -33,6 +33,8 @@ GATE_ENV = {"POLARIS_DB_HOST": "recorder.standins.svc.cluster.local",
             "POLARIS_OPA_URL": "http://recorder.standins.svc.cluster.local:8181"
                                "/v1/data/polaris/authz"}
 IMAGE_RE = re.compile(r"^apache/polaris:(\d+\.\d+\.\d+)@sha256:[0-9a-f]{64}$")
+# Every JVM option Polaris runs with (ADR-061, ADR-062).
+JAVA_OPTS = "-XX:MaxRAMPercentage=50.0 -XX:+UseZGC -XX:+ZGenerational -XX:+ExitOnOutOfMemoryError"
 ADMIN_IMAGE_RE = re.compile(r"^apache/polaris-admin-tool:(\d+\.\d+\.\d+)@sha256:[0-9a-f]{64}$")
 
 
@@ -112,9 +114,9 @@ class Rendered(unittest.TestCase):
     def test_no_credential_is_rendered(self):
         self.assertNotIn("Secret", [d["kind"] for d in self.docs])
         plain = {v["name"]: v["value"] for v in self.container.get("env", []) if "value" in v}
-        self.assertEqual(plain, {"TZ": "UTC"})
+        self.assertEqual(set(plain), {"TZ", "JAVA_OPTS"})
         for var in self.container.get("env", []):
-            if var["name"] != "TZ":
+            if var["name"] not in plain:
                 self.assertIn("valueFrom", var, var["name"])
 
     def test_two_replicas_where_the_chart_defaults_to_one(self):
@@ -260,6 +262,12 @@ class Rendered(unittest.TestCase):
 
     def test_polaris_runs_in_utc_so_its_rolls_are_named_in_utc(self):
         self.assertEqual({v["name"]: v.get("value") for v in self.container["env"]}["TZ"], "UTC")
+
+    def test_the_jvm_runs_generational_zgc_where_the_image_picks_parallel(self):
+        # JAVA_OPTS replaces the image's run-java.sh defaults whole (ADR-061 §1, §2).
+        env = {v["name"]: v.get("value") for v in self.container["env"]}
+        self.assertEqual(env["JAVA_OPTS"], JAVA_OPTS)
+        self.assertEqual(self.defaults["extraEnv"], [])
 
     def test_one_realm_named_as_the_bootstrap_creates_it(self):
         self.assertEqual(self.props["polaris.realm-context.realms"], release.POLARIS_REALM)

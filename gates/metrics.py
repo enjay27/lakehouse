@@ -7,16 +7,19 @@
 - **check-metrics:** QUERY runs in a short-lived check pod in Polaris's namespace and asks the
   stand-in's HTTP API, until every target is up or TIMEOUT passes, for each of QUERIES and for
   its targets; it prints one JSON line. `problems(answer, pods)` then says whether every running
-  pod of each job is scraped (`up` 1), Polaris counted requests, and every instance's collector
-  is up.
+  pod of each job is scraped (`up` 1), Polaris counted requests, every instance's collector
+  is up, and every Polaris pod's heap pools are those of the collector values-lakehouse.yaml's
+  `JAVA_OPTS` names (ADR-061 §3).
 """
 
 import json
 import os
+import re
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 CONTRACT = os.path.join(ROOT, "docs", "contracts", "polaris-prometheus-scrape.yaml")
+VALUES = os.path.join(ROOT, "charts", "polaris", "values-lakehouse.yaml")
 PLACEHOLDER = "${NS_CATALOG_POLARIS}"
 SCRAPE_INTERVAL = "10s"
 PORT = 9090
@@ -27,9 +30,38 @@ JOBS = {"polaris": "app.kubernetes.io/name=polaris,app.kubernetes.io/instance=po
         "polaris-pg": "cnpg.io/cluster=polaris-pg,cnpg.io/podRole=instance"}
 QUERIES = {"up": 'up{job=~"polaris|polaris-pg"}',
            "http": 'http_server_requests_seconds_count{job="polaris"}',
-           "cnpg": 'cnpg_collector_up{job="polaris-pg"}'}
+           "cnpg": 'cnpg_collector_up{job="polaris-pg"}',
+           "heap": 'jvm_memory_used_bytes{job="polaris",area="heap"}'}
+# The heap pools each collector's JVM reports in the `id` label, by the flags that choose it.
+# Generational ZGC's were read from Polaris 1.6.0's image with ADR-061's JAVA_OPTS on
+# 2026-10-17 (OpenJDK 21.0.11). A collector not listed here is refused, not guessed.
+HEAP_POOLS = {("-XX:+UseZGC", "-XX:+ZGenerational"): {"ZGC Young Generation",
+                                                      "ZGC Old Generation"}}
+_JAVA_OPTS = re.compile(r"^\s*-\s*name:\s*JAVA_OPTS\s*$")
+_VALUE = re.compile(r'^\s*value:\s*"([^"]*)"\s*$')
+
 # The series the contract lists (docs/contracts/polaris-metrics.md).
 SERIES = ("http_server_requests_seconds_count", "cnpg_collector_up")
+
+
+def java_opts(path=VALUES):
+    """The `JAVA_OPTS` of values-lakehouse.yaml's extraEnv, read line by line without a YAML
+    parser: the `value:` line after `- name: JAVA_OPTS`."""
+    with open(path, encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    for name, value in zip(lines, lines[1:]):
+        if _JAVA_OPTS.match(name) and _VALUE.match(value):
+            return _VALUE.match(value).group(1)
+    raise ValueError(f"{path} sets no JAVA_OPTS")
+
+
+def heap_pools(opts):
+    """The heap pools of the one collector `opts` chooses, from HEAP_POOLS."""
+    flags = set(opts.split())
+    found = [pools for chosen, pools in HEAP_POOLS.items() if flags.issuperset(chosen)]
+    if len(found) != 1:
+        raise ValueError(f"no known heap pools for JAVA_OPTS {opts!r}")
+    return found[0]
 
 
 def prometheus_config(contract_text, env):
@@ -108,9 +140,11 @@ def _values(samples, job):
             if s["metric"].get("job") == job}
 
 
-def problems(answer, pods):
+def problems(answer, pods, pools=None):
     """(problems, notes): every running pod of each job up, Polaris's request count above 0,
-    every instance's collector up. `pods` is {job: [running pod names]}."""
+    every instance's collector up, every Polaris pod's heap pools `pools` (by default those
+    of values-lakehouse.yaml's collector). `pods` is {job: [running pod names]}."""
+    pools = heap_pools(java_opts()) if pools is None else pools
     if not answer:
         return ["the stand-in gave no answer: see the query's output above"], []
     found, notes = [], []
@@ -131,6 +165,12 @@ def problems(answer, pods):
             found.append("polaris: no http_server_requests_seconds_count above 0")
         else:
             notes.append(f"polaris: http_server_requests_seconds_count in {len(counts)} series")
+    for pod in pods.get("polaris", []):
+        ids = {s["metric"].get("id", "") for s in answers.get("heap", [])
+               if s["metric"].get("job") == "polaris" and s["metric"].get("pod") == pod}
+        if ids != pools:
+            found.append(f"polaris {pod}: heap pools {', '.join(sorted(ids)) or 'missing'}, "
+                         f"not {', '.join(sorted(pools))} (ADR-061)")
     collectors = _values(answers.get("cnpg", []), "polaris-pg")
     for pod in pods.get("polaris-pg", []):
         if collectors.get(pod) != "1":
