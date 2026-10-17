@@ -255,6 +255,14 @@ source does not matter for operation. What follows is the list they cover.
 
 ### P3: Datahub
 
+Started on 2026-10-18 (Kade).
+
+- Datahub's PostgreSQL (ADR-066): `charts/datahub-postgres`, copied from Polaris's, the
+  `Cluster` datahub-pg with three asynchronous instances, backing up to its own bucket
+  (`DATAHUB_BACKUP_BUCKET`) with its own key (`datahub-backup-s3`);
+  `charts/datahub-network-policies`, default deny in Datahub's namespace with datahub-pg's
+  rules; installed after Polaris in step 1. The smoke gate's `check-datahub-pg` checks it is
+  asynchronous, archives its WAL and completes a backup.
 - Its PostgreSQL on CNPG, a single-broker Kafka and a single-node OpenSearch, all in
   `NS_CATALOG_DATAHUB`, then Datahub itself (ADR-025).
 - Datahub ingests Polaris's catalog with its own read-only principal.
