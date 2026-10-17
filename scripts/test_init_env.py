@@ -263,7 +263,7 @@ class ApplySecrets(unittest.TestCase):
         self.assertEqual([c[0] for c in calls], [
             ["kubectl", "--context", "kind-gate", "apply", "--server-side",
              "--field-manager=init-env", "-n", ns, "-f", "-"]
-            for ns in ["catalog-polaris"] * 6 + ["catalog-datahub"]])
+            for ns in ["catalog-polaris"] * 6 + ["catalog-datahub"] * 2])
         self.assertTrue(all(check for _, _, check in calls))
         argv = " ".join(" ".join(cmd) for cmd, _, _ in calls)
         for name in CREDENTIALS + BY_HAND:

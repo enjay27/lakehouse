@@ -69,6 +69,12 @@ SECRETS = [
             "region": "S3_REGION"}, {}),
     Secret("datahub-db", "NS_CATALOG_DATAHUB", "kubernetes.io/basic-auth",
            {"password": "DATAHUB_DB_PASSWORD"}, {"username": "datahub"}),
+    # Datahub's backups' own S3 key, never Polaris's, which the ObjectStore of
+    # charts/datahub-postgres reads, and the same region (ADR-066 §3).
+    Secret("datahub-backup-s3", "NS_CATALOG_DATAHUB", "Opaque",
+           {"accessKeyId": "DATAHUB_BACKUP_S3_ACCESS_KEY_ID",
+            "secretAccessKey": "DATAHUB_BACKUP_S3_SECRET_ACCESS_KEY",
+            "region": "S3_REGION"}, {}),
 ]
 
 
