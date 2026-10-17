@@ -80,6 +80,14 @@ extraEnv:
   # UTC, so the hourly rolls are named in UTC (ADR-036).
   - name: TZ
     value: UTC
+  # Every JVM option Polaris runs with (ADR-061). The image's run-java.sh uses JAVA_OPTS in
+  # place of its own defaults (the Parallel collector at 80% of memory, GCTimeRatio 4), whose
+  # full pauses of up to 404 ms set one replica's read and mixed knees in Tier D on
+  # 2026-10-16. Generational ZGC; JDK 24 and later drop -XX:+ZGenerational. The heap share is
+  # a tuning value: 70% leaves ZGC its memory outside the heap, and at 8 GiB still gives 12
+  # times the largest heap after GC measured (451 MiB). gates/metrics.py reads this line.
+  - name: JAVA_OPTS
+    value: "-XX:MaxRAMPercentage=70.0 -XX:+UseZGC -XX:+ZGenerational -XX:+ExitOnOutOfMemoryError"
 
 # One JSON log file per pod on the shared claim polaris-logs, which release.py creates before
 # Polaris (ADR-014, ADR-036). The chart's own `logging.file` stays off: its claim is
