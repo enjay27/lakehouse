@@ -105,6 +105,15 @@
                   deletes the node's pod, waits until a new one is ready, and finds the index
                   green and the document again on its volume; deletes the index (ADR-070 §5).
                   The check pod is deleted whatever happened.
+  check-datahub   both system-update Jobs completed (ADR-071 §8); then gates/datahub/check.py in
+                  a short-lived pod on the pinned Python image, in Datahub's namespace with GMS's
+                  client label (never the check label), as the system client: GMS answers
+                  /health, a dataset written is read back by its URN and found by search within
+                  DATAHUB_SEARCH_SECONDS, then hard-deleted; then the same script from a pod in
+                  the gate's ingress-class namespace, which it creates if missing (ADR-072 §4):
+                  the frontend signs in `datahub` with the password in datahub-root-user and
+                  refuses `datahub:datahub`. Each credential is read from its Secret and sent
+                  on the pod's stdin, never printed or put on a command line.
   check-polaris   compares the running Polaris (its Deployment, pods and ConfigMap) with the
                   values its helm release was installed with and with `.env`, checks its
                   replicas run on different nodes (ADR-016), then runs gates/check_polaris.sh
@@ -177,9 +186,10 @@
 Every kubectl and helm call names the gate's context, and a namespace where the object has
 one. Nothing here reaches any cluster but the kind cluster it creates (ADR-017).
 
-Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | seed | check-migration | rebuild-replica | check-polaris-pg | check-datahub-pg | check-datahub-kafka | check-datahub-opensearch | check-polaris | console-image [--build|--load] | batch-image | check-logs | check-console | check-iceberg | check-restore | gate-policies | check-network | check-metrics
+Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | seed | check-migration | rebuild-replica | check-polaris-pg | check-datahub-pg | check-datahub-kafka | check-datahub-opensearch | check-datahub | check-polaris | console-image [--build|--load] | batch-image | check-logs | check-console | check-iceberg | check-restore | gate-policies | check-network | check-metrics
 """
 
+import base64
 import concurrent.futures
 import copy
 import datetime as dt
@@ -1674,6 +1684,104 @@ def check_datahub_opensearch(env):
                        capture_output=True, text=True, check=False)
 
 
+# check-datahub (ADR-071 §8, ADR-072 §4): what helm ran before GMS and after it, the script both
+# check pods run, and the time a written dataset has to be found by search.
+DATAHUB_JOBS = (f"{release.DATAHUB_RELEASE}-system-update",
+                f"{release.DATAHUB_RELEASE}-system-update-nonblk")
+DATAHUB_CHECK = os.path.join(HERE, "datahub", "check.py")
+DATAHUB_SEARCH_SECONDS = 180
+
+
+def datahub_urls(namespace):
+    """(GMS's, the frontend's) Services as upstream's chart names them for release datahub."""
+    svc = f"{namespace}.svc.cluster.local"
+    return (f"http://{release.DATAHUB_RELEASE}-datahub-gms.{svc}:{network.GMS_PORT}",
+            f"http://{release.DATAHUB_RELEASE}-datahub-frontend.{svc}:{network.FRONTEND_PORT}")
+
+
+def system_update_problems(jobs):
+    """A problem for each system-update Job, of `kubectl get jobs -o json`, not Complete."""
+    complete = {j["metadata"]["name"] for j in jobs["items"]
+                if any(c.get("type") == "Complete" and c.get("status") == "True"
+                       for c in j.get("status", {}).get("conditions") or [])}
+    return [f"Job {name} in Datahub's namespace has not completed" for name in DATAHUB_JOBS
+            if name not in complete]
+
+
+def secret_value(secret, key):
+    """One key of a Secret read as JSON, decoded; never printed."""
+    return base64.b64decode(secret["data"][key]).decode("utf-8")
+
+
+def root_password(user_props):
+    """The password of user.props's line for the root user, `datahub:<password>`, or None."""
+    user, sep, password = user_props.strip().partition(":")
+    return password if user == "datahub" and sep and password else None
+
+
+def datahub_check_command(namespace, image, name, args, labels=None):
+    """A short-lived pod in `namespace` running gates/datahub/check.py with `args`, its
+    credential on stdin; with `labels` if given, never the check label."""
+    with open(DATAHUB_CHECK, encoding="utf-8") as f:
+        script = f.read()
+    flags = [f"--labels={','.join(f'{k}={v}' for k, v in labels.items())}"] if labels else []
+    return ["kubectl", "--context", CONTEXT, "-n", namespace, "run", name, *flags,
+            f"--image={image}", "--restart=Never", "--rm", "-i", "--quiet",
+            "--pod-running-timeout=3m", "--command", "--", "python3", "-c", script, *args]
+
+
+def datahub_lines(text):
+    """(problems, notes) from check.py's `FAIL` and `ok` lines."""
+    problems, notes = [], []
+    for line in text.splitlines():
+        if line.startswith("FAIL "):
+            problems.append(line[5:].strip())
+        elif line.startswith("ok "):
+            notes.append(line[3:].strip())
+    return problems, notes
+
+
+def check_datahub(env, pins):
+    """ADR-071 §8, ADR-072 §4: see the module's docstring. Returns (problems, notes)."""
+    ns, pid = env["NS_CATALOG_DATAHUB"], os.getpid()
+    kubectl = ["kubectl", "--context", CONTEXT, "-n", ns]
+    problems = system_update_problems(json.loads(output(kubectl + ["get", "jobs", "-o", "json"])))
+    if problems:
+        return problems, []
+    notes = [f"Jobs {', '.join(DATAHUB_JOBS)} completed: system-update ran before GMS and "
+             "after it."]
+    auth = json.loads(output(kubectl + ["get", "secret", "datahub-auth-secrets", "-o", "json"]))
+    root = json.loads(output(kubectl + ["get", "secret", "datahub-root-user", "-o", "json"]))
+    secret = secret_value(auth, "system_client_secret")
+    password = root_password(secret_value(root, "user.props"))
+    if not password:
+        return ["Secret datahub-root-user holds no user.props line for datahub"], notes
+    # The namespace check-network gives the ingress class, labelled as `.env` says.
+    key, _, value = env["INGRESS_NAMESPACE_LABEL"].partition("=")
+    ingress, labels = network.SOURCE_PREFIX + "ingress", {key: value}
+    output(["kubectl", "--context", CONTEXT, "apply", "--server-side", "--field-manager=gate",
+            "-f", "-"], json.dumps({"apiVersion": "v1", "kind": "Namespace",
+                                    "metadata": {"name": ingress, "labels": labels}}))
+    gms, frontend = datahub_urls(ns)
+    image = smoke_python_image(pins)
+    pods = [(ns, f"check-datahub-gms-{pid}",
+             ["gms", gms, f"gate_check_{pid}", str(DATAHUB_SEARCH_SECONDS)],
+             {release.DATAHUB_GMS_CLIENT_LABEL: "true"}, secret),
+            (ingress, f"check-datahub-login-{pid}", ["login", frontend], None, password)]
+    for namespace, name, args, pod_labels, credential in pods:
+        done = subprocess.run(datahub_check_command(namespace, image, name, args, pod_labels),
+                              input=credential + "\n", capture_output=True, text=True,
+                              check=False)
+        found, ok = datahub_lines(done.stdout)
+        if done.returncode and not found:
+            said = (done.stderr.strip() or done.stdout.strip()).replace(secret, "<redacted>")
+            found = [f"pod {name} in {namespace} exited {done.returncode}: "
+                     f"{said.replace(password, '<redacted>')}"]
+        problems += found
+        notes += ok
+    return problems, notes
+
+
 def check_datahub_pg(env):
     """ADR-066 §5: datahub-pg as its values say; then a WAL switch on its primary, waited for
     until archived through the plugin; then an on-demand Backup, waited for until completed.
@@ -2528,6 +2636,11 @@ def main(argv):
         return 1 if problems else 0
     if argv[1:] == ["check-datahub-opensearch"]:
         problems, notes = check_datahub_opensearch(release.load_env(ROOT, os.environ))
+        for line in notes + problems:
+            print(line, flush=True)
+        return 1 if problems else 0
+    if argv[1:] == ["check-datahub"]:
+        problems, notes = check_datahub(release.load_env(ROOT, os.environ), pins)
         for line in notes + problems:
             print(line, flush=True)
         return 1 if problems else 0
