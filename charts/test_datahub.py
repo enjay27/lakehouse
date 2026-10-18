@@ -51,6 +51,10 @@ SUBCHARTS = ("datahub-gms", "datahub-frontend", "datahub-mae-consumer", "datahub
 # is: their keys are not upstream's, and kubeconform's strict schemas check the objects.
 PASS_THROUGH = {"global.podLabels"}
 VALUES_RE = re.compile(r"\.Values((?:\.[A-Za-z_][A-Za-z0-9_]*)+)")
+# A map passed as `"image" .Values.…` to upstream's `datahub.image` helper, which reads these keys
+# of it (templates/_helpers.tpl).
+IMAGE_ARG_RE = re.compile(r'"image" \.Values((?:\.[A-Za-z_][A-Za-z0-9_]*)+)')
+IMAGE_KEYS = ("registry", "repository", "tag")
 VERSION = "v1.7.0.1"
 IMAGES = {"gms": "docker.io/acryldata/datahub-gms",
           "frontend": "docker.io/acryldata/datahub-frontend-react",
@@ -158,7 +162,8 @@ def upstream_values():
 
 def template_paths():
     """Every dotted path upstream's rendered templates read as `.Values.…`, and each of its
-    prefixes: a subchart's under its name, `global` as it is."""
+    prefixes: a subchart's under its name, `global` as it is; for a map passed to the
+    `datahub.image` helper, the keys the helper reads of it."""
     paths = set()
     for directory, _, names in os.walk(CHART):
         parts = os.path.relpath(directory, CHART).replace(os.sep, "/").split("/")
@@ -168,8 +173,10 @@ def template_paths():
         for name in names:
             with open(os.path.join(directory, name), encoding="utf-8") as f:
                 text = f.read()
-            for match in VALUES_RE.finditer(text):
-                path = match.group(1).lstrip(".").split(".")
+            read = [m.group(1).lstrip(".").split(".") for m in VALUES_RE.finditer(text)]
+            read += [m.group(1).lstrip(".").split(".") + [key]
+                     for m in IMAGE_ARG_RE.finditer(text) for key in IMAGE_KEYS]
+            for path in read:
                 full = path if path[0] == "global" else prefix + path
                 paths.update(".".join(full[:n]) for n in range(1, len(full) + 1))
     return paths
@@ -293,6 +300,10 @@ class Upstream(unittest.TestCase):
                          ["global.podLabel"])
         self.assertEqual(unknown_keys({"datahubSystemUpdate": {"extraEnvs": []}}, values, paths),
                          [])
+        self.assertEqual(unknown_keys({"datahubUpgrade": {"image": {"tag": "x"}}}, values, paths),
+                         [])
+        self.assertEqual(unknown_keys({"datahubUpgrade": {"image": {"tga": "x"}}}, values, paths),
+                         ["datahubUpgrade.image.tga"])
         self.assertEqual(unknown_keys({"global": {"podLabels": {"a/b": "c"}}}, values, paths),
                          [])
 
@@ -411,6 +422,9 @@ class Rendered(unittest.TestCase):
 
     def test_datahub_pg(self):
         # ADR-071 §4: datahub-pg's chart creates the database and its owner (ADR-066 §2).
+        # Upstream's `createDatabase | default "true"` renders a false as "true", and its schema
+        # takes a boolean only. On PostgreSQL that step looks the database up in pg_database and
+        # creates nothing when it exists (datahub-upgrade, PostgresDatabaseOperations, v1.7.0).
         for c in [self.gms] + self.jobs:
             with self.subTest(container=c["name"]):
                 variables = env(c)
@@ -421,8 +435,10 @@ class Rendered(unittest.TestCase):
                 self.assertEqual(variables["EBEAN_DATASOURCE_USERNAME"], "datahub")
                 self.assertEqual(variables["EBEAN_DATASOURCE_PASSWORD"],
                                  secret("datahub-db", "password"))
+        self.assertIs(load("values-lakehouse.yaml")["datahubSystemUpdate"]["sql"]["setup"]
+                      ["createDatabase"], False)
         blocking = env(self.jobs[0])
-        self.assertEqual(blocking["CREATE_DB"], "false")
+        self.assertEqual(blocking["CREATE_DB"], "true")
         self.assertNotIn("CREATE_USER", blocking)
 
     def test_datahub_kafka(self):
