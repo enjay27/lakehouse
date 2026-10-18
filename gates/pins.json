@@ -63,6 +63,11 @@
       "url": "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/817113f21a2643311cbc3e992bb44ffe1c416c54/v1.36.4-standalone-strict/service-v1.json",
       "sha256": "8bf019854daed511e7c174896a898173fa65d88ec5937c687a37303d4cc9351b",
       "source": "kubeconform's schema for Service at the node image's Kubernetes version, from the NetworkPolicy schema's commit, read 2026-10-18; sha256 of the file downloaded (ADR-068)"
+    },
+    "configmap": {
+      "url": "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/817113f21a2643311cbc3e992bb44ffe1c416c54/v1.36.4-standalone-strict/configmap-v1.json",
+      "sha256": "e0eaddebd677c08aa092b2da2264d86ac4fc34eed112b9fac2945b3f00c1e9b1",
+      "source": "kubeconform's schema for ConfigMap at the node image's Kubernetes version, from the NetworkPolicy schema's commit, read 2026-10-18; sha256 of the file downloaded (ADR-070)"
     }
   },
   "standin_images": {
