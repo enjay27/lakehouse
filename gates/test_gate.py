@@ -2373,6 +2373,18 @@ class CheckDatahubKafka(unittest.TestCase):
     def test_it_is_a_command_of_the_gate(self):
         self.assertIn("| check-datahub-kafka |", gate.__doc__.strip().splitlines()[-1])
 
+    def test_the_script_lists_the_topics_one_line_each(self):
+        lister = ('echo "topics $*" >> "$FAKE_KAFKA/log"\n'
+                  'printf "DataHubUpgradeHistory_v1\\n__consumer_offsets\\n"\n')
+        with mock.patch.dict(FAKE_KAFKA_TOOLS, {"kafka-topics.sh": lister}):
+            (out,), log = self.script("topics")
+        self.assertEqual(log, ["topics --bootstrap-server b:9092 --list"])
+        self.assertEqual(out.splitlines(), ["topic DataHubUpgradeHistory_v1",
+                                            "topic __consumer_offsets"])
+        self.assertEqual(gate.kafka_topics(out), {"DataHubUpgradeHistory_v1",
+                                                  "__consumer_offsets"})
+        self.assertEqual(gate.kafka_topics("noise\n"), set())
+
 
 
 OPENSEARCH_VALUES = {"image": {"repository": "opensearchproject/opensearch",
@@ -2384,6 +2396,7 @@ OPENSEARCH_URL = "http://datahub-opensearch.catalog-datahub.svc.cluster.local:92
 FAKE_CURL = r'''#!/bin/bash
 echo "curl $*" >> "$FAKE_OS/log"
 case "$*" in
+  *http_code*) printf %s "${FAKE_CODE:-200}" ;;
   *_cluster/health*) echo "{\"status\":\"$FAKE_HEALTH\"}" ;;
   *_search*) echo "{\"hits\":{\"total\":{\"value\":$FAKE_HITS},\"hits\":[{\"_source\":{\"check\":\"gate-check-1\"}}]}}" ;;
   *) echo '{"acknowledged":true}' ;;
@@ -2432,7 +2445,7 @@ class CheckDatahubOpensearch(unittest.TestCase):
             "kubectl", "--context", gate.CONTEXT, "-n", "catalog-datahub", "exec", "-i", "p",
             "--", "bash", "-s", "--", "write", OPENSEARCH_URL, "i"])
 
-    def script(self, step, health="green", hits=1):
+    def script(self, step, health="green", hits=1, code="200"):
         """Runs OPENSEARCH_CHECK's `step` with FAKE_CURL; returns (stdout, curl's log)."""
         with tempfile.TemporaryDirectory() as fake:
             path = os.path.join(fake, "curl")
@@ -2440,7 +2453,7 @@ class CheckDatahubOpensearch(unittest.TestCase):
                 f.write(FAKE_CURL)
             os.chmod(path, 0o755)
             env = {**os.environ, "CURL": path, "FAKE_OS": fake, "FAKE_HEALTH": health,
-                   "FAKE_HITS": str(hits)}
+                   "FAKE_HITS": str(hits), "FAKE_CODE": code}
             out = subprocess.run(["bash", "-s", "--", step, OPENSEARCH_URL, "gate-check-1"],
                                  input=gate.OPENSEARCH_CHECK, env=env, capture_output=True,
                                  text=True, check=True).stdout
@@ -2564,6 +2577,15 @@ class CheckDatahubOpensearch(unittest.TestCase):
 
     def test_it_is_a_command_of_the_gate(self):
         self.assertIn("| check-datahub-opensearch |", gate.__doc__.strip().splitlines()[-1])
+
+    def test_exists_prints_the_http_status_of_the_index_or_alias(self):
+        for code in ("200", "404"):
+            with self.subTest(code=code):
+                out, log = self.script("exists", code=code)
+                (status,) = log
+                self.assertIn(f"{OPENSEARCH_URL}/gate-check-1", status)
+                self.assertNotIn("--fail-with-body", status)
+                self.assertEqual(gate.opensearch_lines(out), {"exists": int(code)})
 
 
 DATAHUB_SECRET = "SystemSecret0123456789abcdefABCD"
@@ -2716,6 +2738,247 @@ class CheckDatahub(unittest.TestCase):
 
     def test_it_is_a_command_of_the_gate(self):
         self.assertIn("| check-datahub |", gate.__doc__.strip().splitlines()[-1])
+
+
+DATAHUB_TOPICS = ("DataHubUpgradeHistory_v1", "MetadataChangeLog_Versioned_v1")
+OPENSEARCH_CLAIM = "datahub-opensearch-datahub-opensearch-0"
+KAFKA_CLAIM = "data-datahub-kafka-0"
+
+
+def stateful_pod(name, claim):
+    """A StatefulSet pod as kubectl reads it: one claim among its volumes."""
+    return {"metadata": {"name": name, "uid": "old"},
+            "spec": {"volumes": [{"name": "config", "configMap": {"name": "c"}},
+                                 {"name": "data", "persistentVolumeClaim": {"claimName": claim}}]}}
+
+
+class FakeRecovery:
+    """The gate's cluster as check_datahub_recovery sees it, through gate.output,
+    gate.wait_for, gate.subprocess.run (check.py's pods, the logs and the clean-up) and
+    release.datahub. Datasets are in datahub-pg, and in the index only once the change log or a
+    restore put them there. `broken` names one thing to spoil; `events` is what happened, in
+    order."""
+
+    def __init__(self, test, broken=None):
+        self.test, self.broken, self.events = test, broken, []
+        self.index, self.topics = 200, set(DATAHUB_TOPICS) | {"__consumer_offsets"}
+        self.claims = {OPENSEARCH_CLAIM: "os-1", KAFKA_CLAIM: "kafka-1"}
+        self.datasets, self.indexed, self.pods = set(), set(), []
+
+    def output(self, argv, stdin=None):
+        if argv[0] == "helm":
+            release = argv[argv.index("values") + 1]
+            return json.dumps({"image": KAFKA_IMAGE} if release == "datahub-kafka"
+                              else OPENSEARCH_VALUES)
+        verb = argv[argv.index("-n") + 2]
+        if verb == "exec":
+            step = argv[argv.index("-s") + 2]
+            if step == "exists":
+                self.test.assertEqual(stdin, gate.OPENSEARCH_CHECK)
+                self.test.assertEqual(argv[-1], "datasetindex_v2")
+                return f"exists {self.index}\n"
+            self.test.assertEqual((step, stdin), ("topics", gate.KAFKA_CHECK))
+            return "".join(f"topic {t}\n" for t in sorted(self.topics))
+        if verb == "get":
+            kind, name = argv[argv.index("get") + 1:argv.index("get") + 3]
+            if kind == "secret":
+                return json.dumps({"data": {"system_client_secret": b64(DATAHUB_SECRET)}})
+            if kind == "pod":
+                claim = OPENSEARCH_CLAIM if "opensearch" in name else KAFKA_CLAIM
+                return json.dumps(stateful_pod(name, claim))
+            if kind == "pvc":
+                return json.dumps({"metadata": {"name": name, "uid": self.claims[name]}})
+            return json.dumps({"items": [{"metadata": {"name": "p-0", "uid": "old"}}]})
+        if verb == "delete" and argv[argv.index("delete") + 1] == "pvc":
+            claim = argv[argv.index("pvc") + 1]
+            self.events.append(f"delete claim {claim}")
+            if self.broken != "old-claim":
+                self.claims[claim] += "-new"
+            if claim == OPENSEARCH_CLAIM and self.broken != "index-kept":
+                self.index, self.indexed = 404, set()
+            if claim == KAFKA_CLAIM and self.broken != "topics-kept":
+                self.topics = set()
+        elif verb == "delete" and "-l" in argv:
+            self.test.assertIn(gate.GMS_POD_LABELS, argv)
+            self.events.append("restart gms")
+        elif verb == "delete":
+            self.events.append(f"delete {argv[argv.index('delete') + 1]}")
+        elif verb == "create":
+            self.test.assertIn(
+                "--from=cronjob/datahub-datahub-restore-indices-job-template", argv)
+            self.events.append("restore-indices")
+            if self.broken != "restore-fails":
+                self.indexed = set(self.datasets)
+        return ""
+
+    def wait_for(self, argv, done, what, timeout=None):
+        if "job" in argv:
+            self.test.assertEqual(timeout, gate.RESTORE_INDICES_TIMEOUT)
+            return "failed" if self.broken == "restore-fails" else "succeeded"
+        return "p-0"
+
+    def datahub(self, env, run):
+        self.test.assertIs(run, gate.release.call)
+        self.events.append("install")
+        if self.broken == "install":
+            return ["helm upgrade datahub in catalog-datahub failed: timed out"], []
+        if self.index == 404 and self.broken != "no-index":
+            self.index = 200
+        if not self.topics and self.broken != "no-topics":
+            self.topics = set(DATAHUB_TOPICS)
+        return [], ["Step 1: Datahub in catalog-datahub is installed (ADR-071)."]
+
+    def run(self, argv, input=None, **kwargs):
+        if "python3" in argv:
+            self.pods.append((argv, input))
+            step, _, *rest = argv[argv.index("-c") + 2:]
+            names = [r for r in rest if not r.isdigit()]
+            self.events.append(" ".join([step, *names]))
+            lines = []
+            for name in names:
+                if step == "write":
+                    self.datasets.add(name)
+                    if self.index == 200 and "MetadataChangeLog_Versioned_v1" in self.topics:
+                        self.indexed.add(name)
+                    lines.append(f"ok   {name} written")
+                elif step == "read":
+                    lines.append(("ok  " if name in self.datasets else "FAIL") + f" {name} read")
+                elif step == "search":
+                    lines.append(("ok  " if name in self.indexed else "FAIL") + f" {name} found")
+                else:
+                    self.datasets.discard(name)
+                    lines.append(f"ok   {name} hard-deleted")
+            out = "\n".join(lines) + "\n"
+            return subprocess.CompletedProcess(argv, 1 if "FAIL" in out else 0, out, "")
+        if "logs" in argv:
+            return subprocess.CompletedProcess(argv, 0, "RestoreIndices failed: no route\n", "")
+        self.events.append("clean up " + " ".join(a for a in argv if a.startswith(("datahub-",
+                                                                                 "job"))))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+
+class CheckDatahubRecovery(unittest.TestCase):
+    """ADR-071 §8: Datahub's indices rebuilt after OpenSearch's volume is lost, its topics after
+    Kafka's; a dataset written before both still read and found, another written after."""
+
+    ENV = {"NS_CATALOG_DATAHUB": "catalog-datahub", "KUBE_CONTEXT": "kind-lakehouse-gate"}
+    PINS = {"standin_images": {"recorder": {"image": PYTHON_IMAGE}}}
+
+    def check(self, cluster, env=None):
+        with mock.patch.object(gate, "output", side_effect=cluster.output), \
+                mock.patch.object(gate, "run") as run, \
+                mock.patch.object(gate, "wait_for", side_effect=cluster.wait_for), \
+                mock.patch.object(gate.subprocess, "run", side_effect=cluster.run), \
+                mock.patch.object(gate.release, "datahub", side_effect=cluster.datahub):
+            problems, notes = gate.check_datahub_recovery(env or self.ENV, self.PINS)
+        return problems, notes, run
+
+    def names(self):
+        pid = os.getpid()
+        return f"gate_recovery_a_{pid}", f"gate_recovery_b_{pid}"
+
+    def test_the_claim_is_the_pods_one_persistent_volume_claim(self):
+        self.assertEqual(gate.claim_of(stateful_pod("datahub-kafka-0", KAFKA_CLAIM)),
+                         KAFKA_CLAIM)
+        self.assertIsNone(gate.claim_of({"spec": {"volumes": [{"name": "c", "emptyDir": {}}]}}))
+
+    def test_a_job_is_done_by_its_condition_not_by_a_failed_try(self):
+        def job(*conditions, failed=0):
+            return {"status": {"failed": failed, "conditions": [
+                {"type": t, "status": "True"} for t in conditions]}}
+        self.assertEqual(gate.job_finished(job("Complete", failed=1)), "succeeded")
+        self.assertEqual(gate.job_finished(job("Failed", failed=7)), "failed")
+        self.assertIsNone(gate.job_finished(job(failed=1)))
+        self.assertIsNone(gate.job_finished({}))
+
+    def test_gms_pods_are_the_charts_for_release_datahub(self):
+        self.assertEqual(gate.GMS_POD_LABELS,
+                         "app.kubernetes.io/name=datahub-gms,app.kubernetes.io/instance=datahub")
+
+    def test_both_volumes_lost_and_rebuilt_in_order(self):
+        cluster = FakeRecovery(self)
+        problems, notes, run = self.check(cluster)
+        self.assertEqual(problems, [])
+        first, second = self.names()
+        self.assertEqual(cluster.events, [
+            f"write {first}", f"search {first}",
+            f"delete claim {OPENSEARCH_CLAIM}", "delete pod/datahub-opensearch-0", "install",
+            "restore-indices", f"clean up job datahub-restore-indices-{os.getpid()}",
+            f"search {first}",
+            f"delete claim {KAFKA_CLAIM}", "delete pod/datahub-kafka-0", "install",
+            "restart gms", f"read {first}", f"write {second}", f"search {second}",
+            f"delete {first} {second}",
+            f"clean up datahub-kafka-recovery-{os.getpid()} "
+            f"datahub-opensearch-recovery-{os.getpid()}"])
+        self.assertEqual(cluster.datasets, set())
+        # Both check pods from their charts' images, each with its own client label only.
+        pods = [json.loads(c.args[1]) for c in run.call_args_list]
+        self.assertEqual([p["spec"]["containers"][0]["image"] for p in pods],
+                         [KAFKA_IMAGE, OPENSEARCH_IMAGE])
+        text = "\n".join(notes)
+        for want in (OPENSEARCH_CLAIM, KAFKA_CLAIM, "datasetindex_v2", "restore-indices",
+                     "DataHubUpgradeHistory_v1", "GMS"):
+            self.assertIn(want, text)
+
+    def test_every_check_pod_is_gmss_client_with_the_secret_on_stdin_only(self):
+        cluster = FakeRecovery(self)
+        self.check(cluster)
+        for argv, stdin in cluster.pods:
+            self.assertEqual(argv[argv.index("-n") + 1], "catalog-datahub")
+            self.assertIn("--labels=lakehouse/datahub-gms-client=true", argv)
+            self.assertNotIn(gate.CHECK_POD_LABEL, argv)
+            self.assertIn("http://datahub-datahub-gms.catalog-datahub.svc.cluster.local:8080",
+                          argv)
+            self.assertNotIn(DATAHUB_SECRET, " ".join(argv))
+            self.assertEqual(stdin, DATAHUB_SECRET + "\n")
+        searches = [a for a, _ in cluster.pods if a[a.index("-c") + 2] == "search"]
+        self.assertEqual({a[-1] for a in searches}, {str(gate.DATAHUB_SEARCH_SECONDS)})
+
+    def test_only_on_the_gates_own_cluster(self):
+        cluster = FakeRecovery(self)
+        problems, notes, run = self.check(cluster, env={**self.ENV, "KUBE_CONTEXT": "other"})
+        self.assertEqual(len(problems), 1)
+        self.assertIn("ADR-004", problems[0])
+        self.assertEqual((cluster.events, notes, run.call_count), ([], [], 0))
+
+    def assert_stopped_after(self, broken, last, why):
+        cluster = FakeRecovery(self, broken=broken)
+        problems, _, _ = self.check(cluster)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn(why, problems[0])
+        first, second = self.names()
+        deleted = [e for e in cluster.events if e.startswith(f"delete {first}")]
+        self.assertEqual(cluster.events[-3:], [last, *deleted, cluster.events[-1]])
+        self.assertTrue(cluster.events[-1].startswith("clean up datahub-kafka-recovery"))
+        self.assertEqual(cluster.datasets, set())
+        return problems[0]
+
+    def test_a_volume_that_came_back_on_its_old_claim_is_a_problem(self):
+        self.assert_stopped_after("old-claim", "delete pod/datahub-opensearch-0", "old claim")
+
+    def test_an_index_kept_after_the_loss_is_a_problem(self):
+        self.assert_stopped_after("index-kept", "delete pod/datahub-opensearch-0", "404")
+
+    def test_a_failed_install_is_a_problem(self):
+        problem = self.assert_stopped_after("install", "install", "helm upgrade datahub")
+        self.assertIn("timed out", problem)
+
+    def test_an_index_system_update_did_not_recreate_is_a_problem(self):
+        self.assert_stopped_after("no-index", "install", "datasetindex_v2")
+
+    def test_a_failed_restore_is_a_problem_with_its_log(self):
+        problem = self.assert_stopped_after("restore-fails", "restore-indices", "failed")
+        self.assertIn("RestoreIndices failed: no route", problem)
+
+    def test_topics_kept_after_the_loss_are_a_problem(self):
+        self.assert_stopped_after("topics-kept", "delete pod/datahub-kafka-0",
+                                  "DataHubUpgradeHistory_v1")
+
+    def test_topics_system_update_did_not_recreate_are_a_problem(self):
+        self.assert_stopped_after("no-topics", "install", "MetadataChangeLog_Versioned_v1")
+
+    def test_it_is_a_command_of_the_gate(self):
+        self.assertIn("| check-datahub-recovery |", gate.__doc__.strip().splitlines()[-1])
 
 
 if __name__ == "__main__":
