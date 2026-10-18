@@ -114,7 +114,7 @@ A key in neither of the first two, or one misspelt, still fails the test.
 ```mermaid
 flowchart LR
     subgraph ARCH["datahub-1.1.7.tgz, unchanged but one line"]
-        H["charts/ and subcharts/<br/>datahub-gms/templates/_helpers.tpl<br/>deploymentAppVersion | splitList &quot;@&quot; | first"]
+        H["charts/ and subcharts/<br/>datahub-gms/templates/_helpers.tpl<br/>deploymentAppVersion: the tag up to its first @"]
     end
     V["values-lakehouse.yaml<br/>image.tag: v1.7.0.1@sha256:…"] --> H
     H -->|"label"| L["datahub.acryl.io/datahub-version: v1.7.0.1"]
