@@ -8,7 +8,8 @@
 
 **ADR-071's first code PR read upstream's chart again** on 2026-10-18 before writing any code:
 - `acryldata/datahub-helm`, tag `datahub-1.1.7`, commit `19ca74e`, which is also its `master`;
-- the tag's release archive `datahub-1.1.7.tgz`, whose sha256 `9df268aa…debac` equals the digest
+- the tag's release archive `datahub-1.1.7.tgz`, whose sha256
+  `9df268aad539c6b26bc266be21be6b9e86829ca68a1ac9410890de7a704debac` equals the digest
   in the chart repository's index.
 
 The archive is the chart helm renders as it is: its `charts/` holds the six subcharts unpacked,
@@ -70,8 +71,12 @@ ADR-071 changes.
   helm renders, and `subcharts/datahub-gms/templates/_helpers.tpl`, which `Chart.yaml`'s `file://`
   dependency names. The two copies stay identical.
 - **Every other file of the archive stays unchanged.** The patch is its own commit, after the copy.
-- **The chart test checks the patch:** both copies carry the patched line; the label is the
-  version alone; the image keeps its digest.
+- **The chart test proves the patch is the only change.** It fetches the release archive by its
+  URL and sha256, pinned in `gates/pins.json` as the kubeconform schemas are. It then compares:
+  every other file of `charts/datahub` equals the archive's, byte for byte, with none added or
+  missing; each helper differs from the archive's in line 39 alone, which is the patched line.
+- **It also checks the rendered result:** the label is the version alone, and GMS's image keeps
+  its digest.
 - **An upgrade of the chart reapplies the line,** or drops it once upstream accepts a tag with a
   digest.
 
@@ -141,8 +146,9 @@ flowchart LR
 
 ## Consequences
 
-- **Every upgrade of the chart reapplies the patched line:** two files, one line each. The chart test
-  fails until the line is reapplied or upstream's helper accepts a digest.
+- **Every upgrade of the chart reapplies the patched line:** two files, one line each. The upgrade
+  also moves the archive's pin in `gates/pins.json`. The chart test fails until all three are done,
+  or until upstream's helper accepts a digest.
 - **The ingestion PR, enabling managed ingestion,** drops the `extraEnvs` entry, since upstream then
   sets the same variable from the same Secret.
 - **The code PR for ADR-071** (the first of its two) follows this ADR once Accepted:
