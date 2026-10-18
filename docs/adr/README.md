@@ -127,7 +127,7 @@ flowchart LR
 ## Not ADRs
 
 - **Measurements and their numbers:** `docs/measurements/`, with their evidence (ADR-003).
-- **What is next:** labelled issues (ADR-003).
+- **What is next:** issues and their Project, read through `STATUS.md` (ADR-073).
 - **How to run something:** runbooks in `docs/runbooks/`, one per procedure, used on a target
   cluster only once proven on a Linux test cluster.
 - **Tuning values** (window sizes, caps, replica counts): values files and their comments.

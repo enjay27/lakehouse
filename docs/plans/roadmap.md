@@ -54,7 +54,7 @@ flowchart LR
 ## Phases
 
 Each phase lists its ADRs, PRs, gate, and what only a Linux test cluster can verify
-(`cmd:verify-needs-linux` issues).
+(issues whose Verification is "Needs Linux test cluster", ADR-073).
 
 ### P0: realign the decisions to this scope (ADRs only)
 
