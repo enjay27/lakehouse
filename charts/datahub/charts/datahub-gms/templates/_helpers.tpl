@@ -36,7 +36,7 @@ Resolved GMS image / DataHub release version (subchart image.tag when set, else 
 Same as template "datahub.image" tag; used for datahub.acryl.io/datahub-version and Hazelcast selection.
 */}}
 {{- define "datahub-gms.deploymentAppVersion" -}}
-{{- .Values.image.tag | default .Values.global.datahub.version -}}
+{{- .Values.image.tag | default .Values.global.datahub.version | splitList "@" | first -}}
 {{- end -}}
 
 {{/*
