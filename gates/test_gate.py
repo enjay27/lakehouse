@@ -354,6 +354,116 @@ class Install(unittest.TestCase):
             self.assertEqual(gate.main(["gate.py", "install", "--upgrade"]), 2)
 
 
+class DatahubOnly(unittest.TestCase):
+    """ADR-077 §1: `install --datahub-only` runs release.py's own functions, step 0 then
+    Datahub's part of step 1, in ADR-045's order; the first step with a problem stops the
+    rest."""
+
+    DATAHUB = ("check_preconditions", "datahub_network_policies", "datahub_postgres",
+               "datahub_kafka", "datahub_opensearch", "datahub")
+    # Everything else release.py installs: none of it runs.
+    OTHERS = ("network_policies", "polaris_postgres", "endpoints_answer", "bootstrap",
+              "logs_claim", "polaris", "log_batch", "console", "install")
+    ENV = {"KUBE_CONTEXT": "kind-lakehouse-gate", "NS_CATALOG_DATAHUB": "catalog-datahub"}
+    SUPPORTED = ["1.27"]
+
+    def steps(self, broken=None):
+        """The patches over release.py's steps, and the list of the steps called."""
+        called = []
+
+        def step(name):
+            def call(env, run, *rest):
+                self.assertEqual(env, self.ENV)
+                self.assertIs(run, gate.release.call)
+                self.assertEqual(rest, (self.SUPPORTED,) if name == "check_preconditions"
+                                 else ())
+                called.append(name)
+                return ([f"{name} failed"] if name == broken else []), [f"{name} done"]
+            return call
+        stack = contextlib.ExitStack()
+        for name in self.DATAHUB + self.OTHERS:
+            stack.enter_context(mock.patch.object(gate.release, name, side_effect=step(name)))
+        return stack, called
+
+    def test_step_0_then_datahubs_part_of_step_1_in_order(self):
+        stack, called = self.steps()
+        with stack:
+            problems, notes, timed = gate.datahub_only(self.ENV, self.SUPPORTED)
+        self.assertEqual(problems, [])
+        self.assertEqual(called, list(self.DATAHUB))
+        self.assertEqual(notes, [f"{name} done" for name in self.DATAHUB])
+        # Each step timed under its own name, for the install's timeline.
+        self.assertEqual([label for _, _, label in timed],
+                         [f"release.py {name}" for name in self.DATAHUB])
+        for start, end, _ in timed:
+            self.assertLessEqual(gate._moment(start), gate._moment(end))
+
+    def test_the_first_step_with_a_problem_stops_the_rest(self):
+        for broken in self.DATAHUB:
+            with self.subTest(broken=broken):
+                stack, called = self.steps(broken)
+                with stack:
+                    problems, notes, timed = gate.datahub_only(self.ENV, self.SUPPORTED)
+                upto = list(self.DATAHUB[:self.DATAHUB.index(broken) + 1])
+                self.assertEqual(problems, [f"{broken} failed"])
+                self.assertEqual(called, upto)
+                self.assertEqual(notes, [f"{name} done" for name in upto])
+                self.assertEqual(len(timed), len(upto))
+
+    def main(self, broken=None, argv=("install", "--datahub-only")):
+        stack, called = self.steps(broken)
+        with stack, mock.patch.object(gate.release, "load_env", return_value=self.ENV), \
+                mock.patch.object(gate.release, "supported_versions",
+                                  return_value=self.SUPPORTED), \
+                mock.patch.object(gate, "run") as run, \
+                mock.patch.object(gate, "released_tags") as tags, \
+                mock.patch.object(gate, "measure_pulls",
+                                  return_value=["Image pulls: p"]) as pulls, \
+                mock.patch.object(gate, "measure_timeline",
+                                  return_value=["Install timeline: t"]) as timeline, \
+                mock.patch.object(gate, "INSTALL_RECORD",
+                                  os.path.join(tempfile.mkdtemp(), "install.json")) as record, \
+                contextlib.redirect_stdout(io.StringIO()) as out, \
+                contextlib.redirect_stderr(io.StringIO()):
+            code = gate.main(["gate.py", *argv])
+        return code, out.getvalue(), called, run, tags, pulls, timeline, record
+
+    def test_the_command_prints_its_notes_then_the_pulls_and_the_timeline(self):
+        code, out, called, run, tags, pulls, timeline, record = self.main()
+        self.assertEqual(code, 0)
+        self.assertEqual(called, list(self.DATAHUB))
+        # Fresh, from this commit: no last release, seed, gate-policies or other command.
+        run.assert_not_called()
+        tags.assert_not_called()
+        self.assertFalse(os.path.exists(record))
+        self.assertIn("ADR-077", out.splitlines()[0])
+        self.assertLess(out.index("datahub done"), out.index("Image pulls: p"))
+        self.assertLess(out.index("Image pulls: p"), out.index("Install timeline: t"))
+        since, seconds = pulls.call_args.args
+        self.assertGreaterEqual(seconds, 0)
+        self.assertEqual(timeline.call_args.args[0], since)
+        self.assertEqual([label for _, _, label in timeline.call_args.args[1]],
+                         [f"release.py {name}" for name in self.DATAHUB])
+
+    def test_a_problem_fails_the_command_after_its_pulls_and_timeline(self):
+        code, out, called, *_ = self.main(broken="datahub_kafka")
+        self.assertEqual(code, 1)
+        self.assertEqual(called[-1], "datahub_kafka")
+        self.assertLess(out.index("datahub_kafka failed"), out.index("Install timeline: t"))
+
+    def test_it_takes_no_other_option(self):
+        for argv in (("install", "--datahub-only", "--fresh"),
+                     ("install", "--datahub-only", "--dry-run"),
+                     ("install", "--fresh", "--datahub-only")):
+            with self.subTest(argv=argv):
+                code, _, called, *_ = self.main(argv=argv)
+                self.assertEqual((code, called), (2, []))
+
+    def test_it_is_a_command_of_the_gate(self):
+        self.assertIn("| install [--fresh] [--dry-run] | install --datahub-only |",
+                      gate.__doc__.strip().splitlines()[-1])
+
+
 def pulled(message, node="lakehouse-gate-worker", at="2026-10-14T01:10:00Z", reason="Pulled"):
     return {"reason": reason, "message": message, "source": {"host": node},
             "firstTimestamp": at, "lastTimestamp": at}
