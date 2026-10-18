@@ -132,7 +132,12 @@
                   are deleted and Datahub's topics are gone, the install step runs again and
                   they are back, GMS's pod is deleted and a new one is ready, the dataset reads
                   back by its URN and a second one is written and found. Both datasets are
-                  hard-deleted and the check pods deleted whatever happened.
+                  hard-deleted and the check pods deleted whatever happened. When it ends,
+                  passed, failed or stopped, it prints its timeline (ADR-077 §3): the seconds
+                  after it started, and since the line before, of each phase's start and end
+                  by its own clock, and each install step's Helm revision, system-update's
+                  Jobs and the restore-indices Job by their own times, read right after each
+                  step; a read or a timeline that fails is said, never a problem.
   check-polaris   compares the running Polaris (its Deployment, pods and ConfigMap) with the
                   values its helm release was installed with and with `.env`, checks its
                   replicas run on different nodes (ADR-016), then runs gates/check_polaris.sh
@@ -866,12 +871,12 @@ def timeline_entries(since, histories, jobs, deployments, clusters, commands, ev
     return sorted((e for e in timed if e[0] >= start), key=lambda e: e[0])
 
 
-def timeline_lines(entries, since):
+def timeline_lines(entries, since, title="Install", what="the install"):
     """Each entry with whole seconds after `since` and since the entry before."""
     if not entries:
-        return ["Install timeline: nothing recorded after the install started."]
+        return [f"{title} timeline: nothing recorded after {what} started."]
     lines, before, start = [
-        "Install timeline, seconds after the install started (and since the line before):"], 0, \
+        f"{title} timeline, seconds after {what} started (and since the line before):"], 0, \
         _moment(since)
     for at, text in entries:
         offset = int((at - start).total_seconds())
@@ -1880,9 +1885,10 @@ def job_finished(job):
     return None
 
 
-def lose_volume(kubectl, name, labels, timeout):
-    """Deletes StatefulSet pod `name`'s claim, then the pod, and waits until a new pod is ready.
-    Returns (the claim, the new pod's name, whether the claim it runs on is a new one)."""
+def lose_volume(kubectl, name, labels, timeout, mark):
+    """Deletes StatefulSet pod `name`'s claim, then the pod, and waits until a new pod is ready,
+    each phase given to `mark`. Returns (the claim, the new pod's name, whether the claim it
+    runs on is a new one)."""
     claim = claim_of(json.loads(output(kubectl + ["get", "pod", name, "-o", "json"])))
     if not claim:
         sys.exit(f"Pod {name} has no single PersistentVolumeClaim to lose")
@@ -1891,15 +1897,73 @@ def lose_volume(kubectl, name, labels, timeout):
     pods = kubectl + ["get", "pods", "-l", labels, "-o", "json"]
     old = {p["metadata"]["uid"] for p in json.loads(output(pods))["items"]}
     # The claim waits for its pod to go; the StatefulSet makes a new claim for the new pod.
+    mark(f"claim {claim} and pod {name} being deleted")
     output(kubectl + ["delete", "pvc", claim, "--wait=false"])
     output(kubectl + ["delete", f"pod/{name}", "--wait=true"])
+    mark(f"claim {claim} and pod {name} deleted")
     back = wait_for(pods, new_ready_pod(old), f"{name} back ready on a new volume",
                     timeout=timeout)
+    mark(f"{back} ready")
     return claim, back, json.loads(output(pvc))["metadata"]["uid"] != before
 
 
-def check_datahub_recovery(env, pins):
-    """ADR-071 §8: see the module's docstring. Returns (problems, notes)."""
+def revision_marks(history):
+    """(time, line) for each revision of `helm history datahub -o json`."""
+    return [(r["updated"], f"helm {release.DATAHUB_RELEASE} revision {r['revision']} "
+                           f"{r['status']}") for r in history]
+
+
+def job_marks(jobs, names):
+    """(time, line) for the start, completion or failure of each Job of `jobs` (a list read as
+    JSON) named in `names`: system-update's are hooks Helm deletes on the next revision, so the
+    check reads them after each install step."""
+    marks = []
+    for job in jobs["items"]:
+        name, status = job["metadata"]["name"], job.get("status", {})
+        if name not in names:
+            continue
+        if status.get("startTime"):
+            marks.append((status["startTime"], f"job {name} started"))
+        if status.get("completionTime"):
+            marks.append((status["completionTime"], f"job {name} complete"))
+        for c in status.get("conditions") or []:
+            if c.get("type") == "Failed" and c.get("status") == "True":
+                marks.append((c["lastTransitionTime"], f"job {name} failed"))
+    return marks
+
+
+def recovery_timeline(marks, since):
+    """ADR-077 §3: check-datahub-recovery's marks, (time, line), in order, with whole seconds
+    after `since` and since the line before. One that cannot be read is said, never a
+    problem."""
+    try:
+        return timeline_lines(sorted(((_moment(at), text) for at, text in marks),
+                                     key=lambda e: e[0]),
+                              since, "Recovery", "check-datahub-recovery")
+    except Exception as e:  # noqa: BLE001 - a measurement must never fail the check
+        return [f"Recovery timeline: not measured ({e})"]
+
+
+def check_datahub_recovery(env, pins, timeline=None):
+    """ADR-071 §8: see the module's docstring. Returns (problems, notes); each phase goes on
+    `timeline` as (time, line) as it happens, so a check that stops has it so far (ADR-077
+    §3)."""
+    timeline = [] if timeline is None else timeline
+
+    def mark(text, at=None):
+        timeline.append((at or dt.datetime.now(dt.timezone.utc).isoformat(), text))
+
+    def read_marks(argv, marks, what):
+        """Marks read from Helm or the cluster; a read that fails is said, never a problem."""
+        found, why = _read_json(argv)
+        try:
+            if found is None:
+                raise ValueError(why)
+            for at, text in marks(found):
+                mark(text, at)
+        except (KeyError, TypeError, ValueError) as e:
+            mark(f"{what} not read ({e})")
+
     if env.get("KUBE_CONTEXT") != CONTEXT:
         return [f"KUBE_CONTEXT is {env.get('KUBE_CONTEXT')!r}, not the gate's {CONTEXT}: "
                 "check-datahub-recovery deletes volumes, so it runs on the gate only "
@@ -1922,10 +1986,13 @@ def check_datahub_recovery(env, pins):
 
     def step(*args):
         """check.py's step `args[0]` against GMS, from a pod of GMS's clients."""
+        what = " ".join(a for a in args if not a.isdigit())
+        mark(f"{what} started")
         found, ok = datahub_pod(ns, image, f"check-datahub-recovery-{next(pods)}-{pid}",
                                 [args[0], gms, *args[1:]], labels, secret, (secret,))
         problems.extend(found)
         notes.extend(ok)
+        mark(f"{what} {'failed' if found else 'passed'}")
         return not found
 
     def index_status():
@@ -1937,7 +2004,7 @@ def check_datahub_recovery(env, pins):
         return kafka_topics(output(kafka_exec(ns, kafka_pod, "topics", "-"), KAFKA_CHECK))
 
     def lost(name, pod_labels, timeout):
-        claim, back, new = lose_volume(kubectl, name, pod_labels, timeout)
+        claim, back, new = lose_volume(kubectl, name, pod_labels, timeout, mark)
         if not new:
             problems.append(f"Pod {name} came back as {back} on its old claim {claim}: the "
                             "volume was not lost")
@@ -1947,8 +2014,17 @@ def check_datahub_recovery(env, pins):
         return True
 
     def reinstall():
-        """Datahub's install step again (ADR-071 §7): system-update runs as a pre-upgrade hook."""
+        """Datahub's install step again (ADR-071 §7): system-update runs as a pre-upgrade hook.
+        Its revision and system-update's Jobs go on the timeline, read before the next
+        revision deletes them."""
+        mark("Datahub's install step started")
         found, more = release.datahub(env, release.call)
+        mark("Datahub's install step ended")
+        read_marks(["helm", "--kube-context", CONTEXT, "-n", ns, "history",
+                    release.DATAHUB_RELEASE, "--max", "1", "-o", "json"], revision_marks,
+                   "Datahub's Helm revision")
+        read_marks(kubectl + ["get", "jobs", "-o", "json"],
+                   lambda jobs: job_marks(jobs, DATAHUB_JOBS), "Datahub's system-update Jobs")
         problems.extend(found)
         notes.extend(more)
         return not found
@@ -1956,8 +2032,12 @@ def check_datahub_recovery(env, pins):
     def restore_indices():
         job = f"datahub-restore-indices-{pid}"
         output(kubectl + ["create", "job", job, f"--from=cronjob/{RESTORE_INDICES_TEMPLATE}"])
+        mark(f"job {job} created")
         outcome = wait_for(kubectl + ["get", "job", job, "-o", "json"], job_finished,
                            f"Job {job}", timeout=RESTORE_INDICES_TIMEOUT)
+        read_marks(kubectl + ["get", "job", job, "-o", "json"],
+                   lambda one: job_marks({"items": [one]}, (job,)), f"job {job}")
+        mark(f"job {job} {outcome}")
         if outcome != "succeeded":
             # Kept for the state the smoke run prints on failure; its log said here.
             log = subprocess.run(kubectl + ["logs", f"job/{job}", "--tail=20"],
@@ -1973,6 +2053,7 @@ def check_datahub_recovery(env, pins):
 
     def index_is(want, when):
         status = index_status()
+        mark(f"index {DATAHUB_DATASET_INDEX} answers {status}")
         if status != want:
             problems.append(f"Index {DATAHUB_DATASET_INDEX} answers {status} {when}; expected "
                             f"{want}")
@@ -1980,6 +2061,8 @@ def check_datahub_recovery(env, pins):
 
     def topics_are(present, when):
         listed = topics()
+        mark(f"topics {', '.join(DATAHUB_TOPICS)}: "
+             f"{sum(t in listed for t in DATAHUB_TOPICS)} of {len(DATAHUB_TOPICS)} present")
         wrong = [t for t in DATAHUB_TOPICS if (t in listed) != present]
         if wrong:
             problems.append(f"Topics {', '.join(wrong)} {'missing' if present else 'still there'} "
@@ -2015,9 +2098,12 @@ def check_datahub_recovery(env, pins):
         notes.append(f"Topics {', '.join(DATAHUB_TOPICS)} recreated by system-update.")
         gms_pods = kubectl + ["get", "pods", "-l", GMS_POD_LABELS, "-o", "json"]
         old = {p["metadata"]["uid"] for p in json.loads(output(gms_pods))["items"]}
+        mark("GMS's pod being deleted")
         output(kubectl + ["delete", "pod", "-l", GMS_POD_LABELS, "--wait=true"])
+        mark("GMS's pod deleted")
         back = wait_for(gms_pods, new_ready_pod(old), "GMS back ready",
                         timeout=GMS_RESTART_TIMEOUT)
+        mark(f"GMS's pod {back} ready")
         notes.append(f"GMS's pod deleted; {back} started on the new topics and is ready.")
         if not step("read", first):
             return
@@ -2030,16 +2116,20 @@ def check_datahub_recovery(env, pins):
                 opensearch_check_pod(ns, opensearch_image(
                     values(release.DATAHUB_OPENSEARCH_RELEASE)), opensearch_pod)):
         run(kubectl + ["apply", "-f", "-"], json.dumps(pod))
+    mark("check pods created")
     try:
         for name in (kafka_pod, opensearch_pod):
             output(kubectl + ["wait", "--for=condition=Ready", f"pod/{name}", "--timeout=600s"])
+        mark("check pods ready")
         recover()
     finally:
+        mark("clean-up started")
         if written:
             step("delete", *written)
         subprocess.run(kubectl + ["delete", "pod", kafka_pod, opensearch_pod,
                                   "--ignore-not-found", "--wait=false"],
                        capture_output=True, text=True, check=False)
+        mark("clean-up ended")
     return problems, notes
 
 
@@ -2920,9 +3010,16 @@ def main(argv):
             print(line, flush=True)
         return 1 if problems else 0
     if argv[1:] == ["check-datahub-recovery"]:
-        problems, notes = check_datahub_recovery(release.load_env(ROOT, os.environ), pins)
-        for line in notes + problems:
-            print(line, flush=True)
+        start, timeline = dt.datetime.now(dt.timezone.utc).isoformat(), []
+        try:
+            problems, notes = check_datahub_recovery(release.load_env(ROOT, os.environ), pins,
+                                                     timeline)
+            for line in notes + problems:
+                print(line, flush=True)
+        finally:
+            # ADR-077 §3: passed, failed or stopped by the gate.
+            for line in recovery_timeline(timeline, start):
+                print(line, flush=True)
         return 1 if problems else 0
     if argv[1:] == ["check-polaris"]:
         env = release.load_env(ROOT, os.environ)
