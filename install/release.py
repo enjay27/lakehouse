@@ -179,8 +179,8 @@ BATCH_CHART = os.path.join(ROOT, "charts", BATCH)
 BATCH_IMAGE_DIR = os.path.join(ROOT, "images", BATCH)
 BATCH_IMAGE_FILES = ("Dockerfile", "polaris_log_batch.py")
 # Where the release workflow pushes this repository's images, and where a cluster pulls them
-# from while `IMAGE_REGISTRY` is empty (ADR-042).
-DEFAULT_IMAGE_REGISTRY = "ghcr.io/enjay27/lakehouse"
+# from while `IMAGE_REGISTRY` is empty (ADR-042, ADR-074).
+DEFAULT_IMAGE_REGISTRY = "ghcr.io/kade-k8s-platform/lakehouse"
 POLARIS_CHART = os.path.join(ROOT, "charts", "polaris")
 POLARIS_VALUES = os.path.join(POLARIS_CHART, "values-lakehouse.yaml")
 CONSOLE = "polaris-console"
