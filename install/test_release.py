@@ -1851,12 +1851,20 @@ MIRROR = "mirror.example.invalid:5000/platform"
 
 
 class BatchImage(unittest.TestCase):
-    """ADR-042: the release pushes the batch's image to GHCR; IMAGE_REGISTRY names a mirror."""
+    """ADR-042: the release pushes the batch's image to GHCR; IMAGE_REGISTRY names a mirror.
+    ADR-074: under the repository's organization, kade-k8s-platform."""
 
     def test_the_default_is_the_github_container_registry(self):
-        self.assertEqual(release.DEFAULT_IMAGE_REGISTRY, "ghcr.io/enjay27/lakehouse")
+        self.assertEqual(release.DEFAULT_IMAGE_REGISTRY, "ghcr.io/kade-k8s-platform/lakehouse")
         self.assertTrue(release.batch_image().startswith(
-            "ghcr.io/enjay27/lakehouse/polaris-log-batch:"))
+            "ghcr.io/kade-k8s-platform/lakehouse/polaris-log-batch:"))
+
+    def test_the_charts_default_repository_is_the_releases(self):
+        values = os.path.join(os.path.dirname(__file__), "..", "charts", "polaris-log-batch", "values.yaml")
+        with open(values, encoding="utf-8") as f:
+            repositories = [line.split(":", 1)[1].strip() for line in f
+                            if line.startswith("  repository:")]
+        self.assertEqual(repositories, [release.DEFAULT_IMAGE_REGISTRY + "/polaris-log-batch"])
 
     def test_an_empty_or_missing_registry_is_the_default(self):
         for env in ({}, {"IMAGE_REGISTRY": ""}):

@@ -726,7 +726,7 @@ class BatchImage(unittest.TestCase):
     def test_the_default_is_the_github_container_registry(self):
         build, _ = gate.batch_image_commands()
         self.assertTrue(build[build.index("--tag") + 1].startswith(
-            "ghcr.io/enjay27/lakehouse/polaris-log-batch:"))
+            "ghcr.io/kade-k8s-platform/lakehouse/polaris-log-batch:"))
 
     def test_the_gates_env_from_the_template_leaves_the_registry_empty(self):
         with open(os.path.join(gate.ROOT, ".env.template"), encoding="utf-8") as f:
