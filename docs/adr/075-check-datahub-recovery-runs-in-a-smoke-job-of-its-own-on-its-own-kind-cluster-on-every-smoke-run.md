@@ -1,6 +1,6 @@
 # ADR-075: check-datahub-recovery runs in a smoke job of its own, on its own kind cluster, on every smoke run
 
-- **Status:** Accepted
+- **Status:** Amended by ADR-077
 - **Date:** 2026-10-18
 - **Related:** ADR-000, ADR-017, ADR-028, ADR-030, ADR-033, ADR-039, ADR-049, ADR-050, ADR-055, ADR-059, ADR-071
 

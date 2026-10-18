@@ -1,6 +1,6 @@
 # ADR-077: The datahub-recovery job installs Datahub alone, from this commit, and check-datahub-recovery prints its timeline
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-18
 - **Related:** ADR-000, ADR-028, ADR-030, ADR-036, ADR-039, ADR-045, ADR-050, ADR-051, ADR-059, ADR-066, ADR-067, ADR-071, ADR-075, ADR-076
 
