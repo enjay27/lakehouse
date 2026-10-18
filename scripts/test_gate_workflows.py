@@ -293,6 +293,76 @@ class RebuildReplica(unittest.TestCase):
                         self.assertNotIn("rebuild-replica", step.get("run", ""), name)
 
 
+class DatahubRecovery(unittest.TestCase):
+    """check-datahub-recovery runs in a smoke job of its own, on its own kind cluster, after
+    smoke's set-up, the same install and check-datahub, on every smoke run (ADR-075)."""
+
+    def setUp(self):
+        self.jobs = read_workflow(os.path.join(WORKFLOWS, "smoke.yml"))["jobs"]
+        self.smoke = self.jobs["smoke"]
+        self.job = self.jobs.get("datahub-recovery") or {"steps": []}
+
+    @staticmethod
+    def _install(steps):
+        return next((i for i, s in enumerate(steps) if "gate.py install" in s.get("run", "")),
+                    len(steps))
+
+    def test_it_runs_beside_smoke_on_a_runner_of_its_own_for_40_minutes(self):
+        self.assertIn("datahub-recovery", self.jobs)
+        for key in ("runs-on", "env", "permissions"):
+            with self.subTest(key=key):
+                self.assertEqual(self.job.get(key), self.smoke.get(key))
+        self.assertEqual(self.job.get("permissions"), {"contents": "read"})
+        self.assertEqual(self.job.get("timeout-minutes"), "40")
+        self.assertNotIn("needs", self.job)
+
+    def test_both_jobs_run_on_every_trigger(self):
+        for name in ("smoke", "datahub-recovery"):
+            with self.subTest(job=name):
+                self.assertIn(name, self.jobs)
+                self.assertNotIn("if", self.jobs[name])
+
+    def test_its_set_up_and_install_are_smokes(self):
+        # The console's image among them, never blocking, so the install is the same (ADR-075 §1).
+        smoke, ours = self.smoke["steps"], self.job["steps"]
+        install = self._install(smoke)
+        self.assertEqual(ours[:install + 1], smoke[:install + 1])
+        self.assertTrue(any("console-image --load" in s.get("run", "")
+                            and s.get("continue-on-error") == "true" for s in ours[:install]))
+
+    def test_after_the_install_check_datahub_then_the_recovery_then_the_state_on_failure(self):
+        steps = self.job["steps"]
+        after = steps[self._install(steps) + 1:]
+        self.assertEqual(len(after), 3)
+        check, recovery, state = after
+        self.assertIn("python3 gates/gate.py check-datahub |", check["run"])
+        self.assertIn("python3 gates/gate.py check-datahub-recovery |", recovery["run"])
+        self.assertEqual(state.get("if"), "failure()")
+        for line in state["run"].splitlines():
+            if " -n " in line:
+                with self.subTest(line=line):
+                    self.assertIn('-n "$NS_CATALOG_DATAHUB"', line)
+
+    def test_only_this_job_runs_the_recovery(self):
+        for name, workflow in workflows().items():
+            for job_name, job in (workflow.get("jobs") or {}).items():
+                if (name, job_name) == ("smoke.yml", "datahub-recovery"):
+                    continue
+                for step in job.get("steps") or []:
+                    with self.subTest(workflow=name, job=job_name):
+                        self.assertNotIn("check-datahub-recovery", step.get("run", ""))
+
+    def test_smoke_still_runs_check_datahub(self):
+        self.assertTrue(any("python3 gates/gate.py check-datahub |" in s.get("run", "")
+                            for s in self.smoke["steps"]))
+
+    def test_main_status_is_given_success_only_when_both_jobs_succeeded(self):
+        self.assertEqual(self.jobs["main-status"]["with"]["result"],
+                         "${{ (needs.smoke.result == 'success' && "
+                         "needs.datahub-recovery.result == 'success') && 'success' || "
+                         "(contains(needs.*.result, 'failure') && 'failure' || 'cancelled') }}")
+
+
 class Stress(unittest.TestCase):
     """stress.yml runs only when Kade starts it, never on a push or in the release gate
     (ADR-054 §1); it builds the gate as smoke does, in direct mode (ADR-053 §4)."""
