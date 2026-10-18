@@ -46,7 +46,7 @@ flowchart LR
 | [000](000-adr-process-and-template.md) | ADR process and template | Amended by ADR-052 |
 | [001](001-the-repository-starts-from-its-decision-records.md) | The repository starts from its decision records; code enters only under an Accepted ADR | Accepted |
 | [002](002-the-repository-is-public-and-configuration-lives-in-env.md) | The repository is public; environment-specific configuration lives in `.env` | Accepted |
-| [003](003-state-lives-in-labelled-issues-and-the-pr-is-the-session-record.md) | State lives in labelled issues of this repository; the PR is the session record | Accepted |
+| [003](003-state-lives-in-labelled-issues-and-the-pr-is-the-session-record.md) | State lives in labelled issues of this repository; the PR is the session record | Amended by ADR-073 |
 | **Environments and credentials** | | |
 | [004](004-the-platform-targets-linux-only.md) | The platform targets Linux only; releases are proven on the Linux gate; target clusters are never reached | Accepted |
 | [005](005-the-suite-runs-in-three-environments-with-guards.md) | The suite runs in three environments, each with its own guards | Accepted |
@@ -90,7 +90,7 @@ flowchart LR
 | [039](039-a-platform-pr-merges-only-when-passing-dry-run-and-smoke-gates-cover-its-head.md) | A platform PR merges only when passing dry-run and smoke gates cover its head | Amended by ADR-040 |
 | [040](040-log-batch-fixtures-come-from-a-real-utc-roll-and-a-log-batch-gate-ships-them-into-an-opensearch-stand-in.md) | Log batch fixtures come from a real UTC roll; a Log Batch Gate ships them into an OpenSearch stand-in | Amended by ADR-041 |
 | [041](041-the-log-batch-gate-creates-fixtures-only-when-no-unexpired-artifact-holds-their-spec-hash.md) | The Log Batch Gate creates fixtures only when no unexpired artifact holds their spec hash | Accepted |
-| [042](042-the-release-workflow-pushes-the-log-batchs-image-to-ghcr-and-clusters-pull-it-from-a-registry-named-in-env.md) | The release workflow pushes the log batch's image to GHCR; clusters pull it from a registry named in `.env` | Accepted |
+| [042](042-the-release-workflow-pushes-the-log-batchs-image-to-ghcr-and-clusters-pull-it-from-a-registry-named-in-env.md) | The release workflow pushes the log batch's image to GHCR; clusters pull it from a registry named in `.env` | Amended by ADR-074 |
 | [043](043-every-postgresql-backs-up-to-s3-through-the-barman-cloud-plugin-which-the-operator-team-installs.md) | Every PostgreSQL backs up to S3 through the Barman Cloud Plugin, which the operator team installs | Amended by ADR-060 |
 | [044](044-ingress-is-denied-by-default-allowed-per-caller-and-proven-on-the-gate.md) | Ingress is denied by default and allowed per caller; Polaris's policies are a chart, proven on the gate | Superseded by ADR-048 |
 | [045](045-the-cnpg-operator-and-its-backup-plugin-are-the-operator-teams-and-a-release-installs-in-a-fixed-order.md) | The CNPG operator and its backup plugin are the operator team's; a release installs in a fixed order | Accepted |
@@ -121,8 +121,8 @@ flowchart LR
 | [070](070-datahubs-opensearch-is-one-node-from-upstreams-chart-unchanged-with-its-security-plugin-off-reached-only-by-datahubs-labelled-pods.md) | Datahub's OpenSearch is one node from upstream's chart, unchanged, with its security plugin off, reached only by Datahub's labelled pods | Accepted |
 | [071](071-datahub-runs-from-upstreams-chart-unchanged-gms-with-its-consumers-the-frontend-and-system-update-on-its-three-stores-with-credentials-from-init-env.md) | Datahub runs from upstream's chart, unchanged: GMS with its consumers, the frontend and system-update on its three stores, with credentials from init-env | Amended by ADR-072 |
 | [072](072-datahubs-chart-gets-one-patched-line-so-gms-runs-by-digest-and-three-of-adr-071s-details-follow-the-chart-as-it-is.md) | Datahub's chart gets one patched line so GMS runs by digest, and three of ADR-071's details follow the chart as it is | Accepted |
-| [073](073-state-moves-to-a-project-of-the-kade-k8s-platform-organization-fed-by-this-repositorys-own-bridge-labels-become-requests.md) | State moves to a Project of the kade-k8s-platform organization, fed by this repository's own bridge; labels become requests | Proposed |
-| [074](074-the-log-batchs-image-moves-with-the-repository-to-ghcr-io-kade-k8s-platform-lakehouse.md) | The log batch's image moves with the repository, to `ghcr.io/kade-k8s-platform/lakehouse` | Proposed |
+| [073](073-state-moves-to-a-project-of-the-kade-k8s-platform-organization-fed-by-this-repositorys-own-bridge-labels-become-requests.md) | State moves to a Project of the kade-k8s-platform organization, fed by this repository's own bridge; labels become requests | Accepted |
+| [074](074-the-log-batchs-image-moves-with-the-repository-to-ghcr-io-kade-k8s-platform-lakehouse.md) | The log batch's image moves with the repository, to `ghcr.io/kade-k8s-platform/lakehouse` | Accepted |
 
 ## Not ADRs
 
