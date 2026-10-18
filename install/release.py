@@ -32,8 +32,10 @@
       asynchronous, waited on as polaris-pg is. Its backups go to `DATAHUB_BACKUP_BUCKET` on
       `S3_ENDPOINT` with the key in `datahub-backup-s3`.
    h. Datahub's Kafka: the StatefulSet datahub-kafka from charts/datahub-kafka (ADR-068), one
-      KRaft broker, waited on until rolled out and ready. OpenSearch and Datahub itself follow
-      here when their charts enter (ADR-025).
+      KRaft broker, waited on until rolled out and ready.
+   i. Datahub's OpenSearch: the StatefulSet datahub-opensearch from upstream's chart in
+      charts/datahub-opensearch with its values-lakehouse.yaml (ADR-070), one node, waited on
+      until rolled out and ready. Datahub itself follows here when its chart enters (ADR-025).
 2. After every service of step 1 (ADR-029, ADR-037):
    a. The log batch (ADR-036): charts/polaris-log-batch with the image built from this
       checkout (batch_image), pulled from `IMAGE_REGISTRY` or, when it is empty, the GitHub
@@ -440,6 +442,32 @@ def datahub_kafka(env, run, dry_run=False):
                 "(ADR-068)."]
 
 
+def datahub_opensearch(env, run, dry_run=False):
+    """Step 1, Datahub's OpenSearch, after datahub-kafka (ADR-070 §4): upstream's chart with our
+    values, nothing from `.env` but the namespace, then its StatefulSet waited on until rolled
+    out and ready. Returns (problems, notes)."""
+    namespace = env.get("NS_CATALOG_DATAHUB", "")
+    if not namespace:
+        return ["NS_CATALOG_DATAHUB is empty: set Datahub's namespace in .env (ADR-007)"], []
+    context = env["KUBE_CONTEXT"]
+    helm = ["helm", "--kube-context", context, "-n", namespace, "upgrade", "--install",
+            DATAHUB_OPENSEARCH_RELEASE, DATAHUB_OPENSEARCH_CHART, "-f", DATAHUB_OPENSEARCH_VALUES]
+    code, out = run(helm + (["--dry-run=server"] if dry_run else []))
+    if code != 0:
+        return [f"helm upgrade {DATAHUB_OPENSEARCH_RELEASE} in {namespace} failed: "
+                f"{out.strip()}"], []
+    if dry_run:
+        return [], [f"Step 1: StatefulSet {DATAHUB_OPENSEARCH} in {namespace}, server-side "
+                    "dry-run passed."]
+    code, out = run(["kubectl", "--context", context, "-n", namespace, "rollout", "status",
+                     f"statefulset/{DATAHUB_OPENSEARCH}", f"--timeout={READY_TIMEOUT}"])
+    if code != 0:
+        return [f"StatefulSet {DATAHUB_OPENSEARCH} in {namespace} is not ready: "
+                f"{out.strip()}"], []
+    return [], [f"Step 1: StatefulSet {DATAHUB_OPENSEARCH} in {namespace} is rolled out and "
+                "ready (ADR-070)."]
+
+
 def postgres(env, run, pg, dry_run=False):
     """Step 1, one service's PostgreSQL `pg`. Returns (problems, notes); no call without a
     namespace or the backups' endpoint and bucket."""
@@ -815,6 +843,7 @@ def install(env, run, supported, dry_run):
                  lambda: datahub_network_policies(env, run, dry_run),
                  lambda: datahub_postgres(env, run, dry_run),
                  lambda: datahub_kafka(env, run, dry_run),
+                 lambda: datahub_opensearch(env, run, dry_run),
                  lambda: log_batch(env, run, dry_run)):
         problems, more = step()
         notes += more
