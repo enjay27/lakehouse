@@ -122,6 +122,23 @@
                   the frontend signs in `datahub` with the password in datahub-root-user and
                   refuses `datahub:datahub`. Each credential is read from its Secret and sent
                   on the pod's stdin, never printed or put on a command line.
+  check-datahub-ingestion
+                  one ingestion of a Polaris catalog into Datahub (ADR-076 §6), every pod in
+                  Datahub's namespace, never with the check label: gates/datahub/check.py
+                  `seed`, as root, creates gate_ingest_catalog on the S3 endpoint as the smoke
+                  tests create theirs, its namespace `ingest` and two tables, one with a nested
+                  struct column, keeping what is there; then a Job from the ingestion CronJob
+                  (`kubectl create job --from`), waited on until it completes within
+                  INGESTION_TIMEOUT s, its `catalog` lines and time printed, its log on failure;
+                  then `ingested`, from a pod with GMS's client label as the system client:
+                  both datasets by the URNs the source makes with the catalog as platform
+                  instance, their fields, nested ones included, and their container; then
+                  `refused`, from an unlabelled pod mounting datahub-polaris-principal:
+                  datahub_ingest is refused a namespace create and a load with vended
+                  credentials, and allowed the same load without them; then `clean`
+                  hard-deletes the datasets and the container, whatever failed after the Job
+                  was created. The catalog stays. Credentials are read from their Secrets and
+                  sent on stdin, never printed or put on a command line.
   check-datahub-recovery
                   on the gate's own context only, since it deletes volumes (ADR-071 §8,
                   ADR-004): check.py's steps write a dataset and find it by search; then
@@ -210,7 +227,7 @@
 Every kubectl and helm call names the gate's context, and a namespace where the object has
 one. Nothing here reaches any cluster but the kind cluster it creates (ADR-017).
 
-Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | install --datahub-only | seed | check-migration | rebuild-replica | check-polaris-pg | check-datahub-pg | check-datahub-kafka | check-datahub-opensearch | check-datahub | check-datahub-recovery | check-polaris | console-image [--build|--load] | batch-image | check-logs | check-console | check-iceberg | check-restore | gate-policies | check-network | check-metrics
+Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | install --datahub-only | seed | check-migration | rebuild-replica | check-polaris-pg | check-datahub-pg | check-datahub-kafka | check-datahub-opensearch | check-datahub | check-datahub-ingestion | check-datahub-recovery | check-polaris | console-image [--build|--load] | batch-image | check-logs | check-console | check-iceberg | check-restore | gate-policies | check-network | check-metrics
 """
 
 import base64
@@ -287,6 +304,8 @@ POLARIS_API_PORT, POLARIS_MGMT_PORT = 8181, 8182
 CHECK_POD_LABEL = f"--labels={network.CHECK_LABEL}=true"
 # The catalog the smoke tests create and the gate's policy names (gates/opa/policy.rego).
 ICEBERG_CATALOG = "gate_catalog"
+# The catalog Datahub ingests on the gate (ADR-076 §6), named in the gate's .env.
+INGEST_CATALOG = "gate_ingest_catalog"
 # ReadWriteMany on kind for the log claim (ADR-036): one runner directory mounted into every
 # node (gates/kind.yaml), offered by kind's local-path-provisioner as the class `shared`
 # through its sharedFileSystemPath. A stand-in, never released (ADR-031).
@@ -499,6 +518,7 @@ def gate_env(template_text, gen=init_env.generate, direct=False):
     fixed = {"KUBE_CONTEXT": CONTEXT, **standin_endpoints(template["NS_STANDINS"], direct),
              **console_settings(template["NS_CATALOG_POLARIS"]),
              "POLARIS_LOGS_STORAGE_CLASS": SHARED_CLASS, "POLARIS_LOGS_SIZE": GATE_LOGS_SIZE,
+             "DATAHUB_INGEST_POLARIS_CATALOGS": INGEST_CATALOG,
              **network.GATE_CALLER_LABELS}
     lines = []
     for line in template_text.splitlines():
@@ -1780,15 +1800,24 @@ def root_password(user_props):
     return password if user == "datahub" and sep and password else None
 
 
-def datahub_check_command(namespace, image, name, args, labels=None):
+def datahub_check_command(namespace, image, name, args, labels=None, secret_env=None):
     """A short-lived pod in `namespace` running gates/datahub/check.py with `args`, its
-    credential on stdin; with `labels` if given, never the check label."""
+    credential on stdin; with `labels` if given, never the check label; with `secret_env`,
+    {variable: (Secret, key)}, those variables from the Secret mounted in the pod."""
     with open(DATAHUB_CHECK, encoding="utf-8") as f:
         script = f.read()
     flags = [f"--labels={','.join(f'{k}={v}' for k, v in labels.items())}"] if labels else []
+    overrides = []
+    if secret_env:
+        container = {"name": name, "image": image, "stdin": True, "stdinOnce": True, "env": [
+            {"name": var, "valueFrom": {"secretKeyRef": {"name": secret, "key": key}}}
+            for var, (secret, key) in secret_env.items()]}
+        overrides = ["--override-type=strategic", "--overrides",
+                     json.dumps({"spec": {"containers": [container]}})]
     return ["kubectl", "--context", CONTEXT, "-n", namespace, "run", name, *flags,
             f"--image={image}", "--restart=Never", "--rm", "-i", "--quiet",
-            "--pod-running-timeout=3m", "--command", "--", "python3", "-c", script, *args]
+            "--pod-running-timeout=3m", *overrides, "--command", "--", "python3", "-c", script,
+            *args]
 
 
 def datahub_lines(text):
@@ -1837,11 +1866,12 @@ def check_datahub(env, pins):
     return problems, notes
 
 
-def datahub_pod(namespace, image, name, args, labels, credential, masked):
+def datahub_pod(namespace, image, name, args, labels, credential, masked, secret_env=None):
     """check.py with `args` in a pod of its own, `credential` on its stdin. Returns (problems,
     notes); a pod that failed without a line of its own is a problem, every value of `masked`
     redacted."""
-    done = subprocess.run(datahub_check_command(namespace, image, name, args, labels),
+    done = subprocess.run(datahub_check_command(namespace, image, name, args, labels,
+                                                secret_env),
                           input=credential + "\n", capture_output=True, text=True, check=False)
     found, ok = datahub_lines(done.stdout)
     if done.returncode and not found:
@@ -1850,6 +1880,98 @@ def datahub_pod(namespace, image, name, args, labels, credential, masked):
             said = said.replace(value, "<redacted>")
         found = [f"pod {name} in {namespace} exited {done.returncode}: {said}"]
     return found, ok
+
+
+# check-datahub-ingestion (ADR-076 §6): the CronJob a Job is created from, and the time it has
+# to complete, its image pull included.
+INGESTION_CRONJOB = (f"{release.DATAHUB_RELEASE}-datahub-ingestion-cron-"
+                     f"{release.INGESTION_CRON}")
+INGESTION_TIMEOUT = 900
+INGESTION_LOG_TAIL = 80
+
+
+def _seconds_between(start, end):
+    return int((_moment(end) - _moment(start)).total_seconds())
+
+
+def run_ingestion_job(namespace, name, masked, sleep, clock):
+    """A Job from the ingestion CronJob, waited on. Returns (problems, notes); the log's
+    `catalog` lines on success, its tail on failure, every value of `masked` redacted."""
+    kubectl = ["kubectl", "--context", CONTEXT, "-n", namespace]
+    output(kubectl + ["create", "job", f"--from=cronjob/{INGESTION_CRONJOB}", name])
+    end, state, job = clock() + INGESTION_TIMEOUT, None, {}
+    while True:
+        job = json.loads(output(kubectl + ["get", "job", name, "-o", "json"]))
+        state = job_finished(job)
+        if state or clock() >= end:
+            break
+        sleep(5)
+    done = subprocess.run(kubectl + ["logs", f"job/{name}", "--tail=-1"], capture_output=True,
+                          text=True, check=False)
+    log = done.stdout if done.returncode == 0 else f"(no log: {done.stderr.strip()})"
+    for value in masked:
+        log = log.replace(value, "<redacted>")
+    if state != "succeeded":
+        what = state or f"not finished within {INGESTION_TIMEOUT} s"
+        tail = "\n".join(log.strip().splitlines()[-INGESTION_LOG_TAIL:])
+        return [f"Job {name} from cronjob/{INGESTION_CRONJOB} {what}; its log:\n{tail}"], []
+    status = job.get("status", {})
+    took = ""
+    if status.get("startTime") and status.get("completionTime"):
+        took = f" in {_seconds_between(status['startTime'], status['completionTime'])} s"
+    notes = [f"Job {name} from cronjob/{INGESTION_CRONJOB} completed{took}."]
+    notes += [line.strip() for line in log.splitlines()
+              if line.startswith("catalog ") or "Pipeline finished" in line]
+    return [], notes
+
+
+def check_datahub_ingestion(env, pins, sleep=time.sleep, clock=time.monotonic):
+    """ADR-076 §6: see the module's docstring. Returns (problems, notes)."""
+    ns, polaris_ns, pid = env["NS_CATALOG_DATAHUB"], env["NS_CATALOG_POLARIS"], os.getpid()
+
+    def secret(namespace, name):
+        return json.loads(output(["kubectl", "--context", CONTEXT, "-n", namespace, "get",
+                                  "secret", name, "-o", "json"]))
+    root = secret(polaris_ns, release.POLARIS_ROOT_SECRET)
+    root_id, root_secret = secret_value(root, "clientId"), secret_value(root, "clientSecret")
+    system = secret_value(secret(ns, "datahub-auth-secrets"), "system_client_secret")
+    principal = secret(ns, release.DATAHUB_PRINCIPAL_SECRET)
+    masked = (root_id, root_secret, system, secret_value(principal, "clientId"),
+              secret_value(principal, "clientSecret"))
+    image = smoke_python_image(pins)
+    polaris = (f"http://{release.POLARIS}.{polaris_ns}.svc.cluster.local:"
+               f"{release.POLARIS_API_PORT}")
+    gms, _ = datahub_urls(ns)
+    gms_client = {release.DATAHUB_GMS_CLIENT_LABEL: "true"}
+    realm = release.POLARIS_REALM
+
+    problems, notes = datahub_pod(
+        ns, image, f"check-ingest-seed-{pid}",
+        ["seed", polaris, realm, INGEST_CATALOG, env["S3_ENDPOINT"], env["S3_REGION"],
+         env["POLARIS_WAREHOUSE_BUCKET"]], None, f"{root_id}:{root_secret}", masked)
+    if problems:
+        return problems, notes
+    try:
+        found, ok = run_ingestion_job(ns, f"check-ingest-{pid}", masked, sleep, clock)
+        problems += found
+        notes += ok
+        pods = [] if found else [(f"check-ingest-read-{pid}", ["ingested", gms, INGEST_CATALOG],
+                                  gms_client, system, None)]
+        pods.append((f"check-ingest-refused-{pid}", ["refused", polaris, realm, INGEST_CATALOG],
+                     None, "", {"CLIENT_ID": (release.DATAHUB_PRINCIPAL_SECRET, "clientId"),
+                                "CLIENT_SECRET": (release.DATAHUB_PRINCIPAL_SECRET,
+                                                  "clientSecret")}))
+        for name, args, labels, credential, secret_env in pods:
+            found, ok = datahub_pod(ns, image, name, args, labels, credential, masked,
+                                    secret_env)
+            problems += found
+            notes += ok
+    finally:
+        found, ok = datahub_pod(ns, image, f"check-ingest-clean-{pid}",
+                                ["clean", gms, INGEST_CATALOG], gms_client, system, masked)
+        problems += found
+        notes += ok
+    return problems, notes
 
 
 # check-datahub-recovery (ADR-071 §8): the index a dataset's search reads, an index or an alias;
@@ -3006,6 +3128,11 @@ def main(argv):
         return 1 if problems else 0
     if argv[1:] == ["check-datahub"]:
         problems, notes = check_datahub(release.load_env(ROOT, os.environ), pins)
+        for line in notes + problems:
+            print(line, flush=True)
+        return 1 if problems else 0
+    if argv[1:] == ["check-datahub-ingestion"]:
+        problems, notes = check_datahub_ingestion(release.load_env(ROOT, os.environ), pins)
         for line in notes + problems:
             print(line, flush=True)
         return 1 if problems else 0
