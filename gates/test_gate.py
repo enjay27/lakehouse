@@ -2193,7 +2193,10 @@ FAKE_KAFKA_TOOLS = {
     "kafka-topics.sh": 'echo "topics $*" >> "$FAKE_KAFKA/log"\n',
     "kafka-console-producer.sh": 'echo "producer $*" >> "$FAKE_KAFKA/log"\n'
                                  'cat > "$FAKE_KAFKA/topic"\n',
+    # As the real one on the gate (smoke run 39103796549): a line of its own on stdout besides
+    # the message.
     "kafka-console-consumer.sh": 'echo "consumer $*" >> "$FAKE_KAFKA/log"\n'
+                                 'echo "[2026-10-18 06:29:58,000] WARN a line of the tool"\n'
                                  'cat "$FAKE_KAFKA/topic"\n',
 }
 
