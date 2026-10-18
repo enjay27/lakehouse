@@ -295,12 +295,12 @@ def check_plugin(base, namespace, run):
                 f"(Service {service['metadata']['name']})."]
 
 
-def network_policy_values(env):
-    """charts/polaris-network-policies's values from `.env` (ADR-048 §2). Returns (values,
-    problems, empty): a caller class whose variable is empty is left out, and named in
-    `empty`; anything but `key=value` is a problem. The chart's schema checks the rest."""
+def caller_labels(env, caller_vars):
+    """{class: {key, value}} from `.env`'s namespace label per caller class (ADR-048 §2).
+    Returns (callers, problems, empty): a caller class whose variable is empty is left out, and
+    named in `empty`; anything but `key=value` is a problem. A chart's schema checks the rest."""
     callers, problems, empty = {}, [], []
-    for name, var in CALLER_VARS.items():
+    for name, var in caller_vars.items():
         text = env.get(var, "").strip()
         if not text:
             empty.append(var)
@@ -310,6 +310,13 @@ def network_policy_values(env):
             problems.append(f"{var} must be one namespace label, key=value (ADR-048)")
             continue
         callers[name] = {"key": key, "value": value}
+    return callers, problems, empty
+
+
+def network_policy_values(env):
+    """charts/polaris-network-policies's values from `.env` (ADR-048 §2). Returns (values,
+    problems, empty), as caller_labels does."""
+    callers, problems, empty = caller_labels(env, CALLER_VARS)
     problems += [f"{var} is empty: the network policies select that namespace by name "
                  "(ADR-048)" for var in ("NS_CATALOG_DATAHUB", "NS_CNPG_SYSTEM")
                  if not env.get(var)]
