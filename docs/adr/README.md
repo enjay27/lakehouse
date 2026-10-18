@@ -118,7 +118,7 @@ flowchart LR
 | [067](067-datahubs-namespace-reaches-the-gates-s3-stand-in-on-its-s3-port-only.md) | Datahub's namespace reaches the gate's S3 stand-in on its S3 port only | Accepted |
 | [068](068-datahubs-kafka-is-one-plaintext-kraft-broker-in-a-chart-of-its-own-reached-only-by-datahubs-labelled-pods.md) | Datahub's Kafka is one plaintext KRaft broker in a chart of its own, reached only by Datahub's labelled pods | Amended by ADR-069 |
 | [069](069-datahubs-kafka-names-its-controller-as-a-static-voter-as-the-apache-kafka-image-requires.md) | Datahub's Kafka names its controller as a static voter, as the apache/kafka image requires | Accepted |
-| [070](070-datahubs-opensearch-is-one-node-from-upstreams-chart-unchanged-with-its-security-plugin-off-reached-only-by-datahubs-labelled-pods.md) | Datahub's OpenSearch is one node from upstream's chart, unchanged, with its security plugin off, reached only by Datahub's labelled pods | Proposed |
+| [070](070-datahubs-opensearch-is-one-node-from-upstreams-chart-unchanged-with-its-security-plugin-off-reached-only-by-datahubs-labelled-pods.md) | Datahub's OpenSearch is one node from upstream's chart, unchanged, with its security plugin off, reached only by Datahub's labelled pods | Accepted |
 
 ## Not ADRs
 
