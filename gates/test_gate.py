@@ -78,6 +78,19 @@ class Pins(unittest.TestCase):
             f"/{version}-standalone-strict/networkpolicy-networking-v1.json"))
         self.assertTrue(pin["source"])
 
+    def test_the_statefulset_and_service_schemas_are_pinned_beside_the_network_policys(self):
+        # ADR-068 §1, ADR-016: kubeconform validates charts/datahub-kafka's StatefulSet and
+        # Service in the static gate, from the same commit and Kubernetes version.
+        schemas = gate.load_pins(os.path.join(HERE, "pins.json"))["kubernetes_schemas"]
+        commit_dir = schemas["networkpolicy"]["url"].rsplit("/", 1)[0]
+        for name, file in (("statefulset", "statefulset-apps-v1.json"),
+                           ("service", "service-v1.json")):
+            with self.subTest(schema=name):
+                pin = schemas[name]
+                self.assertEqual(pin["url"], f"{commit_dir}/{file}")
+                self.assertRegex(pin["sha256"], r"^[0-9a-f]{64}$")
+                self.assertTrue(pin["source"])
+
     def test_the_operator_pin_is_supported_by_the_install_script(self):
         pins = gate.load_pins(os.path.join(HERE, "pins.json"))
         with open(os.path.join(HERE, "..", "install", "supported.json"), encoding="utf-8") as f:
@@ -2170,6 +2183,172 @@ class CheckDatahubPg(unittest.TestCase):
 
     def test_it_is_a_command_of_the_gate(self):
         self.assertIn("| check-datahub-pg |", gate.__doc__.strip().splitlines()[-1])
+
+
+
+KAFKA_IMAGE = "apache/kafka:4.3.1@sha256:" + "e" * 64
+# Stand-ins for Kafka's tools, for KAFKA_CHECK: each logs its arguments; the producer keeps what
+# it reads, the consumer prints it back.
+FAKE_KAFKA_TOOLS = {
+    "kafka-topics.sh": 'echo "topics $*" >> "$FAKE_KAFKA/log"\n',
+    "kafka-console-producer.sh": 'echo "producer $*" >> "$FAKE_KAFKA/log"\n'
+                                 'cat > "$FAKE_KAFKA/topic"\n',
+    # As the real one on the gate (smoke run 39103796549): a line of its own on stdout besides
+    # the message.
+    "kafka-console-consumer.sh": 'echo "consumer $*" >> "$FAKE_KAFKA/log"\n'
+                                 'echo "[2026-10-18 06:29:58,000] WARN a line of the tool"\n'
+                                 'cat "$FAKE_KAFKA/topic"\n',
+}
+
+
+def kafka_pods(*pods):
+    """A pod list of datahub-kafka: (uid, ready) per pod."""
+    return {"items": [{"metadata": {"name": "datahub-kafka-0", "uid": uid},
+                       "status": {"conditions": [{"type": "Ready",
+                                                  "status": "True" if ready else "False"}]}}
+                      for uid, ready in pods]}
+
+
+class CheckDatahubKafka(unittest.TestCase):
+    """ADR-068 §5: from a pod with Kafka's client label, a 4.5 MiB message produced and consumed
+    back unchanged; the broker's pod deleted and back ready with the message on its volume."""
+
+    def test_the_check_pod_carries_kafkas_client_label_and_never_the_check_label(self):
+        pod = gate.kafka_check_pod("catalog-datahub", KAFKA_IMAGE, "datahub-kafka-check-1")
+        self.assertEqual(pod["metadata"]["namespace"], "catalog-datahub")
+        labels = pod["metadata"]["labels"]
+        self.assertEqual(labels[gate.release.DATAHUB_KAFKA_CLIENT_LABEL], "true")
+        self.assertNotIn(gate.network.CHECK_LABEL, labels)
+        (container,) = pod["spec"]["containers"]
+        # The chart's own image, from its helm release.
+        self.assertEqual(container["image"], KAFKA_IMAGE)
+        self.assertEqual(container["command"][0], "sleep")
+        self.assertEqual(pod["spec"]["restartPolicy"], "Never")
+        self.assertFalse(pod["spec"]["enableServiceLinks"])
+
+    def test_the_tools_reach_the_broker_through_its_service(self):
+        self.assertEqual(gate.kafka_bootstrap("catalog-datahub"),
+                         "datahub-kafka.catalog-datahub.svc.cluster.local:9092")
+        self.assertEqual(gate.kafka_exec("catalog-datahub", "p", "write", "t"), [
+            "kubectl", "--context", gate.CONTEXT, "-n", "catalog-datahub", "exec", "-i", "p",
+            "--", "bash", "-s", "--", "write",
+            "datahub-kafka.catalog-datahub.svc.cluster.local:9092", "t"])
+
+    def script(self, *args):
+        """Runs KAFKA_CHECK with FAKE_KAFKA_TOOLS; returns (stdouts, the tools' log)."""
+        with tempfile.TemporaryDirectory() as fake:
+            for name, body in FAKE_KAFKA_TOOLS.items():
+                path = os.path.join(fake, name)
+                with open(path, "w", encoding="utf-8", newline="\n") as f:
+                    f.write("#!/bin/bash\n" + body)
+                os.chmod(path, 0o755)
+            env = {**os.environ, "KAFKA_BIN": fake, "FAKE_KAFKA": fake}
+            outs = [subprocess.run(["bash", "-s", "--", step, "b:9092", "gate-check-1"],
+                                   input=gate.KAFKA_CHECK, env=env, capture_output=True,
+                                   text=True, check=True).stdout for step in args]
+            with open(os.path.join(fake, "log"), encoding="utf-8") as f:
+                return outs, f.read().splitlines()
+
+    def test_the_script_sends_4_5_mib_and_reads_the_same_bytes_back(self):
+        (write, read), log = self.script("write", "read")
+        sent, received = gate.kafka_lines(write)["sent"], gate.kafka_lines(read)["received"]
+        self.assertEqual(sent, received)
+        size = int(sent[1])
+        self.assertGreater(size, 4.5 * 1024 * 1024)
+        # Below Datahub's 5 MiB and the broker's message.max.bytes (ADR-068 §2).
+        self.assertLess(size, 5 * 1024 * 1024)
+        topics, producer, consumer = log
+        self.assertIn("--create --topic gate-check-1 --partitions 1 --replication-factor 1",
+                      topics)
+        # The broker's message.max.bytes is what is proven: the topic sets none of its own.
+        self.assertNotIn("max.message.bytes", topics)
+        self.assertIn("--producer-property max.request.size=5242880", producer)
+        self.assertIn("--from-beginning --max-messages 1", consumer)
+        self.assertIn("--bootstrap-server b:9092", consumer)
+
+    def test_the_script_deletes_the_topic(self):
+        (out,), log = self.script("delete")
+        self.assertEqual(out.strip(), "deleted")
+        self.assertEqual(log, ["topics --bootstrap-server b:9092 --delete --topic gate-check-1"])
+
+    def test_the_broker_is_back_when_a_new_pod_is_ready(self):
+        back = gate.broker_back({"old"})
+        self.assertIsNone(back(kafka_pods()))
+        self.assertIsNone(back(kafka_pods(("old", True))))
+        self.assertIsNone(back(kafka_pods(("new", False))))
+        self.assertEqual(back(kafka_pods(("new", True))), "datahub-kafka-0")
+
+    def fake_cluster(self, sent=("abc", "4718612"), reads=(("abc", "4718612"),) * 2):
+        """gate.output answering each call of check_datahub_kafka; records them in order."""
+        calls, reads = [], list(reads)
+
+        def fake_output(argv, stdin=None):
+            calls.append(argv)
+            if argv[0] == "helm":
+                return json.dumps({"image": KAFKA_IMAGE})
+            if "exec" in argv:
+                self.assertEqual(stdin, gate.KAFKA_CHECK)
+                step = argv[argv.index("-s") + 2]
+                if step == "write":
+                    return f"sent {sent[0]} {sent[1]}\n"
+                if step == "read":
+                    sha, size = reads.pop(0)
+                    return f"received {sha} {size}\n"
+                return "deleted\n"
+            if "get" in argv:
+                return json.dumps(kafka_pods(("old", True)))
+            return ""
+        return calls, fake_output
+
+    def check(self, fake_output, wait=("datahub-kafka-0",)):
+        env = {"NS_CATALOG_DATAHUB": "catalog-datahub"}
+        with mock.patch.object(gate, "output", side_effect=fake_output), \
+                mock.patch.object(gate, "run") as run, \
+                mock.patch.object(gate, "wait_for", side_effect=list(wait)) as wait_for, \
+                mock.patch.object(gate.subprocess, "run") as cleanup:
+            problems, notes = gate.check_datahub_kafka(env)
+        return problems, notes, run, wait_for, cleanup
+
+    def test_round_trip_then_restart_then_read_again_then_delete(self):
+        calls, fake_output = self.fake_cluster()
+        problems, notes, run, wait_for, cleanup = self.check(fake_output)
+        self.assertEqual(problems, [])
+        # The check pod from the chart's image, in Datahub's namespace.
+        (apply_call,) = run.call_args_list
+        self.assertIn("apply", apply_call.args[0])
+        self.assertEqual(json.loads(apply_call.args[1])["spec"]["containers"][0]["image"],
+                         KAFKA_IMAGE)
+        steps = [c[c.index("-s") + 2] if "exec" in c else
+                 "delete-broker" if "delete" in c else None for c in calls]
+        self.assertEqual([s for s in steps if s], ["write", "read", "delete-broker", "read",
+                                                    "delete"])
+        (delete,) = [c for c in calls if "delete" in c and "exec" not in c]
+        self.assertIn("pod/datahub-kafka-0", delete)
+        self.assertEqual(wait_for.call_count, 1)
+        # The check pod is deleted whatever happened.
+        self.assertIn("delete", cleanup.call_args.args[0])
+        self.assertEqual(len(notes), 3)
+        self.assertIn("4718612 bytes", notes[0])
+        self.assertIn("datahub-kafka-0", notes[1])
+        self.assertIn("deleted", notes[2])
+
+    def test_a_message_changed_on_the_way_is_a_problem_and_nothing_restarts(self):
+        calls, fake_output = self.fake_cluster(reads=(("xyz", "4718612"),))
+        problems, _, _, wait_for, cleanup = self.check(fake_output)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("xyz", problems[0])
+        self.assertFalse(any("pod/datahub-kafka-0" in c for c in calls))
+        self.assertEqual(wait_for.call_count, 0)
+        self.assertTrue(cleanup.called)
+
+    def test_a_message_lost_with_the_restart_is_a_problem(self):
+        _, fake_output = self.fake_cluster(reads=(("abc", "4718612"), ("e3b0", "0")))
+        problems, _, _, _, _ = self.check(fake_output)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("after the restart", problems[0])
+
+    def test_it_is_a_command_of_the_gate(self):
+        self.assertIn("| check-datahub-kafka |", gate.__doc__.strip().splitlines()[-1])
 
 
 if __name__ == "__main__":

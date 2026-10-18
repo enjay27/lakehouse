@@ -90,6 +90,13 @@
                   its own node, then switches WAL on its primary and waits until the segment
                   is archived through the plugin, then takes an on-demand `Backup` and waits
                   until it completes (ADR-066 §5).
+  check-datahub-kafka
+                  from a short-lived pod in Datahub's namespace with Kafka's client label (never
+                  the check label) and the image datahub-kafka's helm release runs: creates a
+                  topic, produces a 4.5 MiB message and consumes it back unchanged; deletes the
+                  broker's pod, waits until a new one is ready, and reads the message again from
+                  its volume; deletes the topic (ADR-068 §5). The check pod is deleted whatever
+                  happened.
   check-polaris   compares the running Polaris (its Deployment, pods and ConfigMap) with the
                   values its helm release was installed with and with `.env`, checks its
                   replicas run on different nodes (ADR-016), then runs gates/check_polaris.sh
@@ -162,7 +169,7 @@
 Every kubectl and helm call names the gate's context, and a namespace where the object has
 one. Nothing here reaches any cluster but the kind cluster it creates (ADR-017).
 
-Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | seed | check-migration | rebuild-replica | check-polaris-pg | check-datahub-pg | check-polaris | console-image [--build|--load] | batch-image | check-logs | check-console | check-iceberg | check-restore | gate-policies | check-network | check-metrics
+Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | seed | check-migration | rebuild-replica | check-polaris-pg | check-datahub-pg | check-datahub-kafka | check-polaris | console-image [--build|--load] | batch-image | check-logs | check-console | check-iceberg | check-restore | gate-policies | check-network | check-metrics
 """
 
 import concurrent.futures
@@ -1402,6 +1409,129 @@ def datahub_pg_problems(values, cluster, pods):
                       f"{spec['affinity']['podAntiAffinityType']}, replication asynchronous."]
 
 
+# check-datahub-kafka (ADR-068 §5): the broker's pods, the time its pod has to come back ready
+# after it is deleted, and the size of the message, above 4.5 MiB and below Datahub's 5 MiB.
+KAFKA_POD_LABELS = f"app.kubernetes.io/name={release.DATAHUB_KAFKA}"
+KAFKA_RESTART_TIMEOUT = 300
+# Run in the check pod with `bash -s -- STEP BOOTSTRAP TOPIC`. `write` creates the topic, with
+# nothing of its own, so the broker's message.max.bytes is what decides, and produces one line;
+# `read` consumes the first message from the beginning and keeps the line that starts with the
+# topic's name; each prints the sha256 and size of what it sent or received. `delete` deletes the topic. KAFKA_BIN is only for the tests.
+KAFKA_CHECK = r"""
+set -euo pipefail
+step=$1 bootstrap=$2 topic=$3
+bin=${KAFKA_BIN:-/opt/kafka/bin}
+cd "$(mktemp -d)"
+case "$step" in
+  write)
+    "$bin/kafka-topics.sh" --bootstrap-server "$bootstrap" --create --topic "$topic" \
+      --partitions 1 --replication-factor 1 >&2
+    { printf '%s-' "$topic"; head -c 4718592 /dev/zero | tr '\000' x; echo; } > sent
+    "$bin/kafka-console-producer.sh" --bootstrap-server "$bootstrap" --topic "$topic" \
+      --producer-property max.request.size=5242880 --producer-property acks=all < sent >&2
+    echo "sent $(sha256sum < sent | cut -d' ' -f1) $(wc -c < sent | tr -d ' ')"
+    ;;
+  read)
+    "$bin/kafka-console-consumer.sh" --bootstrap-server "$bootstrap" --topic "$topic" \
+      --from-beginning --max-messages 1 --timeout-ms 120000 \
+      --consumer-property max.partition.fetch.bytes=5242880 > received 2> consumer.log \
+      || tail -n 5 consumer.log >&2
+    # The tool prints lines of its own on stdout too: only the message's line is compared.
+    grep -v "^$topic-" received >&2 || true
+    grep "^$topic-" received > message || true
+    echo "received $(sha256sum < message | cut -d' ' -f1) $(wc -c < message | tr -d ' ')"
+    ;;
+  delete)
+    "$bin/kafka-topics.sh" --bootstrap-server "$bootstrap" --delete --topic "$topic" >&2
+    echo deleted
+    ;;
+esac
+"""
+
+
+def kafka_bootstrap(namespace):
+    """datahub-kafka's headless Service: the name resolves to the broker's pod."""
+    return f"{release.DATAHUB_KAFKA}.{namespace}.svc.cluster.local:{network.KAFKA_PORT}"
+
+
+def kafka_check_pod(namespace, image, name):
+    """A pod that waits, with Kafka's client label and never the check label, so the rule of
+    ADR-068 §3 is what lets it in, running the chart's own image and its tools."""
+    return {"apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": name, "namespace": namespace,
+                         "labels": {release.DATAHUB_KAFKA_CLIENT_LABEL: "true",
+                                    "app.kubernetes.io/part-of": "gate"}},
+            "spec": {"restartPolicy": "Never", "enableServiceLinks": False,
+                     "containers": [{"name": "check", "image": image,
+                                     "command": ["sleep", "1800"]}]}}
+
+
+def kafka_exec(namespace, pod, step, topic):
+    """KAFKA_CHECK's `step` in the check pod; the script goes on stdin."""
+    return ["kubectl", "--context", CONTEXT, "-n", namespace, "exec", "-i", pod, "--", "bash",
+            "-s", "--", step, kafka_bootstrap(namespace), topic]
+
+
+def kafka_lines(text):
+    """{sent|received: (sha256, size)} from KAFKA_CHECK's output."""
+    found = {}
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) == 3 and parts[0] in ("sent", "received"):
+            found[parts[0]] = (parts[1], parts[2])
+    return found
+
+
+def broker_back(old_uids):
+    """For wait_for: the name of a ready pod of datahub-kafka that is none of `old_uids`."""
+    def done(pods):
+        for pod in pods["items"]:
+            ready = any(c["type"] == "Ready" and c["status"] == "True"
+                        for c in pod.get("status", {}).get("conditions", []))
+            if ready and pod["metadata"]["uid"] not in old_uids:
+                return pod["metadata"]["name"]
+        return None
+    return done
+
+
+def check_datahub_kafka(env):
+    """ADR-068 §5: see the module's docstring. Returns (problems, notes)."""
+    ns, pid = env["NS_CATALOG_DATAHUB"], os.getpid()
+    kubectl = ["kubectl", "--context", CONTEXT, "-n", ns]
+    values = json.loads(output(["helm", "--kube-context", CONTEXT, "-n", ns, "get", "values",
+                                release.DATAHUB_KAFKA_RELEASE, "--all", "-o", "json"]))
+    pod, topic = f"{release.DATAHUB_KAFKA}-check-{pid}", f"gate-check-{pid}"
+    broker = f"{release.DATAHUB_KAFKA}-0"
+    run(kubectl + ["apply", "-f", "-"], json.dumps(kafka_check_pod(ns, values["image"], pod)))
+    try:
+        output(kubectl + ["wait", "--for=condition=Ready", f"pod/{pod}", "--timeout=180s"])
+        sent = kafka_lines(output(kafka_exec(ns, pod, "write", topic), KAFKA_CHECK)).get("sent")
+        received = kafka_lines(output(kafka_exec(ns, pod, "read", topic),
+                                      KAFKA_CHECK)).get("received")
+        if not sent or received != sent:
+            return [f"Topic {topic}: sent {sent}, consumed back {received} (sha256, bytes)"], []
+        notes = [f"Topic {topic}: a message of {sent[1]} bytes produced and consumed back "
+                 f"unchanged through {kafka_bootstrap(ns)}."]
+        pods = kubectl + ["get", "pods", "-l", KAFKA_POD_LABELS, "-o", "json"]
+        old = {p["metadata"]["uid"] for p in json.loads(output(pods))["items"]}
+        output(kubectl + ["delete", f"pod/{broker}", "--wait=true"])
+        back = wait_for(pods, broker_back(old), f"{broker} back ready",
+                        timeout=KAFKA_RESTART_TIMEOUT)
+        received = kafka_lines(output(kafka_exec(ns, pod, "read", topic),
+                                      KAFKA_CHECK)).get("received")
+        if received != sent:
+            return [f"Topic {topic}: sent {sent}, read {received} after the restart of "
+                    f"{broker} (sha256, bytes)"], notes
+        notes.append(f"Pod {broker} deleted and back ready as {back}; the message read back "
+                     "unchanged from its volume.")
+        output(kafka_exec(ns, pod, "delete", topic), KAFKA_CHECK)
+        notes.append(f"Topic {topic} deleted.")
+        return [], notes
+    finally:
+        subprocess.run(kubectl + ["delete", "pod", pod, "--ignore-not-found", "--wait=false"],
+                       capture_output=True, text=True, check=False)
+
+
 def check_datahub_pg(env):
     """ADR-066 §5: datahub-pg as its values say; then a WAL switch on its primary, waited for
     until archived through the plugin; then an on-demand Backup, waited for until completed.
@@ -2246,6 +2376,11 @@ def main(argv):
         return 1 if problems else 0
     if argv[1:] == ["check-datahub-pg"]:
         problems, notes = check_datahub_pg(release.load_env(ROOT, os.environ))
+        for line in notes + problems:
+            print(line, flush=True)
+        return 1 if problems else 0
+    if argv[1:] == ["check-datahub-kafka"]:
+        problems, notes = check_datahub_kafka(release.load_env(ROOT, os.environ))
         for line in notes + problems:
             print(line, flush=True)
         return 1 if problems else 0

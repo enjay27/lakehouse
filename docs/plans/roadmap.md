@@ -263,8 +263,13 @@ Started on 2026-10-18 (Kade).
   `charts/datahub-network-policies`, default deny in Datahub's namespace with datahub-pg's
   rules; installed after Polaris in step 1. The smoke gate's `check-datahub-pg` checks it is
   asynchronous, archives its WAL and completes a backup.
-- Its PostgreSQL on CNPG, a single-broker Kafka and a single-node OpenSearch, all in
-  `NS_CATALOG_DATAHUB`, then Datahub itself (ADR-025).
+- Datahub's Kafka (ADR-068, ADR-069): `charts/datahub-kafka`, one KRaft broker from
+  `apache/kafka` 4.3.1, broker and controller in one process, its controller the static voter
+  `1@localhost:9093`; plaintext on 9092 for pods labelled `lakehouse/datahub-kafka-client`;
+  installed after datahub-pg in step 1. The smoke gate's `check-datahub-kafka` round-trips a
+  4.5 MiB message across a restart of the broker's pod. The recovery of Datahub's topics after
+  the broker's volume is lost is proven with Datahub's chart (ADR-025).
+- A single-node OpenSearch in `NS_CATALOG_DATAHUB`, then Datahub itself (ADR-025).
 - Datahub ingests Polaris's catalog with its own read-only principal.
 - Its own login through SSO, against a stand-in on the gate.
 - A runbook, proven on a Linux test cluster, moves Datahub's metadata from the target

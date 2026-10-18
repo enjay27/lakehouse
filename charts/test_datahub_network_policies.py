@@ -1,5 +1,5 @@
-"""Tests for charts/datahub-network-policies (ADR-048, ADR-066 §4): default deny in Datahub's
-namespace and datahub-pg's two allow policies, the values schema, and kubeconform against the
+"""Tests for charts/datahub-network-policies (ADR-048, ADR-066 §4, ADR-068 §3): default deny in
+Datahub's namespace, datahub-pg's two allow policies and datahub-kafka's, the values schema, and kubeconform against the
 NetworkPolicy schema of the gate's Kubernetes version, pinned in gates/pins.json.
 
 Run: python3 -m unittest discover -s charts
@@ -32,6 +32,7 @@ NAMESPACE = "catalog-datahub"
 LINT_VALUES = os.path.join(CHART, "ci", "lint-values.yaml")
 NAME = "kubernetes.io/metadata.name"
 INSTANCES = {"cnpg.io/podRole": "instance"}
+KAFKA = {"app.kubernetes.io/name": "datahub-kafka"}
 
 SCHEMAS = None
 
@@ -82,11 +83,12 @@ class Rendered(unittest.TestCase):
         cls.docs = render()
         cls.policies = by_name(cls.docs)
 
-    def test_only_these_three_network_policies(self):
+    def test_only_these_four_network_policies(self):
         self.assertEqual({(d["apiVersion"], d["kind"]) for d in self.docs},
                          {("networking.k8s.io/v1", "NetworkPolicy")})
         self.assertEqual(set(self.policies),
-                         {"default-deny-ingress", "datahub-pg-clients", "datahub-pg-operator"})
+                         {"default-deny-ingress", "datahub-pg-clients", "datahub-pg-operator",
+                          "datahub-kafka-clients"})
 
     def test_every_pod_is_denied_ingress_by_default(self):
         deny = self.policies["default-deny-ingress"]["spec"]
@@ -118,6 +120,30 @@ class Rendered(unittest.TestCase):
         self.assertEqual(spec["ingress"], [{
             "ports": [{"protocol": "TCP", "port": 5432}, {"protocol": "TCP", "port": 8000}],
             "from": [{"namespaceSelector": {"matchLabels": {NAME: "cnpg-system"}}}]}])
+
+    def test_kafka_on_9092_only_from_its_clients_in_this_namespace(self):
+        # ADR-068 §3: plaintext behind this rule; the controller listens on localhost only.
+        spec = self.policies["datahub-kafka-clients"]["spec"]
+        self.assertEqual(spec["podSelector"], {"matchLabels": KAFKA})
+        self.assertEqual(spec["ingress"], [{
+            "ports": [{"protocol": "TCP", "port": 9092}],
+            "from": [{"podSelector": {"matchLabels": {
+                release.DATAHUB_KAFKA_CLIENT_LABEL: "true"}}}]}])
+
+    def test_the_kafka_client_label_is_its_own(self):
+        self.assertEqual(release.DATAHUB_KAFKA_CLIENT_LABEL, "lakehouse/datahub-kafka-client")
+        self.assertNotIn(release.DATAHUB_KAFKA_CLIENT_LABEL,
+                         (release.DATAHUB_PG_CLIENT_LABEL, release.PG_CLIENT_LABEL))
+
+    def test_the_kafka_rule_selects_the_brokers_pod(self):
+        out = subprocess.run(["helm", "template", release.DATAHUB_KAFKA_RELEASE,
+                              release.DATAHUB_KAFKA_CHART, "--namespace", NAMESPACE],
+                             capture_output=True, text=True, check=True).stdout
+        (sts,) = [d for d in yaml.safe_load_all(out) if d and d["kind"] == "StatefulSet"]
+        labels = sts["spec"]["template"]["metadata"]["labels"]
+        for key, value in KAFKA.items():
+            self.assertEqual(labels.get(key), value)
+        self.assertEqual(sts["metadata"]["name"], release.DATAHUB_KAFKA)
 
     def test_kubeconform_accepts_every_policy(self):
         result = helm_template()

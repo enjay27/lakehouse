@@ -30,8 +30,10 @@
       default deny in its namespace, datahub-pg open to its clients and the operator.
    g. Datahub's PostgreSQL: the `Cluster` datahub-pg from charts/datahub-postgres (ADR-066),
       asynchronous, waited on as polaris-pg is. Its backups go to `DATAHUB_BACKUP_BUCKET` on
-      `S3_ENDPOINT` with the key in `datahub-backup-s3`. Kafka, OpenSearch and Datahub itself
-      follow here when their charts enter (ADR-025).
+      `S3_ENDPOINT` with the key in `datahub-backup-s3`.
+   h. Datahub's Kafka: the StatefulSet datahub-kafka from charts/datahub-kafka (ADR-068), one
+      KRaft broker, waited on until rolled out and ready. OpenSearch and Datahub itself follow
+      here when their charts enter (ADR-025).
 2. After every service of step 1 (ADR-029, ADR-037):
    a. The log batch (ADR-036): charts/polaris-log-batch with the image built from this
       checkout (batch_image), pulled from `IMAGE_REGISTRY` or, when it is empty, the GitHub
@@ -83,10 +85,12 @@ PLUGIN_LABEL = f"cnpg.io/pluginName={PLUGIN_NAME}"
 POLARIS_NETPOL_RELEASE = "polaris-network-policies"
 POLARIS_NETPOL_CHART = os.path.join(ROOT, "charts", POLARIS_NETPOL_RELEASE)
 PG_CLIENT_LABEL = "lakehouse/polaris-pg-client"
-# Datahub's network policies and the label of datahub-pg's clients (ADR-048, ADR-066 §4).
+# Datahub's network policies and the labels of datahub-pg's and datahub-kafka's clients (ADR-048,
+# ADR-066 §4, ADR-068 §3).
 DATAHUB_NETPOL_RELEASE = "datahub-network-policies"
 DATAHUB_NETPOL_CHART = os.path.join(ROOT, "charts", DATAHUB_NETPOL_RELEASE)
 DATAHUB_PG_CLIENT_LABEL = "lakehouse/datahub-pg-client"
+DATAHUB_KAFKA_CLIENT_LABEL = "lakehouse/datahub-kafka-client"
 # Polaris's pods, by the labels upstream's chart sets with release name POLARIS.
 POLARIS_POD_SELECTOR = "app.kubernetes.io/name=polaris,app.kubernetes.io/instance=polaris"
 # One namespace label per caller class in other teams' namespaces (ADR-048 §2).
@@ -108,6 +112,10 @@ DATAHUB_PG_CHART = os.path.join(ROOT, "charts", DATAHUB_PG_RELEASE)
 DATAHUB_DB_SECRET = "datahub-db"
 DATAHUB_BACKUP_STORE = "datahub-backup"
 DATAHUB_BACKUP_SECRET = "datahub-backup-s3"
+# Datahub's Kafka (ADR-068): its chart and its StatefulSet, of the same name.
+DATAHUB_KAFKA = "datahub-kafka"
+DATAHUB_KAFKA_RELEASE = "datahub-kafka"
+DATAHUB_KAFKA_CHART = os.path.join(ROOT, "charts", DATAHUB_KAFKA_RELEASE)
 # Step 1 reads the Secrets it needs for their key names only, one line per Secret, never a value.
 SECRET_KEYS_TEMPLATE = ('go-template={{range .items}}{{.metadata.name}}:'
                         '{{range $key, $value := .data}} {{$key}}{{end}}{{println}}{{end}}')
@@ -399,6 +407,30 @@ def datahub_network_policies(env, run, dry_run=False):
                 f"{out.strip()}"], []
     done = "server-side dry-run passed" if dry_run else "installed"
     return [], [f"Step 1: Datahub's network policies in {namespace}, {done} (ADR-048, ADR-066)."]
+
+
+def datahub_kafka(env, run, dry_run=False):
+    """Step 1, Datahub's Kafka, after datahub-pg (ADR-068 §4): its chart, with nothing from
+    `.env` but the namespace, then its StatefulSet waited on until rolled out and ready. Returns
+    (problems, notes)."""
+    namespace = env.get("NS_CATALOG_DATAHUB", "")
+    if not namespace:
+        return ["NS_CATALOG_DATAHUB is empty: set Datahub's namespace in .env (ADR-007)"], []
+    context = env["KUBE_CONTEXT"]
+    helm = ["helm", "--kube-context", context, "-n", namespace, "upgrade", "--install",
+            DATAHUB_KAFKA_RELEASE, DATAHUB_KAFKA_CHART]
+    code, out = run(helm + (["--dry-run=server"] if dry_run else []))
+    if code != 0:
+        return [f"helm upgrade {DATAHUB_KAFKA_RELEASE} in {namespace} failed: {out.strip()}"], []
+    if dry_run:
+        return [], [f"Step 1: StatefulSet {DATAHUB_KAFKA} in {namespace}, server-side dry-run "
+                    "passed."]
+    code, out = run(["kubectl", "--context", context, "-n", namespace, "rollout", "status",
+                     f"statefulset/{DATAHUB_KAFKA}", f"--timeout={READY_TIMEOUT}"])
+    if code != 0:
+        return [f"StatefulSet {DATAHUB_KAFKA} in {namespace} is not ready: {out.strip()}"], []
+    return [], [f"Step 1: StatefulSet {DATAHUB_KAFKA} in {namespace} is rolled out and ready "
+                "(ADR-068)."]
 
 
 def postgres(env, run, pg, dry_run=False):
@@ -775,6 +807,7 @@ def install(env, run, supported, dry_run):
                  lambda: polaris(env, run, dry_run),
                  lambda: datahub_network_policies(env, run, dry_run),
                  lambda: datahub_postgres(env, run, dry_run),
+                 lambda: datahub_kafka(env, run, dry_run),
                  lambda: log_batch(env, run, dry_run)):
         problems, more = step()
         notes += more

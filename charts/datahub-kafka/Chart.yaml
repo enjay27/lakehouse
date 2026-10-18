@@ -1,0 +1,10 @@
+# The Kafka of Datahub (ADR-068, ADR-069, ADR-025): one broker in KRaft mode, broker and controller
+# in one process, from the official apache/kafka image. Used by Datahub only, reached on 9092 by
+# pods of its namespace labelled as Kafka's clients (charts/datahub-network-policies). Installed by
+# install/release.py in Datahub's part of step 1, after datahub-pg (ADR-045).
+apiVersion: v2
+name: datahub-kafka
+description: Kafka for Datahub, one KRaft broker
+type: application
+version: 0.1.0
+appVersion: "4.3.1"

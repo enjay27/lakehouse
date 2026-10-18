@@ -106,7 +106,7 @@ class Cases(unittest.TestCase):
         expected = {c.target: c.allowed for c in network.CASES if c.source == "polaris"}
         self.assertEqual(expected, {"polaris-api": False, "polaris-pg": False,
                                     "seaweedfs": False, "opa": False, "recorder": True,
-                                    "datahub-pg": False})
+                                    "datahub-pg": False, "datahub-kafka": False})
 
     def test_datahub_pg_from_its_clients_and_join_pods_in_datahubs_namespace_only(self):
         # ADR-066 §4: datahub-pg's rules as polaris-pg's, for Datahub's own label.
@@ -116,6 +116,16 @@ class Cases(unittest.TestCase):
         for source in ("datahub", "none", "none-join", "polaris"):
             with self.subTest(source=source):
                 self.assertIs(expected[(source, "datahub-pg")], False)
+
+    def test_datahub_kafka_from_its_clients_in_datahubs_namespace_only(self):
+        # ADR-068 §3: 9092 from pods with Kafka's own client label; datahub-pg's does not do.
+        expected = {(c.source, c.target): c.allowed for c in network.CASES}
+        self.assertIs(expected[("datahub-kafka-client", "datahub-kafka")], True)
+        for source in ("datahub", "datahub-client", "none", "polaris"):
+            with self.subTest(source=source):
+                self.assertIs(expected[(source, "datahub-kafka")], False)
+        # Kafka's label opens no other door.
+        self.assertIs(expected[("datahub-kafka-client", "datahub-pg")], False)
 
     def test_datahubs_namespace_reaches_the_recorders_s3_port_only(self):
         # ADR-067 §4: its backups go through the recorder; OPA and the PostgreSQL port stay shut.
@@ -148,6 +158,8 @@ class Cases(unittest.TestCase):
         self.assertEqual(addresses["opa"], "opa.standins.svc.cluster.local:8181")
         self.assertEqual(addresses["datahub-pg"],
                          "datahub-pg-rw.catalog-datahub.svc.cluster.local:5432")
+        self.assertEqual(addresses["datahub-kafka"],
+                         "datahub-kafka.catalog-datahub.svc.cluster.local:9092")
         self.assertEqual({c.target for c in network.CASES}, set(addresses))
 
 
@@ -165,14 +177,16 @@ class Sources(unittest.TestCase):
             "polaris-join": ("catalog-polaris", None),
             "none-join": ("gate-net-none", None),
             "datahub-client": ("catalog-datahub", None),
-            "datahub-join": ("catalog-datahub", None)})
+            "datahub-join": ("catalog-datahub", None),
+            "datahub-kafka-client": ("catalog-datahub", None)})
 
     def test_the_join_sources_carry_cnpgs_join_label_and_datahubs_client_its_own(self):
         self.assertEqual(network.POD_LABELS, {
             "polaris-join": {"cnpg.io/jobRole": "join"},
             "none-join": {"cnpg.io/jobRole": "join"},
             "datahub-join": {"cnpg.io/jobRole": "join"},
-            "datahub-client": {"lakehouse/datahub-pg-client": "true"}})
+            "datahub-client": {"lakehouse/datahub-pg-client": "true"},
+            "datahub-kafka-client": {"lakehouse/datahub-kafka-client": "true"}})
 
     def test_the_namespaces_manifest_leaves_polaris_alone(self):
         manifest = network.namespaces_manifest(ENV)
