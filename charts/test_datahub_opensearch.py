@@ -158,6 +158,8 @@ class Rendered(unittest.TestCase):
         for c in self.pod["containers"] + self.pod.get("initContainers", []):
             with self.subTest(container=c["name"]):
                 self.assertRegex(c["image"], IMAGE_RE)
+        # Upstream cannot read it from a tag with a digest, so the values set it.
+        self.assertEqual(self.sts["metadata"]["annotations"]["majorVersion"], "2")
 
     def test_no_root_container_and_no_kernel_setting(self):
         # ADR-070 §1, §3: no fsgroup-volume or sysctl init container, no sysctls.

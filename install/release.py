@@ -116,6 +116,12 @@ DATAHUB_BACKUP_SECRET = "datahub-backup-s3"
 DATAHUB_KAFKA = "datahub-kafka"
 DATAHUB_KAFKA_RELEASE = "datahub-kafka"
 DATAHUB_KAFKA_CHART = os.path.join(ROOT, "charts", DATAHUB_KAFKA_RELEASE)
+# Datahub's OpenSearch (ADR-070): upstream's chart with our values; its StatefulSet and Service
+# take the release's name.
+DATAHUB_OPENSEARCH = "datahub-opensearch"
+DATAHUB_OPENSEARCH_RELEASE = "datahub-opensearch"
+DATAHUB_OPENSEARCH_CHART = os.path.join(ROOT, "charts", DATAHUB_OPENSEARCH_RELEASE)
+DATAHUB_OPENSEARCH_VALUES = os.path.join(DATAHUB_OPENSEARCH_CHART, "values-lakehouse.yaml")
 # Step 1 reads the Secrets it needs for their key names only, one line per Secret, never a value.
 SECRET_KEYS_TEMPLATE = ('go-template={{range .items}}{{.metadata.name}}:'
                         '{{range $key, $value := .data}} {{$key}}{{end}}{{println}}{{end}}')
