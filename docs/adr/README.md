@@ -123,6 +123,7 @@ flowchart LR
 | [072](072-datahubs-chart-gets-one-patched-line-so-gms-runs-by-digest-and-three-of-adr-071s-details-follow-the-chart-as-it-is.md) | Datahub's chart gets one patched line so GMS runs by digest, and three of ADR-071's details follow the chart as it is | Accepted |
 | [073](073-state-moves-to-a-project-of-the-kade-k8s-platform-organization-fed-by-this-repositorys-own-bridge-labels-become-requests.md) | State moves to a Project of the kade-k8s-platform organization, fed by this repository's own bridge; labels become requests | Accepted |
 | [074](074-the-log-batchs-image-moves-with-the-repository-to-ghcr-io-kade-k8s-platform-lakehouse.md) | The log batch's image moves with the repository, to `ghcr.io/kade-k8s-platform/lakehouse` | Accepted |
+| [075](075-check-datahub-recovery-runs-in-a-smoke-job-of-its-own-on-its-own-kind-cluster-on-every-smoke-run.md) | check-datahub-recovery runs in a smoke job of its own, on its own kind cluster, on every smoke run | Proposed |
 
 ## Not ADRs
 
