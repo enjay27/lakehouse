@@ -114,6 +114,17 @@
                   the frontend signs in `datahub` with the password in datahub-root-user and
                   refuses `datahub:datahub`. Each credential is read from its Secret and sent
                   on the pod's stdin, never printed or put on a command line.
+  check-datahub-recovery
+                  on the gate's own context only, since it deletes volumes (ADR-071 §8,
+                  ADR-004): check.py's steps write a dataset and find it by search; then
+                  datahub-opensearch-0's claim and pod are deleted, a new pod is ready on a new
+                  claim without datasetindex_v2, Datahub's install step runs again, its
+                  system-update recreating the index, a Job from the restore-indices template
+                  completes and the dataset is found again; then datahub-kafka-0's claim and pod
+                  are deleted and Datahub's topics are gone, the install step runs again and
+                  they are back, GMS's pod is deleted and a new one is ready, the dataset reads
+                  back by its URN and a second one is written and found. Both datasets are
+                  hard-deleted and the check pods deleted whatever happened.
   check-polaris   compares the running Polaris (its Deployment, pods and ConfigMap) with the
                   values its helm release was installed with and with `.env`, checks its
                   replicas run on different nodes (ADR-016), then runs gates/check_polaris.sh
@@ -186,7 +197,7 @@
 Every kubectl and helm call names the gate's context, and a namespace where the object has
 one. Nothing here reaches any cluster but the kind cluster it creates (ADR-017).
 
-Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | seed | check-migration | rebuild-replica | check-polaris-pg | check-datahub-pg | check-datahub-kafka | check-datahub-opensearch | check-datahub | check-polaris | console-image [--build|--load] | batch-image | check-logs | check-console | check-iceberg | check-restore | gate-policies | check-network | check-metrics
+Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | seed | check-migration | rebuild-replica | check-polaris-pg | check-datahub-pg | check-datahub-kafka | check-datahub-opensearch | check-datahub | check-datahub-recovery | check-polaris | console-image [--build|--load] | batch-image | check-logs | check-console | check-iceberg | check-restore | gate-policies | check-network | check-metrics
 """
 
 import base64
@@ -1434,7 +1445,9 @@ KAFKA_RESTART_TIMEOUT = 300
 # Run in the check pod with `bash -s -- STEP BOOTSTRAP TOPIC`. `write` creates the topic, with
 # nothing of its own, so the broker's message.max.bytes is what decides, and produces one line;
 # `read` consumes the first message from the beginning and keeps the line that starts with the
-# topic's name; each prints the sha256 and size of what it sent or received. `delete` deletes the topic. KAFKA_BIN is only for the tests.
+# topic's name; each prints the sha256 and size of what it sent or received. `delete` deletes
+# the topic. `topics` lists every topic, `topic NAME` a line each, TOPIC unused
+# (check-datahub-recovery). KAFKA_BIN is only for the tests.
 KAFKA_CHECK = r"""
 set -euo pipefail
 step=$1 bootstrap=$2 topic=$3
@@ -1462,6 +1475,9 @@ case "$step" in
   delete)
     "$bin/kafka-topics.sh" --bootstrap-server "$bootstrap" --delete --topic "$topic" >&2
     echo deleted
+    ;;
+  topics)
+    "$bin/kafka-topics.sh" --bootstrap-server "$bootstrap" --list | sed 's/^/topic /'
     ;;
 esac
 """
@@ -1498,6 +1514,11 @@ def kafka_lines(text):
         if len(parts) == 3 and parts[0] in ("sent", "received"):
             found[parts[0]] = (parts[1], parts[2])
     return found
+
+
+def kafka_topics(text):
+    """The topics KAFKA_CHECK's `topics` listed."""
+    return {line[6:].strip() for line in text.splitlines() if line.startswith("topic ")}
 
 
 def new_ready_pod(old_uids):
@@ -1560,8 +1581,9 @@ OPENSEARCH_RESTART_TIMEOUT = 600
 # answer that is not 2xx stops the step. `write` creates the index with one shard and no replica,
 # so one node can make it green, waits for green and writes one document, refreshed so a search
 # finds it at once; `read` waits for green and searches for the document. Each prints the health
-# and the search's answer, one JSON line each. `delete` deletes the index. CURL is only for the
-# tests.
+# and the search's answer, one JSON line each. `delete` deletes the index. `exists` prints the
+# HTTP status of INDEX, an index or an alias, whatever it is (check-datahub-recovery). CURL is
+# only for the tests.
 OPENSEARCH_CHECK = r"""
 set -euo pipefail
 step=$1 url=$2 index=$3
@@ -1588,6 +1610,9 @@ case "$step" in
   delete)
     call -X DELETE "$url/$index" >&2
     echo deleted
+    ;;
+  exists)
+    echo "exists $("$curl" -sS -o /dev/null -w '%{http_code}' --max-time 150 "$url/$index")"
     ;;
 esac
 """
@@ -1623,11 +1648,11 @@ def opensearch_exec(namespace, pod, step, index):
 
 
 def opensearch_lines(text):
-    """{health|search: answer} from OPENSEARCH_CHECK's output."""
+    """{health|search|exists: answer} from OPENSEARCH_CHECK's output."""
     found = {}
     for line in text.splitlines():
         key, _, answer = line.partition(" ")
-        if key in ("health", "search") and answer:
+        if key in ("health", "search", "exists") and answer:
             found[key] = json.loads(answer)
     return found
 
@@ -1789,6 +1814,202 @@ def datahub_pod(namespace, image, name, args, labels, credential, masked):
             said = said.replace(value, "<redacted>")
         found = [f"pod {name} in {namespace} exited {done.returncode}: {said}"]
     return found, ok
+
+
+# check-datahub-recovery (ADR-071 §8): the index a dataset's search reads, an index or an alias;
+# two topics system-update creates, the one GMS waits on at start and the change log the
+# indices are built from; the restore-indices template upstream's chart names for release
+# datahub; GMS's pods, by the labels upstream's chart gives them, and the times a restore and
+# GMS's start have (upstream's readiness probe starts at 120 s, and its image may be pulled).
+DATAHUB_DATASET_INDEX = "datasetindex_v2"
+DATAHUB_TOPICS = ("DataHubUpgradeHistory_v1", "MetadataChangeLog_Versioned_v1")
+RESTORE_INDICES_TEMPLATE = f"{release.DATAHUB_RELEASE}-datahub-restore-indices-job-template"
+RESTORE_INDICES_TIMEOUT = 900
+GMS_POD_LABELS = ("app.kubernetes.io/name=datahub-gms,"
+                  f"app.kubernetes.io/instance={release.DATAHUB_RELEASE}")
+GMS_RESTART_TIMEOUT = 900
+
+
+def claim_of(pod):
+    """The one PersistentVolumeClaim among a pod's volumes, read as JSON, or None."""
+    claims = [v["persistentVolumeClaim"]["claimName"] for v in pod["spec"].get("volumes", [])
+              if "persistentVolumeClaim" in v]
+    return claims[0] if len(claims) == 1 else None
+
+
+def job_finished(job):
+    """`succeeded` or `failed` by the Job's own condition, after its retries; None while it
+    runs."""
+    for condition in job.get("status", {}).get("conditions") or []:
+        if condition.get("status") == "True":
+            if condition.get("type") == "Complete":
+                return "succeeded"
+            if condition.get("type") == "Failed":
+                return "failed"
+    return None
+
+
+def lose_volume(kubectl, name, labels, timeout):
+    """Deletes StatefulSet pod `name`'s claim, then the pod, and waits until a new pod is ready.
+    Returns (the claim, the new pod's name, whether the claim it runs on is a new one)."""
+    claim = claim_of(json.loads(output(kubectl + ["get", "pod", name, "-o", "json"])))
+    if not claim:
+        sys.exit(f"Pod {name} has no single PersistentVolumeClaim to lose")
+    pvc = kubectl + ["get", "pvc", claim, "-o", "json"]
+    before = json.loads(output(pvc))["metadata"]["uid"]
+    pods = kubectl + ["get", "pods", "-l", labels, "-o", "json"]
+    old = {p["metadata"]["uid"] for p in json.loads(output(pods))["items"]}
+    # The claim waits for its pod to go; the StatefulSet makes a new claim for the new pod.
+    output(kubectl + ["delete", "pvc", claim, "--wait=false"])
+    output(kubectl + ["delete", f"pod/{name}", "--wait=true"])
+    back = wait_for(pods, new_ready_pod(old), f"{name} back ready on a new volume",
+                    timeout=timeout)
+    return claim, back, json.loads(output(pvc))["metadata"]["uid"] != before
+
+
+def check_datahub_recovery(env, pins):
+    """ADR-071 §8: see the module's docstring. Returns (problems, notes)."""
+    if env.get("KUBE_CONTEXT") != CONTEXT:
+        return [f"KUBE_CONTEXT is {env.get('KUBE_CONTEXT')!r}, not the gate's {CONTEXT}: "
+                "check-datahub-recovery deletes volumes, so it runs on the gate only "
+                "(ADR-004)"], []
+    ns, pid = env["NS_CATALOG_DATAHUB"], os.getpid()
+    kubectl = ["kubectl", "--context", CONTEXT, "-n", ns]
+    secret = secret_value(json.loads(output(kubectl + ["get", "secret", "datahub-auth-secrets",
+                                                       "-o", "json"])), "system_client_secret")
+
+    def values(name):
+        return json.loads(output(["helm", "--kube-context", CONTEXT, "-n", ns, "get", "values",
+                                  name, "--all", "-o", "json"]))
+    kafka_pod = f"{release.DATAHUB_KAFKA}-recovery-{pid}"
+    opensearch_pod = f"{release.DATAHUB_OPENSEARCH}-recovery-{pid}"
+    gms, _ = datahub_urls(ns)
+    image, labels = smoke_python_image(pins), {release.DATAHUB_GMS_CLIENT_LABEL: "true"}
+    first, second = f"gate_recovery_a_{pid}", f"gate_recovery_b_{pid}"
+    seconds = str(DATAHUB_SEARCH_SECONDS)
+    problems, notes, written, pods = [], [], [], iter(range(1, 100))
+
+    def step(*args):
+        """check.py's step `args[0]` against GMS, from a pod of GMS's clients."""
+        found, ok = datahub_pod(ns, image, f"check-datahub-recovery-{next(pods)}-{pid}",
+                                [args[0], gms, *args[1:]], labels, secret, (secret,))
+        problems.extend(found)
+        notes.extend(ok)
+        return not found
+
+    def index_status():
+        return opensearch_lines(output(opensearch_exec(ns, opensearch_pod, "exists",
+                                                       DATAHUB_DATASET_INDEX),
+                                       OPENSEARCH_CHECK)).get("exists")
+
+    def topics():
+        return kafka_topics(output(kafka_exec(ns, kafka_pod, "topics", "-"), KAFKA_CHECK))
+
+    def lost(name, pod_labels, timeout):
+        claim, back, new = lose_volume(kubectl, name, pod_labels, timeout)
+        if not new:
+            problems.append(f"Pod {name} came back as {back} on its old claim {claim}: the "
+                            "volume was not lost")
+            return False
+        notes.append(f"Claim {claim} and pod {name} deleted; {back} ready again on a new "
+                     "volume.")
+        return True
+
+    def reinstall():
+        """Datahub's install step again (ADR-071 §7): system-update runs as a pre-upgrade hook."""
+        found, more = release.datahub(env, release.call)
+        problems.extend(found)
+        notes.extend(more)
+        return not found
+
+    def restore_indices():
+        job = f"datahub-restore-indices-{pid}"
+        output(kubectl + ["create", "job", job, f"--from=cronjob/{RESTORE_INDICES_TEMPLATE}"])
+        outcome = wait_for(kubectl + ["get", "job", job, "-o", "json"], job_finished,
+                           f"Job {job}", timeout=RESTORE_INDICES_TIMEOUT)
+        if outcome != "succeeded":
+            # Kept for the state the smoke run prints on failure; its log said here.
+            log = subprocess.run(kubectl + ["logs", f"job/{job}", "--tail=20"],
+                                 capture_output=True, text=True, check=False)
+            problems.append(f"Job {job} from {RESTORE_INDICES_TEMPLATE} {outcome}: "
+                            f"{(log.stdout or log.stderr).strip()}")
+            return False
+        subprocess.run(kubectl + ["delete", "job", job, "--ignore-not-found", "--wait=false"],
+                       capture_output=True, text=True, check=False)
+        notes.append(f"Job {job} from {RESTORE_INDICES_TEMPLATE} (restore-indices) replayed "
+                     "datahub-pg into the indices.")
+        return True
+
+    def index_is(want, when):
+        status = index_status()
+        if status != want:
+            problems.append(f"Index {DATAHUB_DATASET_INDEX} answers {status} {when}; expected "
+                            f"{want}")
+        return status == want
+
+    def topics_are(present, when):
+        listed = topics()
+        wrong = [t for t in DATAHUB_TOPICS if (t in listed) != present]
+        if wrong:
+            problems.append(f"Topics {', '.join(wrong)} {'missing' if present else 'still there'} "
+                            f"{when}")
+        return not wrong
+
+    def recover():
+        written.append(first)
+        if not (step("write", first) and step("search", first, seconds)):
+            return
+        # OpenSearch's volume lost (ADR-070): system-update recreates the indices, and a
+        # restore replays datahub-pg into them.
+        if not (index_is(200, "before its volume is lost")
+                and lost(f"{release.DATAHUB_OPENSEARCH}-0", OPENSEARCH_POD_LABELS,
+                         OPENSEARCH_RESTART_TIMEOUT)
+                and index_is(404, "on the new volume")):
+            return
+        notes.append(f"Index {DATAHUB_DATASET_INDEX} gone with the volume.")
+        if not (reinstall() and index_is(200, "after system-update")):
+            return
+        notes.append(f"Index {DATAHUB_DATASET_INDEX} recreated by system-update.")
+        if not (restore_indices() and step("search", first, seconds)):
+            return
+        # Kafka's volume lost (ADR-025, ADR-068 §5): system-update recreates the topics and its
+        # message, which a new GMS waits for.
+        if not (topics_are(True, "before the broker's volume is lost")
+                and lost(f"{release.DATAHUB_KAFKA}-0", KAFKA_POD_LABELS, KAFKA_RESTART_TIMEOUT)
+                and topics_are(False, "on the new volume")):
+            return
+        notes.append(f"Topics {', '.join(DATAHUB_TOPICS)} gone with the volume.")
+        if not (reinstall() and topics_are(True, "after system-update")):
+            return
+        notes.append(f"Topics {', '.join(DATAHUB_TOPICS)} recreated by system-update.")
+        gms_pods = kubectl + ["get", "pods", "-l", GMS_POD_LABELS, "-o", "json"]
+        old = {p["metadata"]["uid"] for p in json.loads(output(gms_pods))["items"]}
+        output(kubectl + ["delete", "pod", "-l", GMS_POD_LABELS, "--wait=true"])
+        back = wait_for(gms_pods, new_ready_pod(old), "GMS back ready",
+                        timeout=GMS_RESTART_TIMEOUT)
+        notes.append(f"GMS's pod deleted; {back} started on the new topics and is ready.")
+        if not step("read", first):
+            return
+        written.append(second)
+        if step("write", second):
+            step("search", second, seconds)
+
+    # The stores' own images and tools, each pod with its store's client label only.
+    for pod in (kafka_check_pod(ns, values(release.DATAHUB_KAFKA_RELEASE)["image"], kafka_pod),
+                opensearch_check_pod(ns, opensearch_image(
+                    values(release.DATAHUB_OPENSEARCH_RELEASE)), opensearch_pod)):
+        run(kubectl + ["apply", "-f", "-"], json.dumps(pod))
+    try:
+        for name in (kafka_pod, opensearch_pod):
+            output(kubectl + ["wait", "--for=condition=Ready", f"pod/{name}", "--timeout=600s"])
+        recover()
+    finally:
+        if written:
+            step("delete", *written)
+        subprocess.run(kubectl + ["delete", "pod", kafka_pod, opensearch_pod,
+                                  "--ignore-not-found", "--wait=false"],
+                       capture_output=True, text=True, check=False)
+    return problems, notes
 
 
 def check_datahub_pg(env):
@@ -2650,6 +2871,11 @@ def main(argv):
         return 1 if problems else 0
     if argv[1:] == ["check-datahub"]:
         problems, notes = check_datahub(release.load_env(ROOT, os.environ), pins)
+        for line in notes + problems:
+            print(line, flush=True)
+        return 1 if problems else 0
+    if argv[1:] == ["check-datahub-recovery"]:
+        problems, notes = check_datahub_recovery(release.load_env(ROOT, os.environ), pins)
         for line in notes + problems:
             print(line, flush=True)
         return 1 if problems else 0
