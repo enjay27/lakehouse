@@ -127,6 +127,16 @@ class Cases(unittest.TestCase):
         # Kafka's label opens no other door.
         self.assertIs(expected[("datahub-kafka-client", "datahub-pg")], False)
 
+    def test_datahub_opensearch_on_9200_from_its_clients_in_datahubs_namespace_only(self):
+        # ADR-070 §5: 9200 from pods with OpenSearch's own client label; 9300 from none.
+        expected = {(c.source, c.target): c.allowed for c in network.CASES}
+        self.assertIs(expected[("datahub-opensearch-client", "datahub-opensearch")], True)
+        for source in ("datahub", "none"):
+            with self.subTest(source=source):
+                self.assertIs(expected[(source, "datahub-opensearch")], False)
+        self.assertIs(expected[("datahub-opensearch-client", "datahub-opensearch-transport")],
+                      False)
+
     def test_datahubs_namespace_reaches_the_recorders_s3_port_only(self):
         # ADR-067 §4: its backups go through the recorder; OPA and the PostgreSQL port stay shut.
         expected = {(c.source, c.target): c.allowed for c in network.CASES}
@@ -160,6 +170,10 @@ class Cases(unittest.TestCase):
                          "datahub-pg-rw.catalog-datahub.svc.cluster.local:5432")
         self.assertEqual(addresses["datahub-kafka"],
                          "datahub-kafka.catalog-datahub.svc.cluster.local:9092")
+        self.assertEqual(addresses["datahub-opensearch"],
+                         "datahub-opensearch.catalog-datahub.svc.cluster.local:9200")
+        self.assertEqual(addresses["datahub-opensearch-transport"],
+                         "datahub-opensearch.catalog-datahub.svc.cluster.local:9300")
         self.assertEqual({c.target for c in network.CASES}, set(addresses))
 
 
@@ -178,7 +192,8 @@ class Sources(unittest.TestCase):
             "none-join": ("gate-net-none", None),
             "datahub-client": ("catalog-datahub", None),
             "datahub-join": ("catalog-datahub", None),
-            "datahub-kafka-client": ("catalog-datahub", None)})
+            "datahub-kafka-client": ("catalog-datahub", None),
+            "datahub-opensearch-client": ("catalog-datahub", None)})
 
     def test_the_join_sources_carry_cnpgs_join_label_and_datahubs_client_its_own(self):
         self.assertEqual(network.POD_LABELS, {
@@ -186,7 +201,8 @@ class Sources(unittest.TestCase):
             "none-join": {"cnpg.io/jobRole": "join"},
             "datahub-join": {"cnpg.io/jobRole": "join"},
             "datahub-client": {"lakehouse/datahub-pg-client": "true"},
-            "datahub-kafka-client": {"lakehouse/datahub-kafka-client": "true"}})
+            "datahub-kafka-client": {"lakehouse/datahub-kafka-client": "true"},
+            "datahub-opensearch-client": {"lakehouse/datahub-opensearch-client": "true"}})
 
     def test_the_namespaces_manifest_leaves_polaris_alone(self):
         manifest = network.namespaces_manifest(ENV)

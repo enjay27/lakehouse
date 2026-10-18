@@ -726,6 +726,60 @@ class DatahubKafka(unittest.TestCase):
             "error: timed out waiting for the condition"])
 
 
+class DatahubOpensearch(unittest.TestCase):
+    """ADR-070 §4: Datahub's OpenSearch after datahub-kafka in its part of step 1 (ADR-045)."""
+
+    def step(self, calls, env=POLARIS_ENV, dry_run=False):
+        return release.datahub_opensearch(env, calls, dry_run=dry_run)
+
+    def test_installs_upstreams_chart_with_our_values_then_waits_for_its_rollout(self):
+        calls = datahub_calls()
+        problems, notes = self.step(calls)
+        self.assertEqual(problems, [])
+        helm, rollout = calls.calls
+        self.assertEqual(helm[:3], ["helm", "--kube-context", "kind-lakehouse-gate"])
+        self.assertEqual(helm[helm.index("-n") + 1], "catalog-datahub")
+        self.assertEqual(helm[helm.index("upgrade"):], [
+            "upgrade", "--install", release.DATAHUB_OPENSEARCH_RELEASE,
+            release.DATAHUB_OPENSEARCH_CHART, "-f", release.DATAHUB_OPENSEARCH_VALUES])
+        self.assertTrue(os.path.isfile(release.DATAHUB_OPENSEARCH_VALUES))
+        # Nothing from .env but the namespace: no Secret, no credential (ADR-070 §2, §4).
+        self.assertEqual(calls.values, [])
+        self.assertEqual(rollout, [
+            "kubectl", "--context", "kind-lakehouse-gate", "-n", "catalog-datahub", "rollout",
+            "status", f"statefulset/{release.DATAHUB_OPENSEARCH}",
+            f"--timeout={release.READY_TIMEOUT}"])
+        self.assertEqual(notes, ["Step 1: StatefulSet datahub-opensearch in catalog-datahub is "
+                                 "rolled out and ready (ADR-070)."])
+
+    def test_an_empty_namespace_stops_before_any_call(self):
+        calls = datahub_calls()
+        problems, _ = self.step(calls, env={**POLARIS_ENV, "NS_CATALOG_DATAHUB": ""})
+        self.assertIn("NS_CATALOG_DATAHUB", "\n".join(problems))
+        self.assertEqual(calls.calls, [])
+
+    def test_dry_run_is_server_side_and_waits_for_nothing(self):
+        calls = datahub_calls()
+        problems, notes = self.step(calls, dry_run=True)
+        self.assertEqual(problems, [])
+        (helm,) = calls.calls
+        self.assertEqual(helm[-1], "--dry-run=server")
+        self.assertIn("dry-run", "\n".join(notes))
+
+    def test_a_failed_helm_stops_with_its_error_before_waiting(self):
+        calls = datahub_calls(helm=(1, "UPGRADE FAILED"))
+        problems, _ = self.step(calls)
+        self.assertIn("UPGRADE FAILED", "\n".join(problems))
+        self.assertEqual([c[0] for c in calls.calls], ["helm"])
+
+    def test_a_node_that_never_gets_ready_stops_the_install(self):
+        calls = datahub_calls(rollout=(1, "error: timed out waiting for the condition"))
+        problems, _ = self.step(calls)
+        self.assertEqual(problems, [
+            "StatefulSet datahub-opensearch in catalog-datahub is not ready: "
+            "error: timed out waiting for the condition"])
+
+
 class Settle(unittest.TestCase):
     """settle reads the Cluster it is given, polaris-pg unless told otherwise."""
 
@@ -801,7 +855,7 @@ class Steps(unittest.TestCase):
                                           dry_run=False)
         self.assertEqual(problems, [])
         self.assertEqual([n.split(":")[0] for n in notes],
-                         ["Step 0"] * 2 + ["Step 1"] * 9 + ["Step 2"] * 2)
+                         ["Step 0"] * 2 + ["Step 1"] * 10 + ["Step 2"] * 2)
         self.assertIn("Barman Cloud Plugin", notes[1])
         self.assertIn("network policies", notes[2])
         self.assertIn("polaris-pg", notes[3])
@@ -809,13 +863,14 @@ class Steps(unittest.TestCase):
         self.assertIn("bootstrapped", notes[5])
         self.assertIn("polaris-logs", notes[6])
         self.assertIn("deployment/polaris", notes[7])
-        # ADR-045 step 1, ADR-066 §4, ADR-068 §4: then Datahub, its policies, datahub-pg,
-        # then its Kafka.
+        # ADR-045 step 1, ADR-066 §4, ADR-068 §4, ADR-070 §4: then Datahub, its policies,
+        # datahub-pg, its Kafka, then its OpenSearch.
         self.assertIn("Datahub's network policies", notes[8])
         self.assertIn("datahub-pg", notes[9])
         self.assertIn("datahub-kafka", notes[10])
-        self.assertIn("cronjob/polaris-log-batch", notes[11])
-        self.assertIn("console is not enabled", notes[12])
+        self.assertIn("datahub-opensearch", notes[11])
+        self.assertIn("cronjob/polaris-log-batch", notes[12])
+        self.assertIn("console is not enabled", notes[13])
         # ADR-045 §2: the policies first in step 1, before polaris-pg.
         helms = [c for c in pg.calls if c[0] == "helm"]
         self.assertEqual([h[h.index("--install") + 1] for h in helms],
@@ -823,7 +878,7 @@ class Steps(unittest.TestCase):
         helms = [c for c in dh.calls if c[0] == "helm"]
         self.assertEqual([h[h.index("--install") + 1] for h in helms],
                          [release.DATAHUB_NETPOL_RELEASE, release.DATAHUB_PG_RELEASE,
-                          release.DATAHUB_KAFKA_RELEASE])
+                          release.DATAHUB_KAFKA_RELEASE, release.DATAHUB_OPENSEARCH_RELEASE])
 
     def test_failed_network_policies_stop_before_polaris_pg(self):
         step0, pg = FakeKubectl(), FakeCalls(helm=(1, "values don't meet the schema"))
@@ -866,7 +921,7 @@ class Steps(unittest.TestCase):
                                           ["1.30"], dry_run=False)
         self.assertIn("image tag invalid", "\n".join(problems))
         self.assertEqual(console.calls, [])
-        self.assertIn("datahub-kafka", notes[-1])
+        self.assertIn("datahub-opensearch", notes[-1])
 
     def test_a_failed_datahub_pg_stops_the_install_before_the_log_batch(self):
         """ADR-045: every service of step 1 before step 2."""

@@ -1,2 +1,5 @@
 # Line endings: LF in the repository and in every working copy, whatever core.autocrlf says.
 * text=auto eol=lf
+# Upstream's opensearch chart 2.38.0 is kept unchanged (ADR-070 §1); its CHANGELOG.md has a
+# stray '=======' line, which git diff --check would take for a conflict marker.
+charts/datahub-opensearch/CHANGELOG.md conflict-marker-size=32

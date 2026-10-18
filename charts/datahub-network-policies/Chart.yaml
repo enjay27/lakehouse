@@ -1,7 +1,8 @@
-# Datahub's network policies (ADR-048 §4, ADR-066 §4, ADR-068 §3): every pod in NS_CATALOG_DATAHUB
-# is denied ingress by default, and one policy allows each rule built so far: datahub-pg's and
-# datahub-kafka's. Datahub's other charts add theirs when they enter (ADR-025). Installed by
-# install/release.py first in Datahub's part of step 1, before datahub-pg (ADR-045).
+# Datahub's network policies (ADR-048 §4, ADR-066 §4, ADR-068 §3, ADR-070 §2): every pod in
+# NS_CATALOG_DATAHUB is denied ingress by default, and one policy allows each rule built so far:
+# datahub-pg's, datahub-kafka's and datahub-opensearch's. Datahub's own chart adds its rules when
+# it enters (ADR-025). Installed by install/release.py first in Datahub's part of step 1, before
+# datahub-pg (ADR-045).
 apiVersion: v2
 name: datahub-network-policies
 description: Ingress to Datahub's namespace, denied by default and allowed per caller

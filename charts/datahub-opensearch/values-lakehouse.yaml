@@ -1,0 +1,51 @@
+# This repository's settings for upstream's opensearch chart 2.38.0 (ADR-070); every other file
+# here is upstream's, unchanged. Nothing comes from `.env` but the namespace. Upstream has no
+# values schema: charts/test_datahub_opensearch.py checks that each key below is one of
+# upstream's, and the rendered output for each value (ADR-016).
+
+# The StatefulSet and its Service are both datahub-opensearch (ADR-070 §1).
+fullnameOverride: datahub-opensearch
+masterService: datahub-opensearch
+
+# One node with the roles master, ingest and data: discovery.type=single-node (ADR-025).
+singleNode: true
+
+image:
+  repository: opensearchproject/opensearch
+  # Docker Hub index digest, read 2026-10-18 (the tag last pushed 2026-10-15). The chart and the
+  # image move together, in a PR of their own (ADR-070 §1).
+  tag: "2.19.6@sha256:be67c71b8d0e5edf1e9825145501c0136c3b8221206e1ce782ce17b04d0280b5"
+# Upstream reads the major version from image.tag as a semantic version unless it is set; a tag
+# with a digest is not one, so it is set here, for the StatefulSet's majorVersion annotation.
+majorVersion: "2"
+
+# The security plugin off: plain HTTP on 9200 with no login, behind the network policy that
+# admits Datahub's labelled pods only (ADR-070 §2). The performance analyzer's agent is a second
+# process in the pod; metrics come with P5 (ADR-070 §3).
+securityConfig:
+  enabled: false
+extraEnvs:
+  - name: DISABLE_SECURITY_PLUGIN
+    value: "true"
+  - name: DISABLE_PERFORMANCE_ANALYZER_AGENT_CLI
+    value: "true"
+
+# Tuning values, not measured (ADR-070 §3): a measurement that shows they matter changes them.
+# The heap is near Datahub's own 1024 MiB.
+opensearchJavaOpts: "-Xms1g -Xmx1g"
+resources:
+  requests:
+    cpu: 250m
+    memory: 1536Mi
+  limits:
+    memory: 2Gi
+
+# One volume on the cluster's default StorageClass. No root init container: the pod's fsGroup
+# 1000 lets OpenSearch write it (ADR-070 §1).
+persistence:
+  size: 10Gi
+  enableInitChown: false
+
+# No PodDisruptionBudget: the chart renders none for 0, and with one replica a budget that
+# allows no disruption would block every drain (ADR-070 §1).
+maxUnavailable: 0

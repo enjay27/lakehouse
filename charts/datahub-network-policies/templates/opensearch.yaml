@@ -1,0 +1,25 @@
+# datahub-opensearch's pod, 9200: pods of this namespace labelled as OpenSearch's clients (Datahub,
+# when its chart enters; the smoke check's pod until then). Plain HTTP with the security plugin
+# off behind this rule (ADR-070 §2). A single node has no peer, so the transport port 9300 gets
+# no rule. The pod is selected by the labels upstream's chart gives release datahub-opensearch.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: datahub-opensearch-clients
+  labels:
+    {{- include "datahub-network-policies.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: opensearch
+      app.kubernetes.io/instance: datahub-opensearch
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 9200
+      from:
+        - podSelector:
+            matchLabels:
+              lakehouse/datahub-opensearch-client: "true"

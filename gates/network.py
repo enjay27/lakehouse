@@ -9,8 +9,8 @@
   short-lived pod in each, and from an unlabelled pod in Polaris's namespace, PROBE tries a TCP
   connection to each target of CASES. Three more pods carry CNPG's join label (POD_LABELS), in
   Polaris's namespace, the unlabelled one and Datahub's (ADR-048 §6), one in Datahub's
-  namespace datahub-pg's client label (ADR-066 §4), and one there Kafka's (ADR-068 §3). An
-  allowed case must connect; a refused one
+  namespace datahub-pg's client label (ADR-066 §4), one there Kafka's (ADR-068 §3), and one
+  there OpenSearch's (ADR-070 §2). An allowed case must connect; a refused one
   must time out or be reset. A refused case that connects means the cluster does not enforce
   NetworkPolicy: ADR-048 says to stop there. polaris-pg's own Services expose 5432 only, so
   the gate adds one, METRICS_SERVICE, for the instances' exporter on 9187.
@@ -39,21 +39,25 @@ JOIN = {"cnpg.io/jobRole": "join"}
 # The sources whose probe pod carries labels: CNPG's join label, never the check label.
 POD_LABELS = {"polaris-join": JOIN, "none-join": JOIN, "datahub-join": JOIN,
               "datahub-client": {release.DATAHUB_PG_CLIENT_LABEL: "true"},
-              "datahub-kafka-client": {release.DATAHUB_KAFKA_CLIENT_LABEL: "true"}}
+              "datahub-kafka-client": {release.DATAHUB_KAFKA_CLIENT_LABEL: "true"},
+              "datahub-opensearch-client": {release.DATAHUB_OPENSEARCH_CLIENT_LABEL: "true"}}
 # The gate's Service for CNPG's exporter on polaris-pg's instances (ADR-046 §4).
 METRICS_SERVICE = "gate-polaris-pg-metrics"
 PG_METRICS_PORT = 9187
 # datahub-kafka's client port (ADR-068 §1).
 KAFKA_PORT = 9092
+# datahub-opensearch's HTTP port, and its transport port, which no rule opens (ADR-070 §2).
+OPENSEARCH_PORT = 9200
+OPENSEARCH_TRANSPORT_PORT = 9300
 NAME = "kubernetes.io/metadata.name"
 
 Case = collections.namedtuple("Case", "source target allowed")
-# One allowed and one refused connection per rule of ADR-048 §3, ADR-066 §4, ADR-067 and
-# ADR-068 §3, by source: a caller class, `none` (a namespace with no label), `datahub`
-# (NS_CATALOG_DATAHUB), `polaris` (a pod in NS_CATALOG_POLARIS without the check label),
-# `polaris-join`, `none-join` and `datahub-join` (a pod with CNPG's join label in those
-# namespaces), `datahub-client` (a pod in NS_CATALOG_DATAHUB with datahub-pg's client label), or
-# `datahub-kafka-client` (one there with Kafka's).
+# One allowed and one refused connection per rule of ADR-048 §3, ADR-066 §4, ADR-067,
+# ADR-068 §3 and ADR-070 §5, by source: a caller class, `none` (a namespace with no label),
+# `datahub` (NS_CATALOG_DATAHUB), `polaris` (a pod in NS_CATALOG_POLARIS without the check
+# label), `polaris-join`, `none-join` and `datahub-join` (a pod with CNPG's join label in those
+# namespaces), `datahub-client` (a pod in NS_CATALOG_DATAHUB with datahub-pg's client label),
+# `datahub-kafka-client` (one there with Kafka's) or `datahub-opensearch-client` (OpenSearch's).
 CASES = [
     Case("gateway", "polaris-api", True),
     Case("gateway", "polaris-management", False),
@@ -99,6 +103,10 @@ CASES = [
     Case("datahub-client", "datahub-kafka", False),
     Case(UNLABELLED, "datahub-kafka", False),
     Case("polaris", "datahub-kafka", False),
+    Case("datahub-opensearch-client", "datahub-opensearch", True),
+    Case("datahub", "datahub-opensearch", False),
+    Case(UNLABELLED, "datahub-opensearch", False),
+    Case("datahub-opensearch-client", "datahub-opensearch-transport", False),
 ]
 
 # Connects to each `host:port` argument at once and prints `host:port RESULT` for each:
@@ -147,6 +155,9 @@ def targets(env):
         "datahub-pg": _svc(f"{release.DATAHUB_PG}-rw", dh, standins.PG_PORT),
         # Headless: the name resolves to the broker's pod.
         "datahub-kafka": _svc(release.DATAHUB_KAFKA, dh, KAFKA_PORT),
+        "datahub-opensearch": _svc(release.DATAHUB_OPENSEARCH, dh, OPENSEARCH_PORT),
+        "datahub-opensearch-transport": _svc(release.DATAHUB_OPENSEARCH, dh,
+                                             OPENSEARCH_TRANSPORT_PORT),
     }
 
 
@@ -166,6 +177,7 @@ def source_namespaces(env):
     sources["datahub-client"] = (env["NS_CATALOG_DATAHUB"], None)
     sources["datahub-join"] = (env["NS_CATALOG_DATAHUB"], None)
     sources["datahub-kafka-client"] = (env["NS_CATALOG_DATAHUB"], None)
+    sources["datahub-opensearch-client"] = (env["NS_CATALOG_DATAHUB"], None)
     return sources
 
 

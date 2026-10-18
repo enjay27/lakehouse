@@ -78,13 +78,15 @@ class Pins(unittest.TestCase):
             f"/{version}-standalone-strict/networkpolicy-networking-v1.json"))
         self.assertTrue(pin["source"])
 
-    def test_the_statefulset_and_service_schemas_are_pinned_beside_the_network_policys(self):
-        # ADR-068 §1, ADR-016: kubeconform validates charts/datahub-kafka's StatefulSet and
-        # Service in the static gate, from the same commit and Kubernetes version.
+    def test_the_workload_schemas_are_pinned_beside_the_network_policys(self):
+        # ADR-068 §1, ADR-070 §1, ADR-016: kubeconform validates charts/datahub-kafka's and
+        # charts/datahub-opensearch's StatefulSet, Services and ConfigMap in the static gate,
+        # from the same commit and Kubernetes version.
         schemas = gate.load_pins(os.path.join(HERE, "pins.json"))["kubernetes_schemas"]
         commit_dir = schemas["networkpolicy"]["url"].rsplit("/", 1)[0]
         for name, file in (("statefulset", "statefulset-apps-v1.json"),
-                           ("service", "service-v1.json")):
+                           ("service", "service-v1.json"),
+                           ("configmap", "configmap-v1.json")):
             with self.subTest(schema=name):
                 pin = schemas[name]
                 self.assertEqual(pin["url"], f"{commit_dir}/{file}")
@@ -2272,7 +2274,7 @@ class CheckDatahubKafka(unittest.TestCase):
         self.assertEqual(log, ["topics --bootstrap-server b:9092 --delete --topic gate-check-1"])
 
     def test_the_broker_is_back_when_a_new_pod_is_ready(self):
-        back = gate.broker_back({"old"})
+        back = gate.new_ready_pod({"old"})
         self.assertIsNone(back(kafka_pods()))
         self.assertIsNone(back(kafka_pods(("old", True))))
         self.assertIsNone(back(kafka_pods(("new", False))))
@@ -2349,6 +2351,198 @@ class CheckDatahubKafka(unittest.TestCase):
 
     def test_it_is_a_command_of_the_gate(self):
         self.assertIn("| check-datahub-kafka |", gate.__doc__.strip().splitlines()[-1])
+
+
+
+OPENSEARCH_VALUES = {"image": {"repository": "opensearchproject/opensearch",
+                               "tag": "2.19.6@sha256:" + "f" * 64}}
+OPENSEARCH_IMAGE = "opensearchproject/opensearch:2.19.6@sha256:" + "f" * 64
+OPENSEARCH_URL = "http://datahub-opensearch.catalog-datahub.svc.cluster.local:9200"
+# A stand-in for curl, for OPENSEARCH_CHECK: logs its arguments and answers as OpenSearch would,
+# with the health FAKE_HEALTH and FAKE_HITS hits.
+FAKE_CURL = r'''#!/bin/bash
+echo "curl $*" >> "$FAKE_OS/log"
+case "$*" in
+  *_cluster/health*) echo "{\"status\":\"$FAKE_HEALTH\"}" ;;
+  *_search*) echo "{\"hits\":{\"total\":{\"value\":$FAKE_HITS},\"hits\":[{\"_source\":{\"check\":\"gate-check-1\"}}]}}" ;;
+  *) echo '{"acknowledged":true}' ;;
+esac
+'''
+
+
+def opensearch_answer(health="green", hits=1, index="gate-check-1"):
+    """OPENSEARCH_CHECK's `read` output, as the check pod prints it."""
+    found = [{"_source": {"check": index}}] * hits
+    return (f"health {json.dumps({'status': health})}\n"
+            f"search {json.dumps({'hits': {'total': {'value': hits}, 'hits': found}})}\n")
+
+
+def opensearch_pods(*pods):
+    """A pod list of datahub-opensearch: (uid, ready) per pod."""
+    return {"items": [{"metadata": {"name": "datahub-opensearch-0", "uid": uid},
+                       "status": {"conditions": [{"type": "Ready",
+                                                  "status": "True" if ready else "False"}]}}
+                      for uid, ready in pods]}
+
+
+class CheckDatahubOpensearch(unittest.TestCase):
+    """ADR-070 §5: from a pod with OpenSearch's client label, an index made and a document
+    written and found over plain HTTP without credentials; the node's pod deleted and back ready
+    with both on its volume; the index deleted."""
+
+    def test_the_check_pod_carries_opensearchs_client_label_and_never_the_check_label(self):
+        pod = gate.opensearch_check_pod("catalog-datahub", OPENSEARCH_IMAGE, "c-1")
+        self.assertEqual(pod["metadata"]["namespace"], "catalog-datahub")
+        labels = pod["metadata"]["labels"]
+        self.assertEqual(labels[gate.release.DATAHUB_OPENSEARCH_CLIENT_LABEL], "true")
+        self.assertNotIn(gate.release.DATAHUB_KAFKA_CLIENT_LABEL, labels)
+        self.assertNotIn(gate.network.CHECK_LABEL, labels)
+        (container,) = pod["spec"]["containers"]
+        self.assertEqual(container["image"], OPENSEARCH_IMAGE)
+        self.assertEqual(container["command"][0], "sleep")
+        self.assertEqual(pod["spec"]["restartPolicy"], "Never")
+
+    def test_the_charts_image_comes_from_the_releases_values(self):
+        self.assertEqual(gate.opensearch_image(OPENSEARCH_VALUES), OPENSEARCH_IMAGE)
+
+    def test_plain_http_to_the_service_on_9200(self):
+        self.assertEqual(gate.opensearch_url("catalog-datahub"), OPENSEARCH_URL)
+        self.assertEqual(gate.opensearch_exec("catalog-datahub", "p", "write", "i"), [
+            "kubectl", "--context", gate.CONTEXT, "-n", "catalog-datahub", "exec", "-i", "p",
+            "--", "bash", "-s", "--", "write", OPENSEARCH_URL, "i"])
+
+    def script(self, step, health="green", hits=1):
+        """Runs OPENSEARCH_CHECK's `step` with FAKE_CURL; returns (stdout, curl's log)."""
+        with tempfile.TemporaryDirectory() as fake:
+            path = os.path.join(fake, "curl")
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(FAKE_CURL)
+            os.chmod(path, 0o755)
+            env = {**os.environ, "CURL": path, "FAKE_OS": fake, "FAKE_HEALTH": health,
+                   "FAKE_HITS": str(hits)}
+            out = subprocess.run(["bash", "-s", "--", step, OPENSEARCH_URL, "gate-check-1"],
+                                 input=gate.OPENSEARCH_CHECK, env=env, capture_output=True,
+                                 text=True, check=True).stdout
+            with open(os.path.join(fake, "log"), encoding="utf-8") as f:
+                return out, f.read().splitlines()
+
+    def test_write_makes_one_shard_and_no_replica_waits_for_green_then_writes_one_document(self):
+        out, log = self.script("write")
+        create, health, doc = log
+        self.assertIn(f"-X PUT {OPENSEARCH_URL}/gate-check-1 ", create + " ")
+        self.assertIn('"number_of_shards":1', create)
+        self.assertIn('"number_of_replicas":0', create)
+        self.assertIn(f"{OPENSEARCH_URL}/_cluster/health/gate-check-1?wait_for_status=green",
+                      health)
+        self.assertIn(f"-X PUT {OPENSEARCH_URL}/gate-check-1/_doc/1?refresh=true", doc)
+        self.assertIn('"check":"gate-check-1"', doc)
+        self.assertEqual(gate.opensearch_lines(out)["health"], {"status": "green"})
+
+    def test_no_credential_and_no_tls_option_reaches_curl(self):
+        # ADR-070 §2: the security plugin off, so plain HTTP answers without a login.
+        _, log = self.script("write")
+        for line in log:
+            with self.subTest(line=line):
+                self.assertNotRegex(line, r" (-u|--user|-k|--insecure|--cacert) ")
+                self.assertNotIn("https://", line)
+                self.assertIn("--fail-with-body", line)
+
+    def test_read_waits_for_green_and_searches_for_the_document(self):
+        out, log = self.script("read")
+        health, search = log
+        self.assertIn("wait_for_status=green", health)
+        self.assertIn(f"{OPENSEARCH_URL}/gate-check-1/_search?q=check:gate-check-1", search)
+        found = gate.opensearch_lines(out)
+        self.assertEqual(found["health"], {"status": "green"})
+        self.assertTrue(gate.opensearch_found(found, "gate-check-1"))
+
+    def test_the_script_deletes_the_index(self):
+        out, log = self.script("delete")
+        self.assertEqual(out.strip(), "deleted")
+        (delete,) = log
+        self.assertIn(f"-X DELETE {OPENSEARCH_URL}/gate-check-1", delete)
+
+    def test_a_document_is_found_only_once_and_only_when_green(self):
+        lines = gate.opensearch_lines
+        self.assertTrue(gate.opensearch_found(lines(opensearch_answer()), "gate-check-1"))
+        for answer in (opensearch_answer(health="yellow"), opensearch_answer(hits=0),
+                       opensearch_answer(hits=2), opensearch_answer(index="other"), ""):
+            with self.subTest(answer=answer):
+                self.assertFalse(gate.opensearch_found(lines(answer), "gate-check-1"))
+
+    def fake_cluster(self, reads=({},) * 2):
+        """gate.output answering each call of check_datahub_opensearch, each read as `reads`
+        say (opensearch_answer's arguments) for the index it names; records them in order."""
+        calls, reads = [], list(reads)
+
+        def fake_output(argv, stdin=None):
+            calls.append(argv)
+            if argv[0] == "helm":
+                return json.dumps(OPENSEARCH_VALUES)
+            if "exec" in argv:
+                self.assertEqual(stdin, gate.OPENSEARCH_CHECK)
+                step = argv[argv.index("-s") + 2]
+                if step == "write":
+                    return f"health {json.dumps({'status': 'green'})}\n"
+                if step == "read":
+                    return opensearch_answer(index=argv[-1], **reads.pop(0))
+                return "deleted\n"
+            if "get" in argv:
+                return json.dumps(opensearch_pods(("old", True)))
+            return ""
+        return calls, fake_output
+
+    def check(self, fake_output, wait=("datahub-opensearch-0",)):
+        env = {"NS_CATALOG_DATAHUB": "catalog-datahub"}
+        with mock.patch.object(gate, "output", side_effect=fake_output), \
+                mock.patch.object(gate, "run") as run, \
+                mock.patch.object(gate, "wait_for", side_effect=list(wait)) as wait_for, \
+                mock.patch.object(gate.subprocess, "run") as cleanup:
+            problems, notes = gate.check_datahub_opensearch(env)
+        return problems, notes, run, wait_for, cleanup
+
+    def test_round_trip_then_restart_then_read_again_then_delete(self):
+        calls, fake_output = self.fake_cluster()
+        problems, notes, run, wait_for, cleanup = self.check(fake_output)
+        self.assertEqual(problems, [])
+        (apply_call,) = run.call_args_list
+        self.assertIn("apply", apply_call.args[0])
+        self.assertEqual(json.loads(apply_call.args[1])["spec"]["containers"][0]["image"],
+                         OPENSEARCH_IMAGE)
+        steps = [c[c.index("-s") + 2] if "exec" in c else
+                 "delete-node" if "delete" in c else None for c in calls]
+        self.assertEqual([s for s in steps if s], ["write", "read", "delete-node", "read",
+                                                    "delete"])
+        (delete,) = [c for c in calls if "delete" in c and "exec" not in c]
+        self.assertIn("pod/datahub-opensearch-0", delete)
+        (get,) = {tuple(c) for c in calls if "get" in c and "pods" in c}
+        self.assertIn("app.kubernetes.io/name=opensearch,"
+                      "app.kubernetes.io/instance=datahub-opensearch", get)
+        self.assertEqual(wait_for.call_count, 1)
+        self.assertEqual(wait_for.call_args.kwargs["timeout"], gate.OPENSEARCH_RESTART_TIMEOUT)
+        self.assertIn("delete", cleanup.call_args.args[0])
+        self.assertEqual(len(notes), 3)
+        self.assertIn("plain HTTP", notes[0])
+        self.assertIn("datahub-opensearch-0", notes[1])
+        self.assertIn("deleted", notes[2])
+
+    def test_a_document_not_found_is_a_problem_and_nothing_restarts(self):
+        calls, fake_output = self.fake_cluster(reads=({"hits": 0},))
+        problems, _, _, wait_for, cleanup = self.check(fake_output)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("gate-check-", problems[0])
+        self.assertFalse(any("pod/datahub-opensearch-0" in c for c in calls))
+        self.assertEqual(wait_for.call_count, 0)
+        self.assertTrue(cleanup.called)
+
+    def test_a_document_lost_with_the_restart_is_a_problem(self):
+        _, fake_output = self.fake_cluster(reads=({}, {"hits": 0}))
+        problems, _, _, _, _ = self.check(fake_output)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("after the restart", problems[0])
+
+    def test_it_is_a_command_of_the_gate(self):
+        self.assertIn("| check-datahub-opensearch |", gate.__doc__.strip().splitlines()[-1])
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
-"""Tests for charts/datahub-network-policies (ADR-048, ADR-066 §4, ADR-068 §3): default deny in
-Datahub's namespace, datahub-pg's two allow policies and datahub-kafka's, the values schema, and kubeconform against the
+"""Tests for charts/datahub-network-policies (ADR-048, ADR-066 §4, ADR-068 §3, ADR-070 §2): default
+deny in Datahub's namespace, datahub-pg's two allow policies, datahub-kafka's and
+datahub-opensearch's, the values schema, and kubeconform against the
 NetworkPolicy schema of the gate's Kubernetes version, pinned in gates/pins.json.
 
 Run: python3 -m unittest discover -s charts
@@ -33,6 +34,9 @@ LINT_VALUES = os.path.join(CHART, "ci", "lint-values.yaml")
 NAME = "kubernetes.io/metadata.name"
 INSTANCES = {"cnpg.io/podRole": "instance"}
 KAFKA = {"app.kubernetes.io/name": "datahub-kafka"}
+# The labels upstream's opensearch chart gives its pod, with release datahub-opensearch.
+OPENSEARCH = {"app.kubernetes.io/name": "opensearch",
+              "app.kubernetes.io/instance": "datahub-opensearch"}
 
 SCHEMAS = None
 
@@ -83,12 +87,12 @@ class Rendered(unittest.TestCase):
         cls.docs = render()
         cls.policies = by_name(cls.docs)
 
-    def test_only_these_four_network_policies(self):
+    def test_only_these_five_network_policies(self):
         self.assertEqual({(d["apiVersion"], d["kind"]) for d in self.docs},
                          {("networking.k8s.io/v1", "NetworkPolicy")})
         self.assertEqual(set(self.policies),
                          {"default-deny-ingress", "datahub-pg-clients", "datahub-pg-operator",
-                          "datahub-kafka-clients"})
+                          "datahub-kafka-clients", "datahub-opensearch-clients"})
 
     def test_every_pod_is_denied_ingress_by_default(self):
         deny = self.policies["default-deny-ingress"]["spec"]
@@ -144,6 +148,35 @@ class Rendered(unittest.TestCase):
         for key, value in KAFKA.items():
             self.assertEqual(labels.get(key), value)
         self.assertEqual(sts["metadata"]["name"], release.DATAHUB_KAFKA)
+
+    def test_opensearch_on_9200_only_from_its_clients_in_this_namespace(self):
+        # ADR-070 §2: plain HTTP behind this rule; the transport port 9300 gets none.
+        spec = self.policies["datahub-opensearch-clients"]["spec"]
+        self.assertEqual(spec["podSelector"], {"matchLabels": OPENSEARCH})
+        self.assertEqual(spec["ingress"], [{
+            "ports": [{"protocol": "TCP", "port": 9200}],
+            "from": [{"podSelector": {"matchLabels": {
+                release.DATAHUB_OPENSEARCH_CLIENT_LABEL: "true"}}}]}])
+
+    def test_the_opensearch_client_label_is_its_own(self):
+        self.assertEqual(release.DATAHUB_OPENSEARCH_CLIENT_LABEL,
+                         "lakehouse/datahub-opensearch-client")
+        self.assertNotIn(release.DATAHUB_OPENSEARCH_CLIENT_LABEL,
+                         (release.DATAHUB_KAFKA_CLIENT_LABEL, release.DATAHUB_PG_CLIENT_LABEL,
+                          release.PG_CLIENT_LABEL))
+
+    def test_the_opensearch_rule_selects_the_nodes_pod_only(self):
+        out = subprocess.run(["helm", "template", release.DATAHUB_OPENSEARCH_RELEASE,
+                              release.DATAHUB_OPENSEARCH_CHART, "--namespace", NAMESPACE,
+                              "-f", release.DATAHUB_OPENSEARCH_VALUES],
+                             capture_output=True, text=True, check=True).stdout
+        (sts,) = [d for d in yaml.safe_load_all(out) if d and d["kind"] == "StatefulSet"]
+        labels = sts["spec"]["template"]["metadata"]["labels"]
+        for key, value in OPENSEARCH.items():
+            self.assertEqual(labels.get(key), value)
+        self.assertEqual(sts["metadata"]["name"], release.DATAHUB_OPENSEARCH)
+        # app.kubernetes.io/name alone, opensearch, could match another release's pods.
+        self.assertIn("app.kubernetes.io/instance", OPENSEARCH)
 
     def test_kubeconform_accepts_every_policy(self):
         result = helm_template()

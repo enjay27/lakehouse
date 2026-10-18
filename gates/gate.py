@@ -97,6 +97,14 @@
                   broker's pod, waits until a new one is ready, and reads the message again from
                   its volume; deletes the topic (ADR-068 §5). The check pod is deleted whatever
                   happened.
+  check-datahub-opensearch
+                  from a short-lived pod in Datahub's namespace with OpenSearch's client label
+                  (never the check label) and the image datahub-opensearch's helm release runs:
+                  over plain HTTP without credentials, creates an index with one shard and no
+                  replica, waits for it to be green, writes one document and finds it by search;
+                  deletes the node's pod, waits until a new one is ready, and finds the index
+                  green and the document again on its volume; deletes the index (ADR-070 §5).
+                  The check pod is deleted whatever happened.
   check-polaris   compares the running Polaris (its Deployment, pods and ConfigMap) with the
                   values its helm release was installed with and with `.env`, checks its
                   replicas run on different nodes (ADR-016), then runs gates/check_polaris.sh
@@ -169,7 +177,7 @@
 Every kubectl and helm call names the gate's context, and a namespace where the object has
 one. Nothing here reaches any cluster but the kind cluster it creates (ADR-017).
 
-Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | seed | check-migration | rebuild-replica | check-polaris-pg | check-datahub-pg | check-datahub-kafka | check-polaris | console-image [--build|--load] | batch-image | check-logs | check-console | check-iceberg | check-restore | gate-policies | check-network | check-metrics
+Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | seed | check-migration | rebuild-replica | check-polaris-pg | check-datahub-pg | check-datahub-kafka | check-datahub-opensearch | check-polaris | console-image [--build|--load] | batch-image | check-logs | check-console | check-iceberg | check-restore | gate-policies | check-network | check-metrics
 """
 
 import concurrent.futures
@@ -1482,8 +1490,8 @@ def kafka_lines(text):
     return found
 
 
-def broker_back(old_uids):
-    """For wait_for: the name of a ready pod of datahub-kafka that is none of `old_uids`."""
+def new_ready_pod(old_uids):
+    """For wait_for over a pod list: the name of a ready pod that is none of `old_uids`."""
     def done(pods):
         for pod in pods["items"]:
             ready = any(c["type"] == "Ready" and c["status"] == "True"
@@ -1515,7 +1523,7 @@ def check_datahub_kafka(env):
         pods = kubectl + ["get", "pods", "-l", KAFKA_POD_LABELS, "-o", "json"]
         old = {p["metadata"]["uid"] for p in json.loads(output(pods))["items"]}
         output(kubectl + ["delete", f"pod/{broker}", "--wait=true"])
-        back = wait_for(pods, broker_back(old), f"{broker} back ready",
+        back = wait_for(pods, new_ready_pod(old), f"{broker} back ready",
                         timeout=KAFKA_RESTART_TIMEOUT)
         received = kafka_lines(output(kafka_exec(ns, pod, "read", topic),
                                       KAFKA_CHECK)).get("received")
@@ -1526,6 +1534,140 @@ def check_datahub_kafka(env):
                      "unchanged from its volume.")
         output(kafka_exec(ns, pod, "delete", topic), KAFKA_CHECK)
         notes.append(f"Topic {topic} deleted.")
+        return [], notes
+    finally:
+        subprocess.run(kubectl + ["delete", "pod", pod, "--ignore-not-found", "--wait=false"],
+                       capture_output=True, text=True, check=False)
+
+
+# check-datahub-opensearch (ADR-070 §5): the node's pods, by the labels upstream's chart gives
+# release datahub-opensearch, and the time its pod has to come back ready after it is deleted:
+# its startup probe allows 5 s plus 30 tries of 10 s, and the image may be pulled again.
+OPENSEARCH_POD_LABELS = ("app.kubernetes.io/name=opensearch,"
+                         f"app.kubernetes.io/instance={release.DATAHUB_OPENSEARCH_RELEASE}")
+OPENSEARCH_RESTART_TIMEOUT = 600
+# Run in the check pod with `bash -s -- STEP URL INDEX`, over plain HTTP with no credential: an
+# answer that is not 2xx stops the step. `write` creates the index with one shard and no replica,
+# so one node can make it green, waits for green and writes one document, refreshed so a search
+# finds it at once; `read` waits for green and searches for the document. Each prints the health
+# and the search's answer, one JSON line each. `delete` deletes the index. CURL is only for the
+# tests.
+OPENSEARCH_CHECK = r"""
+set -euo pipefail
+step=$1 url=$2 index=$3
+curl=${CURL:-curl}
+call() { "$curl" -sS --fail-with-body --max-time 150 "$@"; }
+health() {
+  local answer
+  answer=$(call "$url/_cluster/health/$index?wait_for_status=green&timeout=120s")
+  echo "health $answer"
+}
+case "$step" in
+  write)
+    call -X PUT "$url/$index" -H 'Content-Type: application/json' \
+      -d '{"settings":{"index":{"number_of_shards":1,"number_of_replicas":0}}}' >&2
+    health
+    call -X PUT "$url/$index/_doc/1?refresh=true" -H 'Content-Type: application/json' \
+      -d "{\"check\":\"$index\"}" >&2
+    ;;
+  read)
+    health
+    answer=$(call "$url/$index/_search?q=check:$index")
+    echo "search $answer"
+    ;;
+  delete)
+    call -X DELETE "$url/$index" >&2
+    echo deleted
+    ;;
+esac
+"""
+
+
+def opensearch_url(namespace):
+    """datahub-opensearch's Service, plain HTTP (ADR-070 §2)."""
+    return (f"http://{release.DATAHUB_OPENSEARCH}.{namespace}.svc.cluster.local:"
+            f"{network.OPENSEARCH_PORT}")
+
+
+def opensearch_image(values):
+    """The image the release runs, from its values: upstream's chart writes repository:tag."""
+    return f"{values['image']['repository']}:{values['image']['tag']}"
+
+
+def opensearch_check_pod(namespace, image, name):
+    """A pod that waits, with OpenSearch's client label and never the check label, so the rule
+    of ADR-070 §2 is what lets it in, running the chart's own image and its curl."""
+    return {"apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": name, "namespace": namespace,
+                         "labels": {release.DATAHUB_OPENSEARCH_CLIENT_LABEL: "true",
+                                    "app.kubernetes.io/part-of": "gate"}},
+            "spec": {"restartPolicy": "Never", "enableServiceLinks": False,
+                     "containers": [{"name": "check", "image": image,
+                                     "command": ["sleep", "1800"]}]}}
+
+
+def opensearch_exec(namespace, pod, step, index):
+    """OPENSEARCH_CHECK's `step` in the check pod; the script goes on stdin."""
+    return ["kubectl", "--context", CONTEXT, "-n", namespace, "exec", "-i", pod, "--", "bash",
+            "-s", "--", step, opensearch_url(namespace), index]
+
+
+def opensearch_lines(text):
+    """{health|search: answer} from OPENSEARCH_CHECK's output."""
+    found = {}
+    for line in text.splitlines():
+        key, _, answer = line.partition(" ")
+        if key in ("health", "search") and answer:
+            found[key] = json.loads(answer)
+    return found
+
+
+def opensearch_found(found, index):
+    """True when the index is green and the search finds the check's document, once."""
+    hits = found.get("search", {}).get("hits", {})
+    return (found.get("health", {}).get("status") == "green"
+            and hits.get("total", {}).get("value") == 1
+            and [h.get("_source", {}).get("check") for h in hits.get("hits", [])] == [index])
+
+
+def check_datahub_opensearch(env):
+    """ADR-070 §5: see the module's docstring. Returns (problems, notes)."""
+    ns, pid = env["NS_CATALOG_DATAHUB"], os.getpid()
+    kubectl = ["kubectl", "--context", CONTEXT, "-n", ns]
+    values = json.loads(output(["helm", "--kube-context", CONTEXT, "-n", ns, "get", "values",
+                                release.DATAHUB_OPENSEARCH_RELEASE, "--all", "-o", "json"]))
+    pod, index = f"{release.DATAHUB_OPENSEARCH}-check-{pid}", f"gate-check-{pid}"
+    node = f"{release.DATAHUB_OPENSEARCH}-0"
+    run(kubectl + ["apply", "-f", "-"],
+        json.dumps(opensearch_check_pod(ns, opensearch_image(values), pod)))
+    try:
+        # The image is about 1 GB, and the check pod's node may not have pulled it yet.
+        output(kubectl + ["wait", "--for=condition=Ready", f"pod/{pod}", "--timeout=600s"])
+        written = opensearch_lines(output(opensearch_exec(ns, pod, "write", index),
+                                          OPENSEARCH_CHECK))
+        found = opensearch_lines(output(opensearch_exec(ns, pod, "read", index),
+                                        OPENSEARCH_CHECK))
+        green = written.get("health", {}).get("status") == "green"
+        if not green or not opensearch_found(found, index):
+            return [f"Index {index}: created with health {written.get('health')}, then read "
+                    f"back {found}; expected green and the document found once"], []
+        notes = [f"Index {index}: created green with one shard and no replica, a document "
+                 f"written and found by search over plain HTTP without credentials at "
+                 f"{opensearch_url(ns)}."]
+        pods = kubectl + ["get", "pods", "-l", OPENSEARCH_POD_LABELS, "-o", "json"]
+        old = {p["metadata"]["uid"] for p in json.loads(output(pods))["items"]}
+        output(kubectl + ["delete", f"pod/{node}", "--wait=true"])
+        back = wait_for(pods, new_ready_pod(old), f"{node} back ready",
+                        timeout=OPENSEARCH_RESTART_TIMEOUT)
+        found = opensearch_lines(output(opensearch_exec(ns, pod, "read", index),
+                                        OPENSEARCH_CHECK))
+        if not opensearch_found(found, index):
+            return [f"Index {index}: read back {found} after the restart of {node}; expected "
+                    "green and the document found once"], notes
+        notes.append(f"Pod {node} deleted and back ready as {back}; the index green and the "
+                     "document found again on its volume.")
+        output(opensearch_exec(ns, pod, "delete", index), OPENSEARCH_CHECK)
+        notes.append(f"Index {index} deleted.")
         return [], notes
     finally:
         subprocess.run(kubectl + ["delete", "pod", pod, "--ignore-not-found", "--wait=false"],
@@ -2381,6 +2523,11 @@ def main(argv):
         return 1 if problems else 0
     if argv[1:] == ["check-datahub-kafka"]:
         problems, notes = check_datahub_kafka(release.load_env(ROOT, os.environ))
+        for line in notes + problems:
+            print(line, flush=True)
+        return 1 if problems else 0
+    if argv[1:] == ["check-datahub-opensearch"]:
+        problems, notes = check_datahub_opensearch(release.load_env(ROOT, os.environ))
         for line in notes + problems:
             print(line, flush=True)
         return 1 if problems else 0
