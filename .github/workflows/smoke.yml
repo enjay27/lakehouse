@@ -152,6 +152,11 @@ jobs:
           set -euo pipefail
           python3 gates/gate.py check-datahub | tee -a "$GITHUB_STEP_SUMMARY"
 
+      - name: Datahub rebuilds its indices after OpenSearch's volume is lost, and its topics after Kafka's (ADR-071)
+        run: |
+          set -euo pipefail
+          python3 gates/gate.py check-datahub-recovery | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: The stand-ins answer as Polaris needs them to (ADR-026, ADR-031)
         run: |
           set -euo pipefail
