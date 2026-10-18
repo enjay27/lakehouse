@@ -126,6 +126,7 @@ flowchart LR
 | [075](075-check-datahub-recovery-runs-in-a-smoke-job-of-its-own-on-its-own-kind-cluster-on-every-smoke-run.md) | check-datahub-recovery runs in a smoke job of its own, on its own kind cluster, on every smoke run | Amended by ADR-077 |
 | [076](076-datahub-ingests-each-polaris-catalog-daily-from-upstreams-ingestion-cronjob-as-its-own-principal-the-policy-lets-only-read.md) | Datahub ingests each Polaris catalog daily from upstream's ingestion CronJob, as its own principal the policy lets only read | Accepted |
 | [077](077-the-datahub-recovery-job-installs-datahub-alone-from-this-commit-and-check-datahub-recovery-prints-its-timeline.md) | The datahub-recovery job installs Datahub alone, from this commit, and check-datahub-recovery prints its timeline | Accepted |
+| [078](078-check-datahub-recovery-runs-on-a-gate-push-only-when-it-changes-datahubs-files-and-always-nightly-and-in-the-release-gate.md) | check-datahub-recovery runs on a gate push only when it changes Datahub's files, and always nightly and in the release gate | Proposed |
 
 ## Not ADRs
 
