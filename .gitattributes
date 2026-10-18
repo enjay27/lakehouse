@@ -3,3 +3,10 @@
 # Upstream's opensearch chart 2.38.0 is kept unchanged (ADR-070 §1); its CHANGELOG.md has a
 # stray '=======' line, which git diff --check would take for a conflict marker.
 charts/datahub-opensearch/CHANGELOG.md conflict-marker-size=32
+# Upstream's datahub chart 1.1.7 is kept as its release archive with one patched line (ADR-071 §1,
+# ADR-072 §1). Its README.md has a stray '=======' line and trailing spaces, datahub-gms's
+# values.yaml trailing spaces, and datahub-ingestion-cron's configmap.yaml a blank line at its end,
+# each in both copies the archive holds; git diff --check would report them.
+charts/datahub/README.md conflict-marker-size=32 whitespace=-trailing-space
+charts/datahub/*/datahub-gms/values.yaml whitespace=-trailing-space
+charts/datahub/*/datahub-ingestion-cron/templates/configmap.yaml whitespace=-blank-at-eof

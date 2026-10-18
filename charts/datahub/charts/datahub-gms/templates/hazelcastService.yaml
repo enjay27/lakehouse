@@ -1,0 +1,21 @@
+{{- if eq (include "datahub-gms.hazelcast.required" .) "true" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "datahub-gms.hazelcast.serviceName" . }}
+  labels:
+    {{- include "datahub-gms.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+    - name: hazelcast
+      port: 5701
+      protocol: TCP
+      targetPort: hazelcast
+  selector:
+    app.kubernetes.io/name: {{ include "datahub-gms.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+{{- include "datahub-gms.applicationVersionLabels" . | trimPrefix "\n" | nindent 4 }}
+{{- end }}

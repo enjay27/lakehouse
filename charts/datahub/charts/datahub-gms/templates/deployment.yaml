@@ -1,0 +1,613 @@
+{{- include "datahub.validate.preprocessHooks" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "datahub-gms.fullname" . }}
+  labels:
+    {{- include "datahub-gms.labels" . | nindent 4 }}
+    {{- range $key, $val := .Values.extraLabels }}
+    {{ $key }}: {{ $val | quote }}
+    {{- end }}
+  {{- with .Values.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if and (.Values.global.strict_mode) (gt (.Values.replicaCount | int) 1) (.Values.global.datahub.managed_ingestion.enabled) (not .Values.global.datahub_standalone_consumers_enabled)}}
+  {{- fail "\nManaged ingestion can not be used with multiple GMS instances in non standalone mode. Please enable standalone mode with only 1 MCE replica if you wish to run multiple GMS instances and managed ingestion." }}
+  {{- else }}
+  replicas:  {{ .Values.replicaCount }}
+  {{- end }}
+  revisionHistoryLimit: {{ .Values.revisionHistoryLimit }}
+  selector:
+    matchLabels:
+      {{- include "datahub-gms.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+    {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+    {{- end }}
+      labels:
+        {{- include "datahub-gms.selectorLabels" . | nindent 8 }}
+        {{- include "datahub-gms.applicationVersionLabels" . | trimPrefix "\n" | nindent 8 }}
+        {{- range $key, $value := .Values.global.podLabels }}
+        {{ $key }}: {{ $value | quote }}
+        {{- end }}
+        {{- range $key, $value := .Values.extraPodLabels }}
+        {{ $key }}: {{ $value | quote }}
+        {{- end }}
+    spec:
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+    {{- with .Values.global.hostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+    {{- end }}
+    {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+    {{- end }}
+      serviceAccountName: {{ include "datahub-gms.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      volumes:
+        {{- with .Values.global.credentialsAndCertsSecrets }}
+        - name: datahub-certs-dir
+          secret:
+            defaultMode: 0444
+            secretName: {{ .name }}
+        {{- end }}
+        {{- if and .Values.global.elasticsearch.search.custom.enabled .Values.global.elasticsearch.search.custom.config }}
+        - configMap:
+            name: {{ printf "%s-%s" .Release.Name "search-custom" }}
+          name: search-config
+        {{- end }}
+      {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.priorityClassName }}
+      priorityClassName: "{{ .Values.priorityClassName }}"
+      {{- end }}
+      initContainers:
+      {{- with .Values.extraInitContainers }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: {{ include "datahub.image" (dict "imageRegistry" .Values.global.imageRegistry "version" .Values.global.datahub.version "image" .Values.image) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if .Values.image.command }}
+          command: {{ .Values.image.command | toRawJson }}
+          {{- end }}
+          {{- if .Values.image.args }}
+          args: {{ .Values.image.args | toRawJson }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          {{- $mode := include "datahub-gms.monitoring.metricsMode" . }}
+          {{- if and (or .Values.global.datahub.monitoring.enablePrometheus .Values.global.datahub.monitoring.enableJMXPort) (or (eq $mode "legacy") (eq $mode "jmx_and_actuator")) }}
+            - name: {{ .Values.global.datahub.monitoring.portName }}
+              containerPort: {{ include "datahub-gms.monitoring.jmxPort" . }}
+              protocol: TCP
+          {{- end }}
+          {{- if and .Values.global.datahub.monitoring.enablePrometheus (or (eq $mode "jmx_and_actuator") (eq $mode "actuator_only")) }}
+            - name: prometheus
+              containerPort: {{ include "datahub-gms.monitoring.actuatorPrometheusPort" . }}
+              protocol: TCP
+          {{- end }}
+          {{- if eq (include "datahub-gms.hazelcast.required" .) "true" }}
+            - name: hazelcast
+              containerPort: 5701
+              protocol: TCP
+          {{- end }}
+          livenessProbe:
+            httpGet:
+              path: {{ if .Values.global.basePath.enabled }}{{ if eq .Values.global.basePath.gms "/" }}{{ else }}{{ .Values.global.basePath.gms }}{{ end }}{{ end }}/health
+              port: http
+            initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.livenessProbe.periodSeconds }}
+            failureThreshold: {{ .Values.livenessProbe.failureThreshold }}
+            timeoutSeconds: {{ .Values.livenessProbe.timeoutSeconds }}
+          readinessProbe:
+            httpGet:
+              path: {{ if .Values.global.basePath.enabled }}{{ if eq .Values.global.basePath.gms "/" }}{{ else }}{{ .Values.global.basePath.gms }}{{ end }}{{ end }}/health
+              port: http
+            initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
+            failureThreshold: {{ .Values.readinessProbe.failureThreshold }}
+            timeoutSeconds: {{ .Values.readinessProbe.timeoutSeconds }}
+          env:
+            - name: ELASTICSEARCH_SHIM_ENGINE_TYPE
+              value: {{ .Values.global.elasticsearch.engineType | quote }}
+            - name: ELASTICSEARCH_SHIM_AUTO_DETECT
+              value: {{ .Values.global.elasticsearch.autoDetect | quote }}
+            - name: ELASTICSEARCH_BUILD_INDICES_REINDEX_OPTIMIZATION_ENABLED
+              value: {{ .Values.global.elasticsearch.index.upgrade.reindexOptimizationEnabled | quote }}
+            - name: THEME_V2_ENABLED
+              value: {{ .Values.theme_v2.enabled | quote }}
+            - name: THEME_V2_DEFAULT
+              value: {{ .Values.theme_v2.default | quote }}
+            - name: THEME_V2_TOGGLEABLE
+              value: {{ .Values.theme_v2.toggeable | quote }}
+            {{- $i18n := .Values.global.datahub.i18n | default dict }}
+            - name: I18N_ENABLED
+              value: {{ ternary $i18n.enabled true (hasKey $i18n "enabled") | quote }}
+            - name: SECRET_SERVICE_CALLER_GUARD_MODE
+              value: {{ (.Values.global.datahub.encryptionKey | default dict).callerGuardMode | default "ENFORCE" | quote }}
+            {{- if .Values.global.basePath.enabled }}
+            - name: DATAHUB_BASE_PATH
+              value: {{ .Values.global.basePath.frontend | quote }}
+            {{- end }}
+            {{- if .Values.global.basePath.enabled }}
+            - name: DATAHUB_GMS_BASE_PATH
+              value: {{ .Values.global.basePath.gms | quote }}
+            {{- end }}
+            {{- if .Values.global.cdc.enabled }}
+            - name: CDC_MCL_PROCESSING_ENABLED
+              value: {{ .Values.global.cdc.enabled | quote }}
+            {{- end }}
+            - name: ENTITY_VERSIONING_ENABLED
+              value: {{ .Values.global.datahub.entityVersioning.enabled | quote }}
+            - name: SHOW_SEARCH_FILTERS_V2
+              value: {{ .Values.global.datahub.search_and_browse.show_search_v2 | quote }}
+            - name: SHOW_BROWSE_V2
+              value: {{ .Values.global.datahub.search_and_browse.show_browse_v2 | quote }}
+            - name: BACKFILL_BROWSE_PATHS_V2
+              value: {{ .Values.global.datahub.search_and_browse.backfill_browse_v2 | quote }}
+            {{- if and .Values.global.elasticsearch.search.custom.enabled .Values.global.elasticsearch.search.custom.config }}
+            - name: ELASTICSEARCH_QUERY_CUSTOM_CONFIG_ENABLED
+              value: "true"
+            - name: ELASTICSEARCH_QUERY_CUSTOM_CONFIG_FILE
+              value: "/datahub/datahub-gms/resources/search/search_config.yml"
+            {{- else if .Values.global.elasticsearch.search.custom.enabled }}
+            - name: ELASTICSEARCH_QUERY_CUSTOM_CONFIG_ENABLED
+              value: {{ .Values.global.elasticsearch.search.custom.enabled | quote }}
+            {{- end }}
+            {{- if gt (.Values.replicaCount | int) 1 }}
+            - name: SEARCH_SERVICE_CACHE_IMPLEMENTATION
+              value: "hazelcast"
+            {{- end }}
+            {{- if eq (include "datahub-gms.hazelcast.required" .) "true" }}
+            - name: SEARCH_SERVICE_HAZELCAST_SERVICE_NAME
+              value: {{ include "datahub-gms.hazelcast.serviceName" . }}
+            {{- end }}
+            {{- if .Values.global.datahub.systemUpdate.enabled }}
+            - name: DATAHUB_REVISION
+              value: {{ .Release.Revision | quote }}
+            {{- end }}
+            {{- if .Values.global.datahub.monitoring.enablePrometheus }}
+            - name: ENABLE_PROMETHEUS
+              value: "true"
+            {{- end }}
+            {{- if not .Values.global.datahub_standalone_consumers_enabled }}
+            - name: MCE_CONSUMER_ENABLED
+              value: "true"
+            - name: MAE_CONSUMER_ENABLED
+              value: "true"
+            - name: PE_CONSUMER_ENABLED
+              value: "true"
+            {{- end }}
+            {{- /* Same pair on GMS and MAE: embedded consumers and standalone MAE. */}}
+            - name: PRE_PROCESS_HOOKS_UI_ENABLED
+              value: {{ .Values.global.datahub.preProcessHooksUIEnabled | quote }}
+            - name: PRE_PROCESS_HOOKS_REPROCESS_ENABLED
+              value: {{ or .Values.global.datahub.reProcessUIEventHooks (not .Values.global.datahub.preProcessHooksUIEnabled) | quote }}
+            - name: ENTITY_REGISTRY_CONFIG_PATH
+              value: /datahub/datahub-gms/resources/entity-registry.yml
+            - name: DATAHUB_ANALYTICS_ENABLED
+              value: "{{ .Values.global.datahub_analytics_enabled }}"
+            - name: EBEAN_DATASOURCE_USERNAME
+              {{- $usernameValue := (.Values.sql).datasource.username | default .Values.global.sql.datasource.username }}
+              {{- if and (kindIs "string" $usernameValue) $usernameValue }}
+              value: {{ $usernameValue | quote }}
+              {{- else }}
+              valueFrom:
+                secretKeyRef:
+                  name: "{{ (.Values.sql).datasource.username.secretRef | default .Values.global.sql.datasource.username.secretRef }}"
+                  key: "{{ (.Values.sql).datasource.username.secretKey | default .Values.global.sql.datasource.username.secretKey }}"
+              {{- end }}
+            - name: EBEAN_DATASOURCE_PASSWORD
+              {{- $passwordValue := (.Values.sql).datasource.password.value | default .Values.global.sql.datasource.password.value }}
+              {{- if $passwordValue }}
+              value: {{ $passwordValue | quote }}
+              {{- else }}
+              valueFrom:
+                secretKeyRef:
+                  name: "{{ (.Values.sql).datasource.password.secretRef | default .Values.global.sql.datasource.password.secretRef }}"
+                  key: "{{ (.Values.sql).datasource.password.secretKey | default .Values.global.sql.datasource.password.secretKey }}"
+              {{- end }}
+            - name: EBEAN_DATASOURCE_HOST
+              value: "{{ .Values.global.sql.datasource.host }}"
+            - name: EBEAN_DATASOURCE_URL
+              value: "{{ .Values.global.sql.datasource.url }}"
+            - name: EBEAN_DATASOURCE_DRIVER
+              value: "{{ .Values.global.sql.datasource.driver }}"
+            {{- include "datahub.sql.iam.env" . | nindent 12 }}
+            - name: KAFKA_BOOTSTRAP_SERVER
+              value: "{{ .Values.global.kafka.bootstrap.server }}"
+            {{- include "datahub.kafka.iam.env" . | nindent 12 }}
+            {{- with .Values.global.kafka.producer.compressionType }}
+            - name: KAFKA_PRODUCER_COMPRESSION_TYPE
+              value: "{{ . }}"
+            {{- end }}
+            {{- if not (kindIs "invalid" .Values.global.kafka.consumer.stopContainerOnDeserializationError) }}
+            - name: KAFKA_CONSUMER_STOP_ON_DESERIALIZATION_ERROR
+              value: "{{ .Values.global.kafka.consumer.stopContainerOnDeserializationError }}"
+            {{- end }}
+            {{- with .Values.global.kafka.producer.maxRequestSize }}
+            - name: KAFKA_PRODUCER_MAX_REQUEST_SIZE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.global.kafka.consumer.maxPartitionFetchBytes }}
+            - name: KAFKA_CONSUMER_MAX_PARTITION_FETCH_BYTES
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if eq .Values.global.kafka.schemaregistry.type "INTERNAL" }}
+            - name: KAFKA_SCHEMAREGISTRY_URL
+              value: {{ printf "http://localhost:%s%s/schema-registry/api/" .Values.global.datahub.gms.port (ternary .Values.global.basePath.gms "" .Values.global.basePath.enabled) }}
+            {{- else if eq .Values.global.kafka.schemaregistry.type "KAFKA" }}
+            - name: KAFKA_SCHEMAREGISTRY_URL
+              value: "{{ .Values.global.kafka.schemaregistry.url }}"
+            {{- end }}
+            {{- with .Values.global.kafka.schemaregistry.type }}
+            - name: SCHEMA_REGISTRY_TYPE
+              value: "{{ . }}"
+            {{- end }}
+            {{- with .Values.global.kafka.schemaregistry.glue }}
+            - name: AWS_GLUE_SCHEMA_REGISTRY_REGION
+              value: "{{ .region }}"
+            {{- with .registry }}
+            - name: AWS_GLUE_SCHEMA_REGISTRY_NAME
+              value: "{{ . }}"
+            {{- end }}
+            {{- end }}
+            - name: ELASTICSEARCH_HOST
+              value: "{{ .Values.global.elasticsearch.host }}"
+            - name: ELASTICSEARCH_PORT
+              value: "{{ .Values.global.elasticsearch.port }}"
+            - name: SKIP_ELASTICSEARCH_CHECK
+              value: "{{ .Values.global.elasticsearch.skipcheck }}"
+            {{- with .Values.global.elasticsearch.useSSL }}
+            - name: ELASTICSEARCH_USE_SSL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.global.elasticsearch.auth }}
+            - name: ELASTICSEARCH_USERNAME
+              value: {{ .username }}
+            - name: ELASTICSEARCH_PASSWORD
+              {{- if .password.value }}
+              value: {{ .password.value | quote }}
+              {{- else }}
+              valueFrom:
+                secretKeyRef:
+                  name: "{{ .password.secretRef }}"
+                  key: "{{ .password.secretKey }}"
+              {{- end }}
+            {{- end }}
+            {{- with .Values.global.elasticsearch.indexPrefix }}
+            - name: INDEX_PREFIX
+              value: {{ . }}
+            {{- end }}
+            {{- include "datahub.elasticsearch.threadCount.env" . | nindent 12 }}
+            {{- include "datahub.elasticsearch.iam.env" . | nindent 12 }}
+            - name: GRAPH_SERVICE_IMPL
+              value: {{ .Values.global.graph_service_impl }}
+            {{- if eq .Values.global.graph_service_impl "neo4j" }}
+            - name: NEO4J_HOST
+              value: "{{ .Values.global.neo4j.host }}"
+            - name: NEO4J_URI
+              value: "{{ .Values.global.neo4j.uri }}"
+            - name: NEO4J_DATABASE
+              value: "{{ .Values.global.neo4j.database | default "graph.db" }}"
+            - name: NEO4J_USERNAME
+              value: "{{ .Values.global.neo4j.username }}"
+            - name: NEO4J_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: "{{ .Values.global.neo4j.password.secretRef }}"
+                  key: "{{ .Values.global.neo4j.password.secretKey }}"
+            {{- end }}
+            {{- if .Values.global.springKafkaConfigurationOverrides }}
+            {{- range $configName, $configValue := .Values.global.springKafkaConfigurationOverrides }}
+            - name: SPRING_KAFKA_PROPERTIES_{{ $configName | replace "." "_" | upper }}
+              value: {{ $configValue | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.global.credentialsAndCertsSecrets }}
+            {{- range $envVarName, $envVarValue := .Values.global.credentialsAndCertsSecrets.secureEnv }}
+            - name: SPRING_KAFKA_PROPERTIES_{{ $envVarName | replace "." "_" | upper }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.global.credentialsAndCertsSecrets.name }}
+                  key: {{ $envVarValue }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.global.kafka.topics }}
+            - name: METADATA_CHANGE_EVENT_NAME
+              value: {{ .metadata_change_event_name }}
+            - name: FAILED_METADATA_CHANGE_EVENT_NAME
+              value: {{ .failed_metadata_change_event_name }}
+            - name: METADATA_AUDIT_EVENT_NAME
+              value: {{ .metadata_audit_event_name }}
+            - name: DATAHUB_USAGE_EVENT_NAME
+              value: {{ .datahub_usage_event_name }}
+            - name: METADATA_CHANGE_PROPOSAL_TOPIC_NAME
+              value: {{ .metadata_change_proposal_topic_name }}
+            - name: FAILED_METADATA_CHANGE_PROPOSAL_TOPIC_NAME
+              value: {{ .failed_metadata_change_proposal_topic_name }}
+            - name: METADATA_CHANGE_LOG_VERSIONED_TOPIC_NAME
+              value: {{ .metadata_change_log_versioned_topic_name }}
+            - name: METADATA_CHANGE_LOG_TIMESERIES_TOPIC_NAME
+              value: {{ .metadata_change_log_timeseries_topic_name }}
+            - name: PLATFORM_EVENT_TOPIC_NAME
+              value: {{ .platform_event_topic_name }}
+            - name: DATAHUB_UPGRADE_HISTORY_TOPIC_NAME
+              value: {{ .datahub_upgrade_history_topic_name }}
+            {{- end }}
+            {{- if .Values.global.datahub.systemUpdate.enabled }}
+            - name: DATAHUB_UPGRADE_HISTORY_KAFKA_CONSUMER_GROUP_ID
+              value: {{ .Values.global.kafka.consumer_groups.datahub_upgrade_history_kafka_consumer_group_id.gms | default (printf "%s-%s" .Release.Name "duhe-consumer-job-client-gms") }}
+            {{- end }}
+            - name: METADATA_CHANGE_LOG_KAFKA_CONSUMER_GROUP_ID
+              value: {{ .Values.global.kafka.consumer_groups.metadata_change_log_kafka_consumer_group_id }}
+            {{- if not .Values.global.datahub_standalone_consumers_enabled }}
+            {{- with .Values.global.kafka.consumer_groups }}
+            - name: DATAHUB_USAGE_EVENT_KAFKA_CONSUMER_GROUP_ID
+              value: {{ .datahub_usage_event_kafka_consumer_group_id }}
+            - name: PLATFORM_EVENT_KAFKA_CONSUMER_GROUP_ID
+              value: {{ .platform_event_kafka_consumer_group_id }}
+            - name: METADATA_CHANGE_EVENT_KAFKA_CONSUMER_GROUP_ID
+              value: {{ .metadata_change_event_kafka_consumer_group_id }}
+            - name: METADATA_CHANGE_PROPOSAL_KAFKA_CONSUMER_GROUP_ID
+              value: {{ .metadata_change_proposal_kafka_consumer_group_id }}
+            {{- end }}
+            {{- end }}
+            - name: DATAHUB_TOKEN_SERVICE_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.global.datahub.metadata_service_authentication.tokenService.signingKey.secretRef }}
+                  key: {{ .Values.global.datahub.metadata_service_authentication.tokenService.signingKey.secretKey }}
+            - name: DATAHUB_TOKEN_SERVICE_SALT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.global.datahub.metadata_service_authentication.tokenService.salt.secretRef }}
+                  key: {{ .Values.global.datahub.metadata_service_authentication.tokenService.salt.secretKey }}
+            {{- if .Values.global.datahub.metadata_service_authentication.enabled }}
+            - name: METADATA_SERVICE_AUTH_ENABLED
+              value: "true"
+            - name: DATAHUB_SYSTEM_CLIENT_ID
+              value: {{ .Values.global.datahub.metadata_service_authentication.systemClientId }}
+            - name: DATAHUB_SYSTEM_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.global.datahub.metadata_service_authentication.systemClientSecret.secretRef }}
+                  key: {{ .Values.global.datahub.metadata_service_authentication.systemClientSecret.secretKey }}
+            - name: REST_API_AUTHORIZATION_ENABLED
+              value: {{ .Values.global.datahub.metadata_service_authentication.restApi.authorization.enabled | quote }}
+            {{- if .Values.global.datahub.metadata_service_authentication.view.authorization.enabled }}
+            - name: VIEW_AUTHORIZATION_ENABLED
+              value: "true"
+            - name: VIEW_AUTHORIZATION_RECOMMENDATIONS_PEER_GROUP_ENABLED
+              value: {{ .Values.global.datahub.metadata_service_authentication.view.authorization.recommendations.peerGroupEnabled | quote }}
+            {{- end }}
+            {{- else }}
+            - name: METADATA_SERVICE_AUTH_ENABLED
+              value: "false"
+            {{- end }}
+            {{- if .Values.global.datahub.managed_ingestion.enabled }}
+            - name: UI_INGESTION_ENABLED
+              value: "true"
+            - name: SECRET_SERVICE_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: "{{ .Values.global.datahub.encryptionKey.secretRef }}"
+                  key: "{{ .Values.global.datahub.encryptionKey.secretKey }}"
+            {{- else }}
+            - name: UI_INGESTION_ENABLED
+              value: "false"
+            {{- end }}
+            {{- if .Values.global.datahub.managed_ingestion.defaultCliVersion }}
+            - name: UI_INGESTION_DEFAULT_CLI_VERSION
+              value: "{{ .Values.global.datahub.managed_ingestion.defaultCliVersion }}"
+            {{- end }}
+            - name: ENTITY_SERVICE_ENABLE_RETENTION
+              value: {{ .Values.global.datahub.enable_retention | quote }}
+            - name: ELASTICSEARCH_QUERY_MAX_TERM_BUCKET_SIZE
+              value: {{ .Values.global.elasticsearch.search.maxTermBucketSize | quote }}
+            - name: ELASTICSEARCH_QUERY_EXACT_MATCH_EXCLUSIVE
+              value: {{ .Values.global.elasticsearch.search.exactMatch.exclusive | quote }}
+            - name: ELASTICSEARCH_QUERY_EXACT_MATCH_WITH_PREFIX
+              value: {{ .Values.global.elasticsearch.search.exactMatch.withPrefix | quote }}
+            - name: ELASTICSEARCH_QUERY_EXACT_MATCH_FACTOR
+              value: {{ .Values.global.elasticsearch.search.exactMatch.exactFactor | quote }}
+            - name: ELASTICSEARCH_QUERY_EXACT_MATCH_PREFIX_FACTOR
+              value: {{ .Values.global.elasticsearch.search.exactMatch.prefixFactor | quote }}
+            - name: ELASTICSEARCH_QUERY_EXACT_MATCH_CASE_FACTOR
+              value: {{ .Values.global.elasticsearch.search.exactMatch.caseSensitivityFactor | quote }}
+            - name: ELASTICSEARCH_QUERY_EXACT_MATCH_ENABLE_STRUCTURED
+              value: {{ .Values.global.elasticsearch.search.exactMatch.enableStructured | quote }}
+            - name: ELASTICSEARCH_SEARCH_GRAPH_TIMEOUT_SECONDS
+              value: {{ .Values.global.elasticsearch.search.graph.timeoutSeconds | quote }}
+            - name: ELASTICSEARCH_SEARCH_GRAPH_BATCH_SIZE
+              value: {{ .Values.global.elasticsearch.search.graph.batchSize | quote }}
+            - name: ELASTICSEARCH_SEARCH_GRAPH_MAX_RESULT
+              value: {{ .Values.global.elasticsearch.search.graph.maxResult | quote }}
+            - name: SEARCH_SERVICE_ENABLE_CACHE
+              value: {{ .Values.global.datahub.cache.search.enabled | quote }}
+            {{- if .Values.global.datahub.cache.search.enabled }}
+            - name: CACHE_TTL_SECONDS
+              value: {{ .Values.global.datahub.cache.search.primary.ttlSeconds | quote }}
+            - name: CACHE_MAX_SIZE
+              value: {{ .Values.global.datahub.cache.search.primary.maxSize | quote }}
+            - name: CACHE_ENTITY_COUNTS_TTL_SECONDS
+              value: {{ .Values.global.datahub.cache.search.homepage.entityCounts.ttlSeconds | quote }}
+            {{- end }}
+            {{- include "datahub.semantic-search.env" . | nindent 12 }}
+            {{- include "datahub.entity-graph-cache.gms.env" . | nindent 12 }}
+            - name: LINEAGE_SEARCH_CACHE_ENABLED
+              value: {{ .Values.global.datahub.cache.search.lineage.enabled | quote }}
+            {{- if .Values.global.datahub.cache.search.lineage.enabled }}
+            - name: CACHE_SEARCH_LINEAGE_TTL_SECONDS
+              value: {{ .Values.global.datahub.cache.search.lineage.ttlSeconds | quote }}
+            - name: CACHE_SEARCH_LINEAGE_LIGHTNING_THRESHOLD
+              value: {{ .Values.global.datahub.cache.search.lineage.lightningThreshold | quote }}
+            {{- end }}
+            {{- with .Values.global.elasticsearch.index.enableMappingsReindex }}
+            - name: ELASTICSEARCH_INDEX_BUILDER_MAPPINGS_REINDEX
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.global.elasticsearch.index.enableSettingsReindex }}
+            - name: ELASTICSEARCH_INDEX_BUILDER_SETTINGS_REINDEX
+              value: {{ . | quote }}
+            {{- end }}
+            - name: ALWAYS_EMIT_CHANGE_LOG
+              value: {{ .Values.global.datahub.alwaysEmitChangeLog | quote }}
+            - name: GRAPH_SERVICE_DIFF_MODE_ENABLED
+              value: {{ .Values.global.datahub.enableGraphDiffMode | quote }}
+            - name: GRAPHQL_QUERY_INTROSPECTION_ENABLED
+              value: {{ .Values.global.datahub.gms.graphql.introspection.enabled | quote }}
+            {{- with .Values.global.datahub.mcp.throttle }}
+            {{- with .updateIntervalMs }}
+            - name: MCP_THROTTLE_UPDATE_INTERVAL_MS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .apiRequests.enabled }}
+            - name: MCP_API_REQUESTS_THROTTLE_ENABLED
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if .versioned.enabled }}
+            - name: MCP_VERSIONED_THROTTLE_ENABLED
+              value: "true"
+            {{- with .versioned.threshold }}
+            - name: MCP_VERSIONED_THRESHOLD
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .versioned.maxAttempts }}
+            - name: MCP_VERSIONED_MAX_ATTEMPTS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .versioned.initialIntervalMs }}
+            - name: MCP_VERSIONED_INITIAL_INTERVAL_MS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .versioned.multiplier }}
+            - name: MCP_VERSIONED_MULTIPLIER
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .versioned.maxIntervalMs }}
+            - name: MCP_VERSIONED_MAX_INTERVAL_MS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if .timeseries.enabled }}
+            - name: MCP_TIMESERIES_THROTTLE_ENABLED
+              value: "true"
+            {{- with .timeseries.threshold }}
+            - name: MCP_TIMESERIES_THRESHOLD
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .timeseries.maxAttempts }}
+            - name: MCP_TIMESERIES_MAX_ATTEMPTS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .timeseries.initialIntervalMs }}
+            - name: MCP_TIMESERIES_INITIAL_INTERVAL_MS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .timeseries.multiplier }}
+            - name: MCP_TIMESERIES_MULTIPLIER
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .timeseries.maxIntervalMs }}
+            - name: MCP_TIMESERIES_MAX_INTERVAL_MS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.global.kafka.metadataChangeLog.hooks.siblings }}
+            - name: ENABLE_SIBLING_HOOK
+              value: "{{ .enabled }}"
+            - name: SIBLINGS_HOOK_CONSUMER_GROUP_SUFFIX
+              value: "{{ .consumerGroupSuffix }}"
+            {{- end }}
+            {{- with .Values.global.kafka.metadataChangeLog.hooks.updateIndices }}
+            - name: ENABLE_UPDATE_INDICES_HOOK
+              value: "{{ .enabled }}"
+            - name: UPDATE_INDICES_CONSUMER_GROUP_SUFFIX
+              value: "{{ .consumerGroupSuffix }}"
+            {{- end }}
+            {{- with .Values.global.kafka.metadataChangeLog.hooks.ingestionScheduler }}
+            - name: ENABLE_INGESTION_SCHEDULER_HOOK
+              value: "{{ .enabled }}"
+            - name: INGESTION_SCHEDULER_HOOK_CONSUMER_GROUP_SUFFIX
+              value: "{{ .consumerGroupSuffix }}"
+            {{- end }}
+            {{- with .Values.global.kafka.metadataChangeLog.hooks.incidents }}
+            - name: ENABLE_INCIDENTS_HOOK
+              value: "{{ .enabled }}"
+            - name: INCIDENTS_HOOK_CONSUMER_GROUP_SUFFIX
+              value: "{{ .consumerGroupSuffix }}"
+            {{- end }}
+            {{- with .Values.global.kafka.metadataChangeLog.hooks.entityChangeEvents }}
+            - name: ENABLE_ENTITY_CHANGE_EVENTS_HOOK
+              value: "{{ .enabled }}"
+            - name: ECE_CONSUMER_GROUP_SUFFIX
+              value: "{{ .consumerGroupSuffix }}"
+            {{- end }}
+            {{- with .Values.global.kafka.metadataChangeLog.hooks.forms }}
+            - name: FORMS_HOOK_ENABLED
+              value: "{{ .enabled }}"
+            - name: FORMS_HOOK_CONSUMER_GROUP_SUFFIX
+              value: "{{ .consumerGroupSuffix }}"
+            {{- end }}
+            {{- with .Values.global.datahub.strictUrnValidation }}
+            - name: STRICT_URN_VALIDATION_ENABLED
+              value: "{{ . }}"
+            {{- end }}
+            {{- if .Values.global.datahub.systemUpdate.zdu.enable }}
+            - name: ZDU_STAGE_20
+              value: "true"
+            {{- end }}
+            - name: MCP_CONSUMER_BATCH_ENABLED
+              value: {{ .Values.global.datahub.metadataChangeProposal.consumer.batch.enabled | quote }}
+            {{- include "datahub.object-storage.gms.env" . | nindent 12 }}
+          {{- with .Values.extraEnvs }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+            - name: SERVER_SHUTDOWN_MODE
+              value: {{ .Values.serverShutdownMode | quote }}
+            - name: GMS_LIFECYCLE_TIMEOUT
+              value: {{ .Values.springShutdownLifeCycleTime | quote }}
+          volumeMounts:
+          {{- with .Values.global.credentialsAndCertsSecrets }}
+            - name: datahub-certs-dir
+              mountPath: {{ .path | default "/mnt/certs" }}
+          {{- end }}
+          {{- if and .Values.global.elasticsearch.search.custom.enabled .Values.global.elasticsearch.search.custom.config }}
+            - name: search-config
+              mountPath: "/datahub/datahub-gms/resources/search"
+          {{- end }}
+          {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+        {{- with .Values.extraSidecars }}
+          {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with default .Values.global.nodeSelector .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+    {{- end }}
+    {{- with default .Values.global.tolerations .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+    {{- end }}

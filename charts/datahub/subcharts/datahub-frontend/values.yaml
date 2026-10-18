@@ -1,0 +1,316 @@
+# Default values for datahub-frontend.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+replicaCount: 1
+
+hpa:
+  # If enabled, Horizontal Pod Autoscaler (HPA) will automatically scale the number of replicas based on CPU and memory utilization thresholds.
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 3
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 180
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 70
+
+revisionHistoryLimit: 10
+
+image:
+  repository: acryldata/datahub-frontend-react
+  tag:
+  pullPolicy: IfNotPresent
+  # Override the image's command & args with a new one.
+  # This may be necessary for custom startup or shutdown behaviors
+  command:
+  args:
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+terminationGracePeriodSeconds: 120
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name:
+
+annotations: {}
+
+podAnnotations: {}
+  # co.elastic.logs/enabled: "true"
+
+podSecurityContext:
+  fsGroup: 1000
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  allowPrivilegeEscalation: false
+
+priorityClassName:
+
+# Graceful shutdown for pod termination (spot reclaim, node drain, rollouts).
+# Sequence: pod deleted -> lifecycle.preStop sleep (kube-proxy / load balancers stop sending new
+# connections) -> SIGTERM -> readiness 503 and "Connection: close" on every response -> Play unbinds
+# -> waitBeforeTermination -> in-flight requests drained within serverTerminationTimeout -> cleanup.
+# Budget: terminationGracePeriodSeconds counts from BEFORE preStop, so these ADD UP:
+#   preStop + beforeServiceUnbindTimeout + serviceRequestDoneTimeout + serviceStopTimeout
+#   = 20s + 5s + 55s + 10s = 90s worst case, under terminationGracePeriodSeconds (120s).
+# On AWS spot the node is reclaimed 120s after the interruption notice and drain starts a few
+# seconds later, so keep the total well under 120s.
+# kube-proxy drops the pod from new connections during preStop, but it does not close sockets
+# it already has. After SIGTERM the pod fails readiness and sends Connection: close so Play
+# closes those sockets. In-flight work keeps running until serverTerminationTimeout.
+# Upgrade: preStop (15s -> 20s), beforeServiceUnbindTimeout (10s -> 5s),
+# serviceRequestDoneTimeout (65s -> 55s), and serviceStopTimeout (15s -> 10s) apply with
+# gracefulshutdownEnabled false. With the flag off, serverTerminationTimeout is unset, so the
+# drain after SIGTERM is serviceRequestDoneTimeout. With the flag on, the hard stop is
+# waitBeforeTermination + serverTerminationTimeout (20s + 30s); 55s is slack so the phase
+# does not win that race.
+gracefulshutdownEnabled: false
+
+# Max time for the readiness flag flip (instant in practice). Pekko before-service-unbind phase.
+# Format: Xs (e.g., 5s)
+beforeServiceUnbindTimeout: 5s
+
+# Max time for Play to drain requests. Pekko service-requests-done phase.
+# Must be greater than waitBeforeTermination + serverTerminationTimeout. Play waits, then
+# calls terminate(terminationTimeout - 100ms), so an equal phase times out in silence.
+# Format: Xs (e.g., 55s)
+serviceRequestDoneTimeout: 55s
+
+# Wait after Play unbinds before it terminates connections. Requests on existing keep-alive
+# connections and streamed responses (SSE) keep working meanwhile; Pekko HTTP does not wait for
+# streamed bodies on its own. Applied only when gracefulshutdownEnabled is true.
+# Format: Xs (e.g., 20s)
+waitBeforeTermination: 20s
+
+# Hard deadline for in-flight requests once termination starts (after waitBeforeTermination).
+# New requests on existing connections then get 503 with "Connection: close".
+# Applied only when gracefulshutdownEnabled is true.
+# Format: Xs (e.g., 30s)
+serverTerminationTimeout: 30s
+
+# Max time to close the GMS HTTP client. Pekko service-stop phase.
+# Format: Xs (e.g., 10s)
+serviceStopTimeout: 10s
+
+service:
+  type: LoadBalancer # ClusterIP or NodePort
+  port: 9002
+  targetPort: http
+  containerPort: 9002
+  protocol: TCP
+  name: http
+  # Annotations to add to the service, this will help in adding
+  # Internal load balancer or various other annotation support in AWS
+  annotations: {}
+    # service.beta.kubernetes.io/aws-load-balancer-internal: "true"
+  extraLabels: {}
+
+serviceMonitor:
+  create: false
+  extraLabels: {}
+
+ingress:
+  # className: ""
+  enabled: false
+  extraLabels: {}
+  annotations: {}
+    # kubernetes.io/ingress.class: nginx
+    # kubernetes.io/tls-acme: "true"
+  hosts:
+    - host: chart-example.local
+      paths: []
+      redirectPaths: []
+  tls: []
+  #  - secretName: chart-example-tls
+  #    hosts:
+  #      - chart-example.local
+  pathType: ImplementationSpecific
+  httproute:
+    enabled: false
+    labels: {}
+    annotations: {}
+    parentRefs: []
+    # - name: my-gateway
+    #   namespace: default
+    hostnames: []
+    # - datahub.example.com
+    rules: []
+    # - matches:
+    #     - path:
+    #         type: PathPrefix
+    #         value: /
+
+auth:
+  sessionTTLHours: "24"
+# OIDC auth based on https://datahubproject.io/docs/authentication/guides/sso/configure-oidc-react
+oidcAuthentication:
+  enabled: false
+  # provider: google/okta/azure/other  <- choose only one
+
+  # clientId: your-client-id
+  # clientSecret: your-client-secret
+  # only needed if you would like to store the client secret in secret
+  # clientSecretRef:
+  #   secretRef: <secret-ref>
+  #   secretKey: <secret-key>
+  # only needed if provider is `other`
+  # discoveryUri: https://my-keycloak.example.com/realms/master/.well-known/openid-configuration
+  # only needed if provider is `okta`
+  # oktaDomain: your-okta-domain.com
+
+  # only needed if provider is `azure`
+  # azureTenantId: your-azure-tenant-id
+  # if needed, it should set meaningful defaults from provider
+  # scope: "openid profile email"
+
+  # Override the base URL used for OIDC redirect URIs.
+  # When not set, the chart builds it from the first ingress host (and basePath if enabled).
+  # oidcBaseUrl: https://example.com/datahub
+
+  # The attribute that will contain the username used on the DataHub platform.
+  # user_name_claim: "email"
+  # A regex string used for extracting the username from the userNameClaim attribute.
+  # user_name_claim_regex: "([^@]+)"
+
+# Configuration for auth cookies, used to share these cookies for their domain with the iFrame in DataHub Chrome extension
+authCookies:
+  sameSite: "LAX"
+  secure: "false"
+
+# Extra labels for Deployment
+extraLabels: {}
+  # owner: myteam
+  # environment: test
+
+# Extra labels for the Pods
+extraPodLabels: {}
+
+# Extra environment variables
+# This will be appended to the current 'env:' key. You can use any of the kubernetes env
+# syntax here
+extraEnvs: []
+  # - name: MY_ENVIRONMENT_VAR
+  #   value: the_value_goes_here
+
+extraVolumes: []
+  # - name: extras
+  #   emptyDir: {}
+
+extraVolumeMounts: []
+  # - name: extras
+  #   mountPath: /usr/share/extras
+  #   readOnly: true
+
+extraInitContainers: []
+
+# Add extra sidecar containers to deployment pod
+extraSidecars: []
+  # - name: my-image-name
+  #   image: my-image
+  #   imagePullPolicy: Always
+
+lifecycle:
+  preStop:
+    exec:
+      # Delay SIGTERM so kube-proxy and load balancers stop sending new connections first.
+      # Kubernetes removes the endpoint when the pod is deleted, but propagation takes time.
+      # Counts toward terminationGracePeriodSeconds; see the graceful shutdown budget above.
+      command: ["/bin/sh", "-c", "sleep 20"]
+  # To add a new user to datahub in JAAS config without mounting the user.props file
+  # postStart:
+  #   exec:
+  #     command: ["/bin/sh", "-c", "echo "test_user:password" >> datahub-frontend/conf/user.props"]
+
+resources: {}
+  # We usually recommend not to specify default resources and to leave this as a conscious
+  # choice for the user. This also increases chances charts run on environments with little
+  # resources, such as Minikube. If you do want to specify resources, uncomment the following
+  # lines, adjust them as necessary, and remove the curly braces after 'resources:'.
+  # limits:
+  #   cpu: 500m
+  #   memory: 2Gi
+  # requests:
+  #   cpu: 100m
+  #   memory: 1Gi
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+livenessProbe:
+  initialDelaySeconds: 60
+  periodSeconds: 30
+  failureThreshold: 4
+  timeoutSeconds: 1
+
+readinessProbe:
+  initialDelaySeconds: 60
+  periodSeconds: 30
+  failureThreshold: 4
+  timeoutSeconds: 1
+
+# Management-port health probes. Requires a frontend image that serves
+# GET /health/live and GET /health/ready on MANAGEMENT_SERVER_PORT
+# (https://github.com/datahub-project/datahub/pull/20049).
+# Disabled until that image is released. When enabled, probes leave the Play
+# port and are not prefixed with global.basePath.frontend. Probe timings above
+# are unchanged.
+management:
+  enabled: false
+  port: 4319
+
+datahub:
+  play:
+    mem:
+      buffer:
+        size: "10MB"
+global:
+  imageRegistry: "docker.io"
+
+  datahub_analytics_enabled: true
+
+  elasticsearch:
+    host: "elasticsearch"
+    port: "9200"
+
+  kafka:
+    bootstrap:
+      server: "broker:9092"
+
+  datahub:
+    version: head
+    gms:
+      port: "8080"
+    # monitoring: use umbrella global.datahub.monitoring only (do not set here; partial maps drop metricsMode).
+    appVersion: "1.0"
+    frontend:
+      validateSignUpEmail: true
+    metadata_service_authentication:
+      enabled: true
+      systemClientId: "__datahub_system"
+      # systemClientSecret:
+      #  secretRef: <secret-ref>
+      #  secretKey: <secret-key>

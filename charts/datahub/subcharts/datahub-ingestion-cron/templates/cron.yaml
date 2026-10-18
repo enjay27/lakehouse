@@ -1,0 +1,119 @@
+{{- $baseName := include "datahub-ingestion-cron.fullname" .}}
+{{- $labels := include "datahub-ingestion-cron.labels" .}}
+{{- range $jobName, $val := .Values.crons }}
+{{- $defaultCommand := printf "datahub ingest -c /etc/recipe/%s" $val.recipe.fileName }}
+apiVersion: {{ include "datahub-ingestion-cron.cronjob.apiVersion" $}}
+kind: CronJob
+metadata:
+  name: "{{ $baseName }}-{{ $jobName }}"
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  schedule: {{ default "0 0 * * *" .schedule | quote }}
+  concurrencyPolicy: {{ default "Allow" .concurrencyPolicy }}
+  successfulJobsHistoryLimit: {{ default 3 .successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ default 1 .failedJobsHistoryLimit }}
+  suspend: {{ default false .suspend }}
+  jobTemplate:
+    metadata:
+      labels:
+        {{- $labels | nindent 8 }}
+        {{- with $val.labels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      backoffLimit: {{ default 6 $val.backoffLimit }}
+      template:
+        {{- if or $val.podAnnotations $.Values.global.podLabels }}
+        metadata:
+          {{- with $val.podAnnotations }}
+          annotations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if $.Values.global.podLabels }}
+          labels:
+            {{- range $key, $value := $.Values.global.podLabels }}
+            {{ $key }}: {{ $value | quote }}
+            {{- end }}
+          {{- end }}
+        {{- end }}
+        spec:
+        {{- with $.Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+        {{- end }}
+        {{- if .extraInitContainers }}
+          initContainers:
+          {{- toYaml .extraInitContainers | nindent 12 }}
+        {{- end }}
+        {{- if .hostAliases }}
+          hostAliases:
+          {{- toYaml .hostAliases | nindent 12 }}
+        {{- end }}
+        {{- $cronSa := default (include "datahub-ingestion-cron.globalAppSA" $) .serviceAccountName }}
+        {{- with $cronSa }}
+          serviceAccountName: {{ . }}
+        {{- end }}
+          securityContext:
+            {{- toYaml $.Values.podSecurityContext | nindent 12 }}
+          containers:
+          - name: {{ $jobName }}-crawler
+            image: {{ include "datahub.image" (dict "imageRegistry" $.Values.global.imageRegistry "version" $.Values.global.datahub.version "image" $.Values.image) }}
+            imagePullPolicy: {{ $.Values.image.pullPolicy }}
+            {{- if .resources }}
+            resources:
+              {{- toYaml .resources | nindent 14 }}
+            {{- end }}
+            volumeMounts:
+              - name: recipe
+                mountPath: /etc/recipe
+            {{- if .extraVolumeMounts }}
+              {{- toYaml .extraVolumeMounts | nindent 14 }}
+            {{- end }}
+            command: ["/bin/sh", "-c", {{ default $defaultCommand .command }}]
+            {{- $containerSec := mergeOverwrite (deepCopy $.Values.securityContext) (.securityContext | default dict) }}
+            {{- if $containerSec }}
+            securityContext:
+              {{- toYaml $containerSec | nindent 14 }}
+            {{- end }}
+            env:
+              {{- if .env }}
+              {{- range $key,$value := .env }}
+              - name: {{ $key | quote }}
+                value: {{ $value | quote }}
+              {{- end }}
+              {{- end }}
+              {{- if .envFromSecrets }}
+              {{- range $key,$value := .envFromSecrets }}
+              - name: {{ $key | quote }}
+                valueFrom:
+                  secretKeyRef:
+                    name: {{ $value.secret | quote }}
+                    key: {{ $value.key | quote }}
+              {{- end }}
+              {{- end }}
+            {{- if .extraSidecars }}
+              {{- toYaml .extraSidecars | nindent 10 }}
+            {{- end }}
+          restartPolicy: {{ default "OnFailure" .restartPolicy }}
+          {{- with default $.Values.global.nodeSelector .nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if .affinity }}
+          affinity:
+            {{- toYaml .affinity | nindent 12 }}
+          {{- end }}
+          {{- with default $.Values.global.tolerations .tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumes:
+            - name: recipe
+              configMap:
+                name: {{ required "A valid .recipe.configmapName entry is required!" $val.recipe.configmapName }}
+          {{- if .extraVolumes }}
+            {{- toYaml .extraVolumes | nindent 12 }}
+          {{- end }}
+---
+{{- end }}

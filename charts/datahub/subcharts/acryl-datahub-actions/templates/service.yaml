@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "acryl-datahub-actions.fullname" . }}
+  labels:
+    {{- include "acryl-datahub-actions.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+    {{- if .Values.global.datahub.monitoring.enablePrometheus }}
+    - name: {{ .Values.global.datahub.monitoring.portName }}
+      port: 8000
+      targetPort: {{ .Values.global.datahub.monitoring.portName }}
+      protocol: TCP
+    {{- end }}
+  selector:
+    {{- include "acryl-datahub-actions.selectorLabels" . | nindent 4 }}
