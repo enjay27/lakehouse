@@ -42,7 +42,9 @@
       upstream's chart in charts/datahub with its values-lakehouse.yaml, through helm's --wait:
       the blocking system-update Job completes before GMS and the frontend start, both are
       ready, and the non-blocking Job completes. An empty DATAHUB_EMITTER_NAMESPACE_LABEL is
-      said, not a problem.
+      said, not a problem. Its ingestion CronJob (ADR-076 §2) gets Polaris's URI from
+      `NS_CATALOG_POLARIS` and the catalogs of DATAHUB_INGEST_POLARIS_CATALOGS, each name
+      checked; with none it is suspended, and the install says so.
 2. After every service of step 1 (ADR-029, ADR-037):
    a. The log batch (ADR-036): charts/polaris-log-batch with the image built from this
       checkout (batch_image), pulled from `IMAGE_REGISTRY` or, when it is empty, the GitHub
@@ -146,6 +148,11 @@ DATAHUB_SECRETS = ("datahub-auth-secrets", "datahub-encryption-secrets",
 # helm's limit for each hook Job and for the wait: the three images are pulled first, and GMS's
 # readiness probe starts at 120 s.
 DATAHUB_TIMEOUT = "1200s"
+# The ingestion CronJob's entry in the chart's values, and what a catalog's name may be
+# (ADR-076 §1, §2).
+INGESTION_CRON = "polaris"
+CATALOG_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+POLARIS_API_PORT = 8181
 # Step 1 reads the Secrets it needs for their key names only, one line per Secret, never a value.
 SECRET_KEYS_TEMPLATE = ('go-template={{range .items}}{{.metadata.name}}:'
                         '{{range $key, $value := .data}} {{$key}}{{end}}{{println}}{{end}}')
@@ -501,14 +508,44 @@ def datahub_opensearch(env, run, dry_run=False):
                 "ready (ADR-070)."]
 
 
+def ingest_catalogs(env):
+    """The catalogs of DATAHUB_INGEST_POLARIS_CATALOGS, spaces around each name dropped, or
+    None when a name is not ^[A-Za-z0-9_-]+$ (ADR-076 §2)."""
+    value = env.get("DATAHUB_INGEST_POLARIS_CATALOGS", "").strip()
+    if not value:
+        return []
+    names = [name.strip() for name in value.split(",")]
+    return names if all(CATALOG_NAME_RE.match(name) for name in names) else None
+
+
+def datahub_values(env):
+    """The values the install adds to charts/datahub (ADR-076 §2): the ingestion CronJob's
+    Polaris URI, in `NS_CATALOG_POLARIS` from `.env` so no name is in a chart, and its
+    catalogs; suspended while there are none."""
+    catalogs = ingest_catalogs(env) or []
+    uri = (f"http://{POLARIS}.{env['NS_CATALOG_POLARIS']}.svc.cluster.local:{POLARIS_API_PORT}"
+           "/api/catalog")
+    return {"datahub-ingestion-cron": {"crons": {INGESTION_CRON: {
+        "env": {"POLARIS_URI": uri, "DATAHUB_INGEST_POLARIS_CATALOGS": ",".join(catalogs)},
+        "suspend": not catalogs}}}}
+
+
 def datahub(env, run, dry_run=False):
     """Step 1, Datahub itself, after datahub-opensearch (ADR-071 §7): stops unless init-env's
-    four Secrets exist with their keys, read by name only; says so when the emitters' label is
-    empty; then upstream's chart with our values, nothing from `.env` but the namespace, and
-    helm's --wait, under which the hooks run in order. Returns (problems, notes)."""
+    four Secrets exist with their keys, read by name only, and every catalog to ingest is a
+    valid name; says so when the emitters' label or the catalogs are empty; then upstream's
+    chart with our values and the ingestion's (datahub_values), and helm's --wait, under which
+    the hooks run in order. Returns (problems, notes)."""
     namespace = env.get("NS_CATALOG_DATAHUB", "")
     if not namespace:
         return ["NS_CATALOG_DATAHUB is empty: set Datahub's namespace in .env (ADR-007)"], []
+    if not env.get("NS_CATALOG_POLARIS", ""):
+        return ["NS_CATALOG_POLARIS is empty: Datahub's ingestion reaches Polaris in it "
+                "(ADR-007, ADR-076)"], []
+    catalogs = ingest_catalogs(env)
+    if catalogs is None:
+        return ["DATAHUB_INGEST_POLARIS_CATALOGS must be Polaris catalog names matching "
+                "^[A-Za-z0-9_-]+$, comma-separated (ADR-076)"], []
     context = env["KUBE_CONTEXT"]
     code, out = run(["kubectl", "--context", context, "-n", namespace, "get", "secret",
                      *DATAHUB_SECRETS, "-o", SECRET_KEYS_TEMPLATE])
@@ -528,20 +565,27 @@ def datahub(env, run, dry_run=False):
                             "(ADR-071)")
     if problems:
         return problems, []
-    helm = ["helm", "--kube-context", context, "-n", namespace, "upgrade", "--install",
-            DATAHUB_RELEASE, DATAHUB_CHART, "-f", DATAHUB_VALUES]
-    code, out = run(helm + (["--dry-run=server"] if dry_run
-                            else ["--wait", f"--timeout={DATAHUB_TIMEOUT}"]))
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+        json.dump(datahub_values(env), f)
+    try:
+        helm = ["helm", "--kube-context", context, "-n", namespace, "upgrade", "--install",
+                DATAHUB_RELEASE, DATAHUB_CHART, "-f", DATAHUB_VALUES, "-f", f.name]
+        code, out = run(helm + (["--dry-run=server"] if dry_run
+                                else ["--wait", f"--timeout={DATAHUB_TIMEOUT}"]))
+    finally:
+        os.unlink(f.name)
     if code != 0:
         return [f"helm upgrade {DATAHUB_RELEASE} in {namespace} failed: {out.strip()}"], []
-    emitters = ("" if env.get("DATAHUB_EMITTER_NAMESPACE_LABEL", "").strip() else
-                "; DATAHUB_EMITTER_NAMESPACE_LABEL is empty, so no lineage emitter's namespace "
-                "may reach GMS")
+    said = ("" if env.get("DATAHUB_EMITTER_NAMESPACE_LABEL", "").strip() else
+            "; DATAHUB_EMITTER_NAMESPACE_LABEL is empty, so no lineage emitter's namespace "
+            "may reach GMS")
+    said += (f"; the ingestion CronJob runs daily for {', '.join(catalogs)}" if catalogs else
+             "; DATAHUB_INGEST_POLARIS_CATALOGS is empty, so the ingestion CronJob is suspended")
     if dry_run:
-        return [], [f"Step 1: Datahub in {namespace}, server-side dry-run passed{emitters} "
-                    "(ADR-071)."]
+        return [], [f"Step 1: Datahub in {namespace}, server-side dry-run passed{said} "
+                    "(ADR-071, ADR-076)."]
     return [], [f"Step 1: Datahub in {namespace} is installed: system-update's Jobs completed, "
-                f"GMS and the frontend ready{emitters} (ADR-071)."]
+                f"GMS and the frontend ready{said} (ADR-071, ADR-076)."]
 
 
 def postgres(env, run, pg, dry_run=False):
