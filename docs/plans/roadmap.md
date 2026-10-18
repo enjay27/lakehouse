@@ -275,9 +275,18 @@ Started on 2026-10-18 (Kade).
   container; plain HTTP on 9200 for pods labelled `lakehouse/datahub-opensearch-client`;
   installed after datahub-kafka in step 1. The smoke gate's `check-datahub-opensearch`
   writes a document over plain HTTP and finds it again after a restart of the node's pod.
-  Datahub's chart sets `ELASTICSEARCH_NUM_REPLICAS_PER_INDEX` to 0 when it enters; the
-  Linux test server's `vm.max_map_count` is read before the check is first proven there.
-- Datahub itself (ADR-025).
+  The Linux test server's `vm.max_map_count` is read before the check is first proven there.
+- Datahub itself (ADR-071, ADR-072): `charts/datahub`, upstream's datahub chart 1.1.7, its
+  release archive with one patched line so GMS runs by digest, and our
+  `values-lakehouse.yaml`: Datahub `v1.7.0.1`, one GMS with its consumers, the frontend, the
+  system-update Jobs and a suspended restore-indices template, on its three stores with no
+  index replica; every pod a client of the three stores and of GMS; the six credentials from
+  `init_env.py` in four Secrets, none from the chart; GMS open to its clients and the emitters'
+  namespaces (`DATAHUB_EMITTER_NAMESPACE_LABEL`), the frontend to the ingress namespace;
+  installed after datahub-opensearch in step 1. The smoke gate's `check-datahub` writes a
+  dataset, reads it back and finds it by search, and signs the root user in. Next:
+  `check-datahub-recovery`, the indices and topics rebuilt after OpenSearch's and Kafka's
+  volumes are lost (ADR-071 §8).
 - Datahub ingests Polaris's catalog with its own read-only principal.
 - Its own login through SSO, against a stand-in on the gate.
 - A runbook, proven on a Linux test cluster, moves Datahub's metadata from the target
@@ -380,7 +389,7 @@ when Kade learns the target clusters' version.
 | Polaris | 1.6.0 | Kade (ADR-009) |
 | PostgreSQL for Polaris | 16 (CNPG image 16.15, by digest in `charts/polaris-postgres`), 3 instances, required anti-affinity | Kade |
 | Pooler for Polaris | none | open: Kade does not know (ADR-010) |
-| Datahub | v1.7.0 | Kade: latest |
+| Datahub | v1.7.0.1 (chart 1.1.7, by digest in `charts/datahub`) | Kade (ADR-071) |
 | PostgreSQL for Datahub | 16 | same as Polaris; target unknown |
 | Kafka (`apache/kafka`) | 4.3.1 | latest stable; target unknown |
 | OpenSearch (Datahub) | 2.19.6 | latest 2.x, the line Datahub's chart uses; target unknown |
