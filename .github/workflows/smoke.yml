@@ -6,6 +6,8 @@
 # stand-ins for other teams' services (ADR-031), the latest release tag installed from its
 # checkout, seeded with known data through its API, and this commit's release over it, which
 # check-migration reads the seed back from (ADR-051), or with `fresh` this commit's alone;
+# Datahub ingests a catalog seeded in Polaris once, from its CronJob, as a principal the policy
+# lets only read (ADR-076);
 # then one replica of polaris-pg is deleted with its volume and rejoins through CNPG's join pod
 # under the network policies (ADR-048), the running Cluster polaris-pg is checked against its
 # values, its three instances on three nodes (ADR-016), the stand-ins answer as Polaris needs them to (ADR-026), Polaris runs
@@ -158,6 +160,11 @@ jobs:
           set -euo pipefail
           python3 gates/gate.py check-datahub | tee -a "$GITHUB_STEP_SUMMARY"
 
+      - name: Datahub ingests a seeded Polaris catalog from its CronJob as datahub_ingest, which the policy lets only read (ADR-076)
+        run: |
+          set -euo pipefail
+          python3 gates/gate.py check-datahub-ingestion | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: The stand-ins answer as Polaris needs them to (ADR-026, ADR-031)
         run: |
           set -euo pipefail
@@ -196,7 +203,7 @@ jobs:
       - name: The recorder saw what it must, and nothing it must not (ADR-034)
         run: |
           set -euo pipefail
-          python3 gates/gate.py check-traffic gates/expectations/standins.json gates/expectations/polaris.json gates/expectations/iceberg.json | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 gates/gate.py check-traffic gates/expectations/standins.json gates/expectations/polaris.json gates/expectations/iceberg.json gates/expectations/datahub-ingestion.json | tee -a "$GITHUB_STEP_SUMMARY"
 
       # The console is a maintainer tool: its checks are reported, never blocking (ADR-028).
       - name: A maintainer signs in to the console as the browser does; the policy lets it read only (ADR-026, ADR-028)
