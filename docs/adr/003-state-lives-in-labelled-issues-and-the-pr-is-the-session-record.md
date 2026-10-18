@@ -1,6 +1,6 @@
 # ADR-003: State lives in labelled issues of this repository; the PR is the session record
 
-- **Status:** Accepted
+- **Status:** Amended by ADR-073
 - **Date:** 2026-10-10
 - **Related:** ADR-000, ADR-002
 

@@ -1,6 +1,6 @@
 # ADR-042: The release workflow pushes the log batch's image to GHCR; clusters pull it from a registry named in `.env`
 
-- **Status:** Accepted
+- **Status:** Amended by ADR-074
 - **Date:** 2026-10-12
 - **Related:** ADR-002, ADR-004, ADR-028, ADR-030, ADR-033, ADR-036, ADR-037
 
