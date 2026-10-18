@@ -1,6 +1,6 @@
 # ADR-071: Datahub runs from upstream's chart, unchanged: GMS with its consumers, the frontend and system-update on its three stores, with credentials from init-env
 
-- **Status:** Accepted
+- **Status:** Amended by ADR-072
 - **Date:** 2026-10-18
 - **Related:** ADR-004, ADR-006, ADR-009, ADR-016, ADR-025, ADR-039, ADR-045, ADR-048, ADR-050, ADR-051, ADR-052, ADR-059, ADR-066, ADR-068, ADR-069, ADR-070
 
