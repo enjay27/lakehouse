@@ -56,7 +56,15 @@
                   CNPG Clusters, which outlive the initdb and join Jobs CNPG deletes, and of
                   release.py's endpoint-check and bootstrap pods and log claim (#125). A
                   measurement that fails says so and never fails it.
-  seed            writes known data through the last release's Polaris before the upgrade
+  install --datahub-only
+                  Datahub alone, fresh, from this commit, for smoke's datahub-recovery job
+                  (ADR-077 §1): release.py's own functions, step 0 then Datahub's part of step
+                  1 (its network policies, datahub-pg, datahub-kafka, datahub-opensearch,
+                  Datahub), in ADR-045's order; the first step with a problem stops the rest.
+                  No last release, seed, gate-policies, Polaris, log batch or console. Prints
+                  each step's notes, then the image pulls and the timeline as `install` does,
+                  each step timed under its name.
+  seed          writes known data through the last release's Polaris before the upgrade
                   (ADR-051 §2): gates/seed.py in a short-lived pod on the pinned Python image,
                   mounted with iceberg/smoke.py and its hashed requirements from the ConfigMap
                   migration-seed, as root and as gate_seed (principals, roles, grants, a
@@ -197,7 +205,7 @@
 Every kubectl and helm call names the gate's context, and a namespace where the object has
 one. Nothing here reaches any cluster but the kind cluster it creates (ADR-017).
 
-Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | seed | check-migration | rebuild-replica | check-polaris-pg | check-datahub-pg | check-datahub-kafka | check-datahub-opensearch | check-datahub | check-datahub-recovery | check-polaris | console-image [--build|--load] | batch-image | check-logs | check-console | check-iceberg | check-restore | gate-policies | check-network | check-metrics
+Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | install --datahub-only | seed | check-migration | rebuild-replica | check-polaris-pg | check-datahub-pg | check-datahub-kafka | check-datahub-opensearch | check-datahub | check-datahub-recovery | check-polaris | console-image [--build|--load] | batch-image | check-logs | check-console | check-iceberg | check-restore | gate-policies | check-network | check-metrics
 """
 
 import base64
@@ -657,6 +665,29 @@ def install_plan(previous, previous_dir, fresh, dry_run=False):
         *([] if dry_run else [["python3", os.path.join(HERE, "gate.py"), "seed"]]),
         *this,
     ], f"Upgrade: {previous} installed from its tag, then this commit over it{then} (ADR-051)."
+
+
+# ADR-077 §1: the datahub-recovery job's install, release.py's own functions in ADR-045's order:
+# step 0, then Datahub's part of step 1. release.py gains no mode; only the gate composes it.
+DATAHUB_ONLY_STEPS = ("check_preconditions", "datahub_network_policies", "datahub_postgres",
+                      "datahub_kafka", "datahub_opensearch", "datahub")
+
+
+def datahub_only(env, supported):
+    """Step 0 and Datahub's part of step 1 of this commit's release.py, the first step with
+    problems stopping the rest. Returns (problems, notes, timed): each step's (start, end,
+    label), for the timeline."""
+    notes, timed = [], []
+    for name in DATAHUB_ONLY_STEPS:
+        step = getattr(release, name)
+        began = dt.datetime.now(dt.timezone.utc).isoformat()
+        problems, more = (step(env, release.call, supported) if name == "check_preconditions"
+                          else step(env, release.call))
+        timed.append((began, dt.datetime.now(dt.timezone.utc).isoformat(), f"release.py {name}"))
+        notes += more
+        if problems:
+            return problems, notes, timed
+    return [], notes, timed
 
 
 def pull_events_command():
@@ -2783,6 +2814,20 @@ def main(argv):
                                         restart_window(events, install_end))
         for line in lines:
             print(line)
+        return 1 if problems else 0
+    if argv[1:] == ["install", "--datahub-only"]:
+        start = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+        print("Datahub alone, fresh: step 0 and Datahub's part of step 1 of this commit's "
+              "release.py (ADR-077).", flush=True)
+        problems, notes, timed = datahub_only(release.load_env(ROOT, os.environ),
+                                              release.supported_versions())
+        for line in notes + problems:
+            print(line, flush=True)
+        end = dt.datetime.now(dt.timezone.utc)
+        for line in measure_pulls(start.isoformat(), (end - start).total_seconds()):
+            print(line, flush=True)
+        for line in measure_timeline(start.isoformat(), timed):
+            print(line, flush=True)
         return 1 if problems else 0
     if argv[1:2] == ["install"] and set(argv[2:]) <= {"--fresh", "--dry-run"} \
             and len(set(argv[2:])) == len(argv[2:]):
