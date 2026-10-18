@@ -4,11 +4,15 @@ Run: python3 -m unittest discover -s scripts"""
 import json
 import os
 import re
+import sys
 import unittest
 
+sys.path.insert(0, os.path.dirname(__file__))
+import project_bridge  # noqa: E402
+
 LABELS = os.path.join(os.path.dirname(__file__), "..", ".github", "labels.json")
-# ADR-003: the state labels, with the same names as Stella Rain's.
-ADR_003 = {"cmd:status-now", "cmd:verify-not-verified", "cmd:verify-needs-linux"}
+# ADR-073 §3: one label per command the bridge knows, and no other; labels are requests.
+COMMANDS = {project_bridge.PREFIX + suffix for suffix in project_bridge.COMMANDS}
 
 
 class Labels(unittest.TestCase):
@@ -16,10 +20,18 @@ class Labels(unittest.TestCase):
         with open(LABELS, encoding="utf-8") as f:
             self.labels = json.load(f)
 
-    def test_exactly_the_adr_003_labels(self):
+    def test_exactly_the_bridges_commands(self):
         names = [label["name"] for label in self.labels]
         self.assertEqual(len(names), len(set(names)), "duplicate label")
-        self.assertEqual(set(names), ADR_003)
+        self.assertEqual(set(names), COMMANDS)
+        self.assertEqual(len(names), 11)
+
+    def test_each_description_names_the_field_it_sets(self):
+        for label in self.labels:
+            field, option = project_bridge.parse_command(label["name"])
+            with self.subTest(label=label["name"]):
+                self.assertIn(f"{field}: {option}", label["description"])
+                self.assertIn("ADR-073", label["description"])
 
     def test_each_label_has_a_colour_and_a_description(self):
         for label in self.labels:
