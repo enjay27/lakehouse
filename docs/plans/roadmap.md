@@ -284,9 +284,10 @@ Started on 2026-10-18 (Kade).
   `init_env.py` in four Secrets, none from the chart; GMS open to its clients and the emitters'
   namespaces (`DATAHUB_EMITTER_NAMESPACE_LABEL`), the frontend to the ingress namespace;
   installed after datahub-opensearch in step 1. The smoke gate's `check-datahub` writes a
-  dataset, reads it back and finds it by search, and signs the root user in. Next:
-  `check-datahub-recovery`, the indices and topics rebuilt after OpenSearch's and Kafka's
-  volumes are lost (ADR-071 §8).
+  dataset, reads it back and finds it by search, and signs the root user in;
+  `check-datahub-recovery` loses OpenSearch's volume, then Kafka's: Datahub's install step and a
+  restore-indices Job rebuild the indices, the install step recreates the topics, and a dataset
+  written before both is still read and found (ADR-071 §8).
 - Datahub ingests Polaris's catalog with its own read-only principal.
 - Its own login through SSO, against a stand-in on the gate.
 - A runbook, proven on a Linux test cluster, moves Datahub's metadata from the target
