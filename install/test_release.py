@@ -1102,7 +1102,7 @@ class Steps(unittest.TestCase):
                                           ["1.30"], dry_run=False)
         self.assertIn("image tag invalid", "\n".join(problems))
         self.assertEqual(console.calls, [])
-        self.assertIn("Datahub in catalog-datahub", notes[-1])
+        self.assertIn("principal datahub_ingest", notes[-1])
 
     def test_a_failed_datahub_pg_stops_the_install_before_the_log_batch(self):
         """ADR-045: every service of step 1 before step 2."""

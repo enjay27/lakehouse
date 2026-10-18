@@ -45,6 +45,11 @@
       said, not a problem. Its ingestion CronJob (ADR-076 §2) gets Polaris's URI from
       `NS_CATALOG_POLARIS` and the catalogs of DATAHUB_INGEST_POLARIS_CATALOGS, each name
       checked; with none it is suspended, and the install says so.
+   k. Datahub's Polaris principal (ADR-076 §3): `datahub-polaris-principal` from init-env read
+      for its key names, then a short-lived pod in Datahub's namespace on the ingestion image,
+      the Secret mounted and root's credential on stdin, gets a token as root, creates
+      `datahub_ingest` (one already there is kept), resets its credentials to the Secret's,
+      and gets a token as it. No grant: the policy endpoint decides what it may do.
 2. After every service of step 1 (ADR-029, ADR-037):
    a. The log batch (ADR-036): charts/polaris-log-batch with the image built from this
       checkout (batch_image), pulled from `IMAGE_REGISTRY` or, when it is empty, the GitHub
@@ -55,8 +60,8 @@
       until rolled out. A maintainer tool, never part of how Polaris operates: its problems
       are printed and the install still passes.
 
-With --dry-run, the helm upgrades are server-side dry-runs, the bootstrap does not run and
-nothing waits: the dry-run gate (ADR-038).
+With --dry-run, the helm upgrades are server-side dry-runs, the bootstrap and Datahub's
+principal do not run and nothing waits: the dry-run gate (ADR-038).
 
 Settings come from `.env` at the repository root, then the environment, which wins. Every
 kubectl and helm call names `$KUBE_CONTEXT` (no default, ADR-004) and its namespace (ADR-007).
@@ -153,9 +158,78 @@ DATAHUB_TIMEOUT = "1200s"
 INGESTION_CRON = "polaris"
 CATALOG_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 POLARIS_API_PORT = 8181
+# Datahub's own Polaris principal and its Secret from init-env (ADR-076 §3); the pod that sets
+# it runs the ingestion CronJob's image, read from the values file, the registry upstream's
+# chart puts before its repository.
+DATAHUB_PRINCIPAL = "datahub_ingest"
+DATAHUB_PRINCIPAL_SECRET = "datahub-polaris-principal"
+INGESTION_REPOSITORY = "docker.io/acryldata/datahub-ingestion"
+INGESTION_TAG_RE = re.compile(r'^datahub-ingestion-cron:\n(?:(?:  .*)?\n)*?    tag: "([^"]+)"$',
+                              re.MULTILINE)
+PRINCIPAL_TIMEOUT = "10m"
 # Step 1 reads the Secrets it needs for their key names only, one line per Secret, never a value.
 SECRET_KEYS_TEMPLATE = ('go-template={{range .items}}{{.metadata.name}}:'
                         '{{range $key, $value := .data}} {{$key}}{{end}}{{println}}{{end}}')
+# The same for one Secret, read by its name alone.
+SECRET_ONE_KEYS_TEMPLATE = 'go-template={{range $key, $value := .data}}{{$key}} {{end}}'
+# Run in the principal's pod with Python (ADR-076 §3): POLARIS_URL REALM PRINCIPAL; root's
+# client ID and secret on stdin, a line each; the principal's in CLIENT_ID and CLIENT_SECRET
+# from its Secret. Prints one line per call, `ok` or `FAIL` with the HTTP status and Polaris's
+# message, never a credential or a token.
+PRINCIPAL_SCRIPT = r"""import json, os, sys, urllib.error, urllib.parse, urllib.request
+polaris, realm, name = sys.argv[1:4]
+root_id, root_secret = sys.stdin.readline().strip(), sys.stdin.readline().strip()
+
+
+def call(path, token=None, body=None, form=None):
+    headers = {"Polaris-Realm": realm}
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    if form is not None:
+        data = urllib.parse.urlencode(form).encode()
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+    else:
+        data = json.dumps(body).encode()
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(polaris + path, data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return response.status, response.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+
+
+def answer(status, raw, what, ok):
+    if status in ok:
+        return json.loads(raw or b"{}")
+    try:
+        error = json.loads(raw).get("error")
+    except ValueError:
+        error = None
+    message = error.get("message") if isinstance(error, dict) else None
+    print(f"FAIL {what}: HTTP {status}" + (f", {message}" if message else ""), flush=True)
+    sys.exit(1)
+
+
+def token(client_id, client_secret, who):
+    status, raw = call("/api/catalog/v1/oauth/tokens", form={
+        "grant_type": "client_credentials", "client_id": client_id,
+        "client_secret": client_secret, "scope": "PRINCIPAL_ROLE:ALL"})
+    found = answer(status, raw, f"a token as {who}", (200,))
+    print(f"ok   a token as {who}", flush=True)
+    return found["access_token"]
+
+
+root = token(root_id, root_secret, "root")
+status, raw = call("/api/management/v1/principals", root, {"principal": {"name": name}})
+answer(status, raw, f"creating principal {name}", (201, 409))
+print(f"ok   principal {name} " + ("created" if status == 201 else "already there"), flush=True)
+status, raw = call(f"/api/management/v1/principals/{name}/reset", root, {
+    "clientId": os.environ["CLIENT_ID"], "clientSecret": os.environ["CLIENT_SECRET"]})
+answer(status, raw, f"resetting {name}'s credentials", (200,))
+print(f"ok   {name}'s credentials reset to datahub-polaris-principal's", flush=True)
+token(os.environ["CLIENT_ID"], os.environ["CLIENT_SECRET"], name)
+"""
 # The key the backups' region comes from; init_env.py writes it from S3_REGION (ADR-060).
 POLARIS_BACKUP_REGION_KEY = "region"
 POLARIS = "polaris"
@@ -739,6 +813,56 @@ def batch_values(env):
     return {"image": {"repository": repository, "tag": tag}}
 
 
+def ingestion_image(path=DATAHUB_VALUES):
+    """The ingestion CronJob's image, by the tag and digest in charts/datahub's values."""
+    with open(path, encoding="utf-8") as f:
+        m = INGESTION_TAG_RE.search(f.read())
+    if not m:
+        raise ValueError(f"{path}: no datahub-ingestion-cron image tag")
+    return f"{INGESTION_REPOSITORY}:{m.group(1)}"
+
+
+def datahub_principal(env, run, image=None, name=None, dry_run=False):
+    """Step 1, last, after Datahub (ADR-076 §3): datahub_ingest, created by root and given the
+    credential in datahub-polaris-principal, read by key names only first. Root's credential
+    reaches the pod on stdin, never a command line or a Secret of Datahub's namespace. Returns
+    (problems, notes); a dry-run makes no call."""
+    if dry_run:
+        return [], [f"Step 1: Polaris principal {DATAHUB_PRINCIPAL} is not set in a dry-run "
+                    "(ADR-076)."]
+    namespace, context = env["NS_CATALOG_DATAHUB"], env["KUBE_CONTEXT"]
+    code, out = run(["kubectl", "--context", context, "-n", namespace, "get", "secret",
+                     DATAHUB_PRINCIPAL_SECRET, "-o", SECRET_ONE_KEYS_TEMPLATE])
+    if code != 0:
+        return [f"Secret {DATAHUB_PRINCIPAL_SECRET} must exist in {namespace}: run "
+                "scripts/init_env.py --apply-secrets first (ADR-006, ADR-076)"], []
+    (secret,) = [s for s in SECRETS if s.name == DATAHUB_PRINCIPAL_SECRET]
+    lacking = sorted(set(secret.from_env) - set(out.split()))
+    if lacking:
+        return [f"Secret {DATAHUB_PRINCIPAL_SECRET} in {namespace} lacks {', '.join(lacking)}: "
+                "run scripts/init_env.py --apply-secrets with this release first (ADR-076)"], []
+    image = image or ingestion_image()
+    name = name or f"datahub-principal-{secrets.token_hex(4)}"
+    container = {"name": name, "image": image, "stdin": True, "stdinOnce": True, "env": [
+        {"name": "CLIENT_ID", **secret_ref(DATAHUB_PRINCIPAL_SECRET, "clientId")},
+        {"name": "CLIENT_SECRET", **secret_ref(DATAHUB_PRINCIPAL_SECRET, "clientSecret")},
+    ]}
+    polaris = (f"http://{POLARIS}.{env['NS_CATALOG_POLARIS']}.svc.cluster.local:"
+               f"{POLARIS_API_PORT}")
+    code, out = run(["kubectl", "--context", context, "-n", namespace, "run", name,
+                     f"--image={image}", "--restart=Never", "--rm", "-i", "--quiet",
+                     f"--pod-running-timeout={PRINCIPAL_TIMEOUT}", "--override-type=strategic",
+                     "--overrides=" + json.dumps({"spec": {"containers": [container]}}),
+                     "--command", "--", "python3", "-c", PRINCIPAL_SCRIPT, polaris,
+                     POLARIS_REALM, DATAHUB_PRINCIPAL],
+                    f"{env['POLARIS_ROOT_CLIENT_ID']}\n{env['POLARIS_ROOT_CLIENT_SECRET']}\n")
+    if code != 0:
+        return [f"Polaris principal {DATAHUB_PRINCIPAL} in {namespace} was not set (exit "
+                f"{code}):\n{masked(out, env).strip()}"], []
+    return [], [f"Step 1: Polaris principal {DATAHUB_PRINCIPAL} has {DATAHUB_PRINCIPAL_SECRET}'s "
+                "credential and gets a token with it (ADR-076)."]
+
+
 def endpoints_answer(env, run, image=None, name=None):
     """Before Polaris: the S3 and policy endpoints answer from Polaris's namespace (ADR-029).
 
@@ -965,6 +1089,7 @@ def install(env, run, supported, dry_run):
                  lambda: datahub_kafka(env, run, dry_run),
                  lambda: datahub_opensearch(env, run, dry_run),
                  lambda: datahub(env, run, dry_run),
+                 lambda: datahub_principal(env, run, dry_run=dry_run),
                  lambda: log_batch(env, run, dry_run)):
         problems, more = step()
         notes += more
