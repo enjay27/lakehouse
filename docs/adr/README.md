@@ -124,7 +124,7 @@ flowchart LR
 | [073](073-state-moves-to-a-project-of-the-kade-k8s-platform-organization-fed-by-this-repositorys-own-bridge-labels-become-requests.md) | State moves to a Project of the kade-k8s-platform organization, fed by this repository's own bridge; labels become requests | Accepted |
 | [074](074-the-log-batchs-image-moves-with-the-repository-to-ghcr-io-kade-k8s-platform-lakehouse.md) | The log batch's image moves with the repository, to `ghcr.io/kade-k8s-platform/lakehouse` | Accepted |
 | [075](075-check-datahub-recovery-runs-in-a-smoke-job-of-its-own-on-its-own-kind-cluster-on-every-smoke-run.md) | check-datahub-recovery runs in a smoke job of its own, on its own kind cluster, on every smoke run | Amended by ADR-077 |
-| [076](076-datahub-ingests-each-polaris-catalog-daily-from-upstreams-ingestion-cronjob-as-its-own-principal-the-policy-lets-only-read.md) | Datahub ingests each Polaris catalog daily from upstream's ingestion CronJob, as its own principal the policy lets only read | Proposed |
+| [076](076-datahub-ingests-each-polaris-catalog-daily-from-upstreams-ingestion-cronjob-as-its-own-principal-the-policy-lets-only-read.md) | Datahub ingests each Polaris catalog daily from upstream's ingestion CronJob, as its own principal the policy lets only read | Accepted |
 | [077](077-the-datahub-recovery-job-installs-datahub-alone-from-this-commit-and-check-datahub-recovery-prints-its-timeline.md) | The datahub-recovery job installs Datahub alone, from this commit, and check-datahub-recovery prints its timeline | Accepted |
 
 ## Not ADRs
