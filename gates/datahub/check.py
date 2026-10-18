@@ -97,41 +97,64 @@ def read_properties(http, gms, headers, urn):
     return status, aspect.get("com.linkedin.dataset.DatasetProperties")
 
 
-def check_gms(http, report, gms, secret, name, search_seconds, sleep=time.sleep,
-              clock=time.monotonic):
-    headers = {**RESTLI, "Authorization": f"Basic {SYSTEM_CLIENT}:{secret}"}
-    status, _, _ = http("GET", f"{gms}/health", {})
-    if not report.check(status == 200, "GMS answers /health", f"HTTP {status}"):
-        return
+def system_headers(secret):
+    return {**RESTLI, "Authorization": f"Basic {SYSTEM_CLIENT}:{secret}"}
+
+
+def write_dataset(http, report, gms, headers, name):
     urn = dataset_urn(name)
     status, _, _ = http("POST", f"{gms}/aspects?action=ingestProposal", headers, {"proposal": {
         "entityType": "dataset", "entityUrn": urn, "changeType": "UPSERT",
         "aspectName": "datasetProperties",
         "aspect": {"contentType": "application/json",
                    "value": json.dumps({"name": name, "description": "lakehouse gate check"})}}})
-    if not report.check(status == 200, f"{urn} written as {SYSTEM_CLIENT}", f"HTTP {status}"):
+    return report.check(status == 200, f"{urn} written as {SYSTEM_CLIENT}", f"HTTP {status}")
+
+
+def read_back(http, report, gms, headers, name):
+    urn = dataset_urn(name)
+    status, aspect = read_properties(http, gms, headers, urn)
+    return report.check(status == 200 and (aspect or {}).get("name") == name,
+                        f"{urn} read back by its URN", f"HTTP {status}, {aspect}")
+
+
+def search(http, report, gms, headers, name, search_seconds, sleep, clock):
+    urn = dataset_urn(name)
+    end, found, tries = clock() + search_seconds, False, 0
+    while True:
+        tries += 1
+        status, _, raw = http("POST", f"{gms}/entities?action=search", headers,
+                              {"input": name, "entity": "dataset", "start": 0, "count": 10})
+        found = status == 200 and urn in json.dumps(_json(raw).get("value") or {})
+        if found or clock() >= end:
+            break
+        sleep(POLL_SECONDS)
+    return report.check(found, f"{urn} found by search after {tries} tries",
+                        f"not within {search_seconds} s, last HTTP {status}")
+
+
+def delete_dataset(http, report, gms, headers, name):
+    urn = dataset_urn(name)
+    status, _, _ = http("POST", f"{gms}/entities?action=delete", headers, {"urn": urn})
+    report.check(status == 200, f"{urn} hard-deleted", f"HTTP {status}")
+    status, aspect = read_properties(http, gms, headers, urn)
+    report.check(aspect is None, f"{urn} reads back nothing after the delete",
+                 f"HTTP {status}, {aspect}")
+
+
+def check_gms(http, report, gms, secret, name, search_seconds, sleep=time.sleep,
+              clock=time.monotonic):
+    headers = system_headers(secret)
+    status, _, _ = http("GET", f"{gms}/health", {})
+    if not report.check(status == 200, "GMS answers /health", f"HTTP {status}"):
+        return
+    if not write_dataset(http, report, gms, headers, name):
         return
     try:
-        status, aspect = read_properties(http, gms, headers, urn)
-        report.check(status == 200 and (aspect or {}).get("name") == name,
-                     f"{urn} read back by its URN", f"HTTP {status}, {aspect}")
-        end, found, tries = clock() + search_seconds, False, 0
-        while True:
-            tries += 1
-            status, _, raw = http("POST", f"{gms}/entities?action=search", headers,
-                                  {"input": name, "entity": "dataset", "start": 0, "count": 10})
-            found = status == 200 and urn in json.dumps(_json(raw).get("value") or {})
-            if found or clock() >= end:
-                break
-            sleep(POLL_SECONDS)
-        report.check(found, f"{urn} found by search after {tries} tries",
-                     f"not within {search_seconds} s, last HTTP {status}")
+        read_back(http, report, gms, headers, name)
+        search(http, report, gms, headers, name, search_seconds, sleep, clock)
     finally:
-        status, _, _ = http("POST", f"{gms}/entities?action=delete", headers, {"urn": urn})
-        report.check(status == 200, f"{urn} hard-deleted", f"HTTP {status}")
-        status, aspect = read_properties(http, gms, headers, urn)
-        report.check(aspect is None, f"{urn} reads back nothing after the delete",
-                     f"HTTP {status}, {aspect}")
+        delete_dataset(http, report, gms, headers, name)
 
 
 def check_login(http, report, frontend, password):
