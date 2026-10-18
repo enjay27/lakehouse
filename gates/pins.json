@@ -34,6 +34,12 @@
     "sha256": "b53d3991fe84bcf38767e7702cae78666265427a127a26fff168ab4207d2b1df",
     "source": "digest in https://cloudnative-pg.github.io/charts/index.yaml, matched by the archive, read 2026-10-10"
   },
+  "datahub_chart": {
+    "version": "1.1.7",
+    "url": "https://github.com/acryldata/datahub-helm/releases/download/datahub-1.1.7/datahub-1.1.7.tgz",
+    "sha256": "9df268aad539c6b26bc266be21be6b9e86829ca68a1ac9410890de7a704debac",
+    "source": "digest in https://helm.datahubproject.io/index.yaml, matched by the archive, read 2026-10-18; charts/datahub is this archive with one patched line (ADR-071, ADR-072)"
+  },
   "manifests": {
     "cert_manager": {
       "version": "v1.21.2",
@@ -68,6 +74,36 @@
       "url": "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/817113f21a2643311cbc3e992bb44ffe1c416c54/v1.36.4-standalone-strict/configmap-v1.json",
       "sha256": "e0eaddebd677c08aa092b2da2264d86ac4fc34eed112b9fac2945b3f00c1e9b1",
       "source": "kubeconform's schema for ConfigMap at the node image's Kubernetes version, from the NetworkPolicy schema's commit, read 2026-10-18; sha256 of the file downloaded (ADR-070)"
+    },
+    "deployment": {
+      "url": "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/817113f21a2643311cbc3e992bb44ffe1c416c54/v1.36.4-standalone-strict/deployment-apps-v1.json",
+      "sha256": "3725782fb01e3f27d8be2da565e2d653d7b78bf6debe5440804cea993c87b8f9",
+      "source": "kubeconform's schema for Deployment at the node image's Kubernetes version, from the NetworkPolicy schema's commit, read 2026-10-18; sha256 of the file downloaded (ADR-071)"
+    },
+    "serviceaccount": {
+      "url": "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/817113f21a2643311cbc3e992bb44ffe1c416c54/v1.36.4-standalone-strict/serviceaccount-v1.json",
+      "sha256": "8193d6c3561475c6d3d5c44e1faedb1df53905373d904bc17015694326d659cf",
+      "source": "kubeconform's schema for ServiceAccount at the node image's Kubernetes version, from the NetworkPolicy schema's commit, read 2026-10-18; sha256 of the file downloaded (ADR-071)"
+    },
+    "role": {
+      "url": "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/817113f21a2643311cbc3e992bb44ffe1c416c54/v1.36.4-standalone-strict/role-rbac-v1.json",
+      "sha256": "dfe8fb03b1642f985b57b12edd1727b6867c13ed4b6761ef81bdd51b1d236711",
+      "source": "kubeconform's schema for Role at the node image's Kubernetes version, from the NetworkPolicy schema's commit, read 2026-10-18; sha256 of the file downloaded (ADR-071)"
+    },
+    "rolebinding": {
+      "url": "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/817113f21a2643311cbc3e992bb44ffe1c416c54/v1.36.4-standalone-strict/rolebinding-rbac-v1.json",
+      "sha256": "b12ea4163fc37df2e02192b4291b1b7c28836e3e7665d989dd538bfcffa10076",
+      "source": "kubeconform's schema for RoleBinding at the node image's Kubernetes version, from the NetworkPolicy schema's commit, read 2026-10-18; sha256 of the file downloaded (ADR-071)"
+    },
+    "job": {
+      "url": "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/817113f21a2643311cbc3e992bb44ffe1c416c54/v1.36.4-standalone-strict/job-batch-v1.json",
+      "sha256": "f49fee30367890a492146d63c3c433a7853e9088ebfe9e25cc792ec4b1400f18",
+      "source": "kubeconform's schema for Job at the node image's Kubernetes version, from the NetworkPolicy schema's commit, read 2026-10-18; sha256 of the file downloaded (ADR-071)"
+    },
+    "cronjob": {
+      "url": "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/817113f21a2643311cbc3e992bb44ffe1c416c54/v1.36.4-standalone-strict/cronjob-batch-v1.json",
+      "sha256": "adc506e976a783ff7ff9c12d1633a11d40a4ff6fef64e576e6fc423668f0b7c5",
+      "source": "kubeconform's schema for CronJob at the node image's Kubernetes version, from the NetworkPolicy schema's commit, read 2026-10-18; sha256 of the file downloaded (ADR-071)"
     }
   },
   "standin_images": {
