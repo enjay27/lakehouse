@@ -1,7 +1,8 @@
-"""Tests for charts/datahub-network-policies (ADR-048, ADR-066 §4, ADR-068 §3, ADR-070 §2): default
-deny in Datahub's namespace, datahub-pg's two allow policies, datahub-kafka's and
-datahub-opensearch's, the values schema, and kubeconform against the
-NetworkPolicy schema of the gate's Kubernetes version, pinned in gates/pins.json.
+"""Tests for charts/datahub-network-policies (ADR-048, ADR-066 §4, ADR-068 §3, ADR-070 §2,
+ADR-071 §5): default deny in Datahub's namespace, datahub-pg's two allow policies,
+datahub-kafka's, datahub-opensearch's, GMS's and the frontend's, the values schema, and
+kubeconform against the NetworkPolicy schema of the gate's Kubernetes version, pinned in
+gates/pins.json.
 
 Run: python3 -m unittest discover -s charts
 Needs helm and kubeconform on PATH (`python3 gates/gate.py tools BIN_DIR helm kubeconform`) and
@@ -37,6 +38,14 @@ KAFKA = {"app.kubernetes.io/name": "datahub-kafka"}
 # The labels upstream's opensearch chart gives its pod, with release datahub-opensearch.
 OPENSEARCH = {"app.kubernetes.io/name": "opensearch",
               "app.kubernetes.io/instance": "datahub-opensearch"}
+# The labels upstream's datahub chart gives GMS's and the frontend's pods, with release datahub.
+GMS = {"app.kubernetes.io/name": "datahub-gms", "app.kubernetes.io/instance": "datahub"}
+FRONTEND = {"app.kubernetes.io/name": "datahub-frontend", "app.kubernetes.io/instance": "datahub"}
+DATAHUB_CHART = os.path.join(HERE, "datahub")
+DATAHUB_VALUES = os.path.join(DATAHUB_CHART, "values-lakehouse.yaml")
+# The caller classes of ci/lint-values.yaml.
+INGRESS = {"key": "lakehouse.example/caller", "value": "ingress"}
+EMITTER = {"key": "lakehouse.example/caller", "value": "lineage-emitter"}
 
 SCHEMAS = None
 
@@ -87,12 +96,13 @@ class Rendered(unittest.TestCase):
         cls.docs = render()
         cls.policies = by_name(cls.docs)
 
-    def test_only_these_five_network_policies(self):
+    def test_only_these_seven_network_policies(self):
         self.assertEqual({(d["apiVersion"], d["kind"]) for d in self.docs},
                          {("networking.k8s.io/v1", "NetworkPolicy")})
         self.assertEqual(set(self.policies),
                          {"default-deny-ingress", "datahub-pg-clients", "datahub-pg-operator",
-                          "datahub-kafka-clients", "datahub-opensearch-clients"})
+                          "datahub-kafka-clients", "datahub-opensearch-clients",
+                          "datahub-gms", "datahub-frontend"})
 
     def test_every_pod_is_denied_ingress_by_default(self):
         deny = self.policies["default-deny-ingress"]["spec"]
@@ -178,6 +188,57 @@ class Rendered(unittest.TestCase):
         # app.kubernetes.io/name alone, opensearch, could match another release's pods.
         self.assertIn("app.kubernetes.io/instance", OPENSEARCH)
 
+    def test_gms_on_8080_from_its_clients_and_the_emitters_namespaces(self):
+        # ADR-071 §5: Datahub's own pods carry the client label; the emitters are a caller
+        # class (ADR-048 §2). Metrics ports get no rule until Datahub's scrape contract.
+        spec = self.policies["datahub-gms"]["spec"]
+        self.assertEqual(spec["podSelector"], {"matchLabels": GMS})
+        self.assertEqual(spec["ingress"], [{
+            "ports": [{"protocol": "TCP", "port": 8080}],
+            "from": [{"podSelector": {"matchLabels": {
+                         release.DATAHUB_GMS_CLIENT_LABEL: "true"}}},
+                     {"namespaceSelector": {"matchLabels": {EMITTER["key"]:
+                                                            EMITTER["value"]}}}]}])
+
+    def test_without_the_emitters_label_gms_admits_its_clients_only(self):
+        policies = by_name(render("callers.emitter=null"))
+        self.assertEqual(policies["datahub-gms"]["spec"]["ingress"], [{
+            "ports": [{"protocol": "TCP", "port": 8080}],
+            "from": [{"podSelector": {"matchLabels": {
+                release.DATAHUB_GMS_CLIENT_LABEL: "true"}}}]}])
+
+    def test_the_frontend_on_9002_from_the_ingress_namespace_only(self):
+        spec = self.policies["datahub-frontend"]["spec"]
+        self.assertEqual(spec["podSelector"], {"matchLabels": FRONTEND})
+        self.assertEqual(spec["ingress"], [{
+            "ports": [{"protocol": "TCP", "port": 9002}],
+            "from": [{"namespaceSelector": {"matchLabels": {INGRESS["key"]:
+                                                            INGRESS["value"]}}}]}])
+
+    def test_without_the_ingress_label_the_frontend_has_no_rule(self):
+        self.assertNotIn("datahub-frontend", by_name(render("callers.ingress=null")))
+
+    def test_the_gms_client_label_is_its_own(self):
+        self.assertEqual(release.DATAHUB_GMS_CLIENT_LABEL, "lakehouse/datahub-gms-client")
+        self.assertNotIn(release.DATAHUB_GMS_CLIENT_LABEL,
+                         (release.DATAHUB_OPENSEARCH_CLIENT_LABEL,
+                          release.DATAHUB_KAFKA_CLIENT_LABEL, release.DATAHUB_PG_CLIENT_LABEL,
+                          release.PG_CLIENT_LABEL))
+
+    def test_the_gms_and_frontend_rules_select_datahubs_pods(self):
+        out = subprocess.run(["helm", "template", "datahub", DATAHUB_CHART, "--namespace",
+                              NAMESPACE, "-f", DATAHUB_VALUES],
+                             capture_output=True, text=True, check=True).stdout
+        deployments = {d["metadata"]["name"]: d for d in yaml.safe_load_all(out)
+                       if d and d["kind"] == "Deployment"}
+        for name, selector in (("datahub-datahub-gms", GMS),
+                               ("datahub-datahub-frontend", FRONTEND)):
+            with self.subTest(deployment=name):
+                labels = deployments[name]["spec"]["template"]["metadata"]["labels"]
+                for key, value in selector.items():
+                    self.assertEqual(labels.get(key), value)
+                self.assertEqual(labels[release.DATAHUB_GMS_CLIENT_LABEL], "true")
+
     def test_kubeconform_accepts_every_policy(self):
         result = helm_template()
         checked = subprocess.run(
@@ -202,6 +263,13 @@ class ValuesSchema(unittest.TestCase):
 
     def test_a_namespace_name_that_is_not_dns_is_refused(self):
         self.assertRefused("namespaces.operator=CNPG_System")
+
+    def test_an_unknown_caller_class_is_refused(self):
+        self.assertRefused("callers.gateway.key=a", "callers.gateway.value=b")
+
+    def test_a_caller_label_that_is_not_a_label_is_refused(self):
+        self.assertRefused("callers.emitter.key=not a label")
+        self.assertRefused("callers.emitter.value=a=b")
 
 
 if __name__ == "__main__":
