@@ -295,7 +295,8 @@ class RebuildReplica(unittest.TestCase):
 
 class DatahubRecovery(unittest.TestCase):
     """check-datahub-recovery runs in a smoke job of its own, on its own kind cluster, after
-    smoke's set-up, the same install and check-datahub, on every smoke run (ADR-075)."""
+    check-datahub, on every smoke run (ADR-075), over Datahub installed alone, fresh, after
+    smoke's set-up without the console's and the batch's images (ADR-077)."""
 
     def setUp(self):
         self.jobs = read_workflow(os.path.join(WORKFLOWS, "smoke.yml"))["jobs"]
@@ -322,13 +323,54 @@ class DatahubRecovery(unittest.TestCase):
                 self.assertIn(name, self.jobs)
                 self.assertNotIn("if", self.jobs[name])
 
-    def test_its_set_up_and_install_are_smokes(self):
-        # The console's image among them, never blocking, so the install is the same (ADR-075 §1).
-        smoke, ours = self.smoke["steps"], self.job["steps"]
-        install = self._install(smoke)
-        self.assertEqual(ours[:install + 1], smoke[:install + 1])
-        self.assertTrue(any("console-image --load" in s.get("run", "")
-                            and s.get("continue-on-error") == "true" for s in ours[:install]))
+    # ADR-077 §2: the job's steps, each found by what it runs.
+    STEPS = ("actions/checkout@", "python3 gates/gate.py tools ", "python3 gates/gate.py up",
+             "python3 gates/gate.py secrets", "python3 gates/gate.py standins",
+             "python3 gates/gate.py install --datahub-only |",
+             "python3 gates/gate.py check-datahub |",
+             "python3 gates/gate.py check-datahub-recovery |", "kubectl ")
+
+    def test_its_steps_are_the_set_up_then_datahub_alone_then_its_checks(self):
+        steps = self.job["steps"]
+        self.assertEqual(len(steps), len(self.STEPS))
+        for step, want in zip(steps, self.STEPS):
+            with self.subTest(step=want):
+                self.assertIn(want, step.get("uses") or step.get("run", ""))
+
+    def test_its_set_up_steps_are_smokes(self):
+        set_up = self.job["steps"][:self._install(self.job["steps"])]
+        self.assertEqual(len(set_up), 5)
+        for step in set_up:
+            with self.subTest(step=step.get("name") or step.get("uses")):
+                self.assertIn(step, self.smoke["steps"])
+
+    def test_no_console_or_batch_image_and_no_polaris_part(self):
+        # Nothing in this job runs them (ADR-077 §2).
+        for step in self.job["steps"]:
+            for absent in ("console-image", "batch-image", "gate-policies", "seed",
+                           "check-migration"):
+                with self.subTest(step=step.get("name"), absent=absent):
+                    self.assertNotIn(absent, step.get("run", ""))
+
+    def test_it_installs_datahub_alone_fresh_on_every_trigger(self):
+        steps = self.job["steps"]
+        install = steps[self._install(steps)]
+        self.assertIn("ADR-077", install["name"])
+        self.assertNotIn("env", install)
+        self.assertNotIn("if", install)
+        self.assertEqual([line.strip() for line in install["run"].strip().splitlines()],
+                         ["set -euo pipefail",
+                          'python3 gates/gate.py install --datahub-only | tee -a '
+                          '"$GITHUB_STEP_SUMMARY"'])
+
+    def test_smoke_keeps_the_upgrade_the_seed_and_both_images(self):
+        runs = "\n".join(s.get("run", "") for s in self.smoke["steps"])
+        for want in ("python3 gates/gate.py install --fresh |", "python3 gates/gate.py install |",
+                     "python3 gates/gate.py check-migration |", "console-image --load",
+                     "python3 gates/gate.py batch-image"):
+            with self.subTest(want=want):
+                self.assertIn(want, runs)
+        self.assertNotIn("--datahub-only", runs)
 
     def test_after_the_install_check_datahub_then_the_recovery_then_the_state_on_failure(self):
         steps = self.job["steps"]

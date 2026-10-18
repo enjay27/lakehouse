@@ -354,6 +354,116 @@ class Install(unittest.TestCase):
             self.assertEqual(gate.main(["gate.py", "install", "--upgrade"]), 2)
 
 
+class DatahubOnly(unittest.TestCase):
+    """ADR-077 §1: `install --datahub-only` runs release.py's own functions, step 0 then
+    Datahub's part of step 1, in ADR-045's order; the first step with a problem stops the
+    rest."""
+
+    DATAHUB = ("check_preconditions", "datahub_network_policies", "datahub_postgres",
+               "datahub_kafka", "datahub_opensearch", "datahub")
+    # Everything else release.py installs: none of it runs.
+    OTHERS = ("network_policies", "polaris_postgres", "endpoints_answer", "bootstrap",
+              "logs_claim", "polaris", "log_batch", "console", "install")
+    ENV = {"KUBE_CONTEXT": "kind-lakehouse-gate", "NS_CATALOG_DATAHUB": "catalog-datahub"}
+    SUPPORTED = ["1.27"]
+
+    def steps(self, broken=None):
+        """The patches over release.py's steps, and the list of the steps called."""
+        called = []
+
+        def step(name):
+            def call(env, run, *rest):
+                self.assertEqual(env, self.ENV)
+                self.assertIs(run, gate.release.call)
+                self.assertEqual(rest, (self.SUPPORTED,) if name == "check_preconditions"
+                                 else ())
+                called.append(name)
+                return ([f"{name} failed"] if name == broken else []), [f"{name} done"]
+            return call
+        stack = contextlib.ExitStack()
+        for name in self.DATAHUB + self.OTHERS:
+            stack.enter_context(mock.patch.object(gate.release, name, side_effect=step(name)))
+        return stack, called
+
+    def test_step_0_then_datahubs_part_of_step_1_in_order(self):
+        stack, called = self.steps()
+        with stack:
+            problems, notes, timed = gate.datahub_only(self.ENV, self.SUPPORTED)
+        self.assertEqual(problems, [])
+        self.assertEqual(called, list(self.DATAHUB))
+        self.assertEqual(notes, [f"{name} done" for name in self.DATAHUB])
+        # Each step timed under its own name, for the install's timeline.
+        self.assertEqual([label for _, _, label in timed],
+                         [f"release.py {name}" for name in self.DATAHUB])
+        for start, end, _ in timed:
+            self.assertLessEqual(gate._moment(start), gate._moment(end))
+
+    def test_the_first_step_with_a_problem_stops_the_rest(self):
+        for broken in self.DATAHUB:
+            with self.subTest(broken=broken):
+                stack, called = self.steps(broken)
+                with stack:
+                    problems, notes, timed = gate.datahub_only(self.ENV, self.SUPPORTED)
+                upto = list(self.DATAHUB[:self.DATAHUB.index(broken) + 1])
+                self.assertEqual(problems, [f"{broken} failed"])
+                self.assertEqual(called, upto)
+                self.assertEqual(notes, [f"{name} done" for name in upto])
+                self.assertEqual(len(timed), len(upto))
+
+    def main(self, broken=None, argv=("install", "--datahub-only")):
+        stack, called = self.steps(broken)
+        with stack, mock.patch.object(gate.release, "load_env", return_value=self.ENV), \
+                mock.patch.object(gate.release, "supported_versions",
+                                  return_value=self.SUPPORTED), \
+                mock.patch.object(gate, "run") as run, \
+                mock.patch.object(gate, "released_tags") as tags, \
+                mock.patch.object(gate, "measure_pulls",
+                                  return_value=["Image pulls: p"]) as pulls, \
+                mock.patch.object(gate, "measure_timeline",
+                                  return_value=["Install timeline: t"]) as timeline, \
+                mock.patch.object(gate, "INSTALL_RECORD",
+                                  os.path.join(tempfile.mkdtemp(), "install.json")) as record, \
+                contextlib.redirect_stdout(io.StringIO()) as out, \
+                contextlib.redirect_stderr(io.StringIO()):
+            code = gate.main(["gate.py", *argv])
+        return code, out.getvalue(), called, run, tags, pulls, timeline, record
+
+    def test_the_command_prints_its_notes_then_the_pulls_and_the_timeline(self):
+        code, out, called, run, tags, pulls, timeline, record = self.main()
+        self.assertEqual(code, 0)
+        self.assertEqual(called, list(self.DATAHUB))
+        # Fresh, from this commit: no last release, seed, gate-policies or other command.
+        run.assert_not_called()
+        tags.assert_not_called()
+        self.assertFalse(os.path.exists(record))
+        self.assertIn("ADR-077", out.splitlines()[0])
+        self.assertLess(out.index("datahub done"), out.index("Image pulls: p"))
+        self.assertLess(out.index("Image pulls: p"), out.index("Install timeline: t"))
+        since, seconds = pulls.call_args.args
+        self.assertGreaterEqual(seconds, 0)
+        self.assertEqual(timeline.call_args.args[0], since)
+        self.assertEqual([label for _, _, label in timeline.call_args.args[1]],
+                         [f"release.py {name}" for name in self.DATAHUB])
+
+    def test_a_problem_fails_the_command_after_its_pulls_and_timeline(self):
+        code, out, called, *_ = self.main(broken="datahub_kafka")
+        self.assertEqual(code, 1)
+        self.assertEqual(called[-1], "datahub_kafka")
+        self.assertLess(out.index("datahub_kafka failed"), out.index("Install timeline: t"))
+
+    def test_it_takes_no_other_option(self):
+        for argv in (("install", "--datahub-only", "--fresh"),
+                     ("install", "--datahub-only", "--dry-run"),
+                     ("install", "--fresh", "--datahub-only")):
+            with self.subTest(argv=argv):
+                code, _, called, *_ = self.main(argv=argv)
+                self.assertEqual((code, called), (2, []))
+
+    def test_it_is_a_command_of_the_gate(self):
+        self.assertIn("| install [--fresh] [--dry-run] | install --datahub-only |",
+                      gate.__doc__.strip().splitlines()[-1])
+
+
 def pulled(message, node="lakehouse-gate-worker", at="2026-10-14T01:10:00Z", reason="Pulled"):
     return {"reason": reason, "message": message, "source": {"host": node},
             "firstTimestamp": at, "lastTimestamp": at}
@@ -2764,6 +2874,30 @@ class FakeRecovery:
         self.index, self.topics = 200, set(DATAHUB_TOPICS) | {"__consumer_offsets"}
         self.claims = {OPENSEARCH_CLAIM: "os-1", KAFKA_CLAIM: "kafka-1"}
         self.datasets, self.indexed, self.pods = set(), set(), []
+        # What the timeline reads back: Datahub's Helm revision, its Jobs' times.
+        self.revision, self.timeline = 1, []
+
+    def read(self, argv):
+        """Helm's history and the Jobs, read for the timeline only (ADR-077 §3)."""
+        if self.broken == "unreadable":
+            return subprocess.CompletedProcess(argv, 1, "", "connection refused")
+        if argv[0] == "helm":
+            self.test.assertEqual(argv[argv.index("history") + 1:],
+                                  ["datahub", "--max", "1", "-o", "json"])
+            return subprocess.CompletedProcess(argv, 0, json.dumps([{
+                "revision": self.revision, "status": "deployed",
+                "updated": f"2026-10-19T00:0{self.revision}:00.123456789+00:00"}]), "")
+        kind = argv[argv.index("get") + 1]
+        names = gate.DATAHUB_JOBS if kind == "jobs" else [argv[argv.index("get") + 2]]
+        items = [{"metadata": {"name": name}, "status": {
+            "startTime": f"2026-10-19T00:0{self.revision}:1{i}Z",
+            "completionTime": f"2026-10-19T00:0{self.revision}:2{i}Z"}}
+            for i, name in enumerate(names)]
+        # Another Job in the namespace stays off the timeline.
+        items.append({"metadata": {"name": "other"},
+                      "status": {"startTime": "2026-10-19T00:00:00Z"}})
+        return subprocess.CompletedProcess(
+            argv, 0, json.dumps({"items": items} if kind == "jobs" else items[0]), "")
 
     def output(self, argv, stdin=None):
         if argv[0] == "helm":
@@ -2826,9 +2960,12 @@ class FakeRecovery:
             self.index = 200
         if not self.topics and self.broken != "no-topics":
             self.topics = set(DATAHUB_TOPICS)
+        self.revision += 1
         return [], ["Step 1: Datahub in catalog-datahub is installed (ADR-071)."]
 
     def run(self, argv, input=None, **kwargs):
+        if "history" in argv or "get" in argv:
+            return self.read(argv)
         if "python3" in argv:
             self.pods.append((argv, input))
             step, _, *rest = argv[argv.index("-c") + 2:]
@@ -2870,8 +3007,131 @@ class CheckDatahubRecovery(unittest.TestCase):
                 mock.patch.object(gate, "wait_for", side_effect=cluster.wait_for), \
                 mock.patch.object(gate.subprocess, "run", side_effect=cluster.run), \
                 mock.patch.object(gate.release, "datahub", side_effect=cluster.datahub):
-            problems, notes = gate.check_datahub_recovery(env or self.ENV, self.PINS)
+            problems, notes = gate.check_datahub_recovery(env or self.ENV, self.PINS,
+                                                          cluster.timeline)
         return problems, notes, run
+
+    def marks(self, cluster):
+        return [text for _, text in cluster.timeline]
+
+    def test_each_phase_is_on_the_timeline_in_order(self):
+        # ADR-077 §3, from the check's own clock and from Helm and the cluster.
+        cluster = FakeRecovery(self)
+        problems, _, _ = self.check(cluster)
+        self.assertEqual(problems, [])
+        first, second, pid = *self.names(), os.getpid()
+        topics = "topics DataHubUpgradeHistory_v1, MetadataChangeLog_Versioned_v1"
+
+        def install(revision):
+            return ["Datahub's install step started", "Datahub's install step ended",
+                    f"helm datahub revision {revision} deployed",
+                    "job datahub-system-update started", "job datahub-system-update complete",
+                    "job datahub-system-update-nonblk started",
+                    "job datahub-system-update-nonblk complete"]
+
+        def lost(claim, pod):
+            return [f"claim {claim} and pod {pod} being deleted",
+                    f"claim {claim} and pod {pod} deleted", "p-0 ready"]
+
+        def step(*args):
+            return [f"{' '.join(args)} started", f"{' '.join(args)} passed"]
+        restore = f"job datahub-restore-indices-{pid}"
+        self.assertEqual(self.marks(cluster), [
+            "check pods created", "check pods ready",
+            *step("write", first), *step("search", first),
+            "index datasetindex_v2 answers 200",
+            *lost(OPENSEARCH_CLAIM, "datahub-opensearch-0"),
+            "index datasetindex_v2 answers 404",
+            *install(2),
+            "index datasetindex_v2 answers 200",
+            f"{restore} created", f"{restore} started", f"{restore} complete",
+            f"{restore} succeeded",
+            *step("search", first),
+            f"{topics}: 2 of 2 present",
+            *lost(KAFKA_CLAIM, "datahub-kafka-0"),
+            f"{topics}: 0 of 2 present",
+            *install(3),
+            f"{topics}: 2 of 2 present",
+            "GMS's pod being deleted", "GMS's pod deleted", "GMS's pod p-0 ready",
+            *step("read", first), *step("write", second), *step("search", second),
+            "clean-up started", *step("delete", first, second), "clean-up ended"])
+        # Helm's and the Jobs' times are theirs, not the check's.
+        times = dict((text, at) for at, text in cluster.timeline)
+        self.assertEqual(times["helm datahub revision 3 deployed"],
+                         "2026-10-19T00:03:00.123456789+00:00")
+        self.assertEqual(times["job datahub-system-update-nonblk complete"],
+                         "2026-10-19T00:03:21Z")
+        self.assertEqual(times[f"{restore} complete"], "2026-10-19T00:02:20Z")
+
+    def test_a_timeline_that_cannot_be_read_is_said_and_never_fails_the_check(self):
+        cluster = FakeRecovery(self, broken="unreadable")
+        problems, _, _ = self.check(cluster)
+        self.assertEqual(problems, [])
+        marks = self.marks(cluster)
+        for what in ("Datahub's Helm revision", "Datahub's system-update Jobs",
+                     f"job datahub-restore-indices-{os.getpid()}"):
+            self.assertIn(f"{what} not read (connection refused)", marks)
+
+    def test_a_check_that_stops_still_has_its_timeline_so_far(self):
+        cluster = FakeRecovery(self, broken="install")
+        problems, _, _ = self.check(cluster)
+        self.assertEqual(len(problems), 1)
+        marks = self.marks(cluster)
+        self.assertEqual(marks[-4:], ["clean-up started",
+                                      f"delete {self.names()[0]} started",
+                                      f"delete {self.names()[0]} passed", "clean-up ended"])
+        self.assertIn("Datahub's install step ended", marks)
+        self.assertNotIn("helm datahub revision 2 deployed", marks)
+
+    def test_the_timelines_lines_from_a_recorded_set_of_times(self):
+        marks = [("2026-10-19T00:00:40Z", "b"), ("2026-10-19T00:00:05+00:00", "a"),
+                 ("2026-10-19T00:03:20.123456789+00:00", "c")]
+        self.assertEqual(gate.recovery_timeline(marks, "2026-10-19T00:00:00+00:00"), [
+            "Recovery timeline, seconds after check-datahub-recovery started (and since the "
+            "line before):",
+            "-   5 s (+ 5)  a", "-  40 s (+35)  b", "- 200 s (+160)  c"])
+        self.assertEqual(gate.recovery_timeline([], "2026-10-19T00:00:00+00:00"),
+                         ["Recovery timeline: nothing recorded after check-datahub-recovery "
+                          "started."])
+        lines = gate.recovery_timeline([("not a time", "x")], "2026-10-19T00:00:00+00:00")
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("Recovery timeline: not measured ("), lines[0])
+
+    def main(self, outcome):
+        def check(env, pins, timeline):
+            timeline.append(("2026-10-19T00:00:05Z", "check pods ready"))
+            return outcome(timeline)
+        with mock.patch.object(gate, "check_datahub_recovery", side_effect=check), \
+                mock.patch.object(gate.release, "load_env", return_value=self.ENV), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            try:
+                code = gate.main(["gate.py", "check-datahub-recovery"])
+            except SystemExit as e:
+                code = f"exit {e.code}"
+        return code, out.getvalue()
+
+    def test_the_command_prints_its_timeline_after_its_notes_passed_or_failed(self):
+        for problems, want in (([], 0), (["Index datasetindex_v2 answers 404"], 1)):
+            with self.subTest(problems=problems):
+                code, out = self.main(lambda _: (problems, ["a note"]))
+                self.assertEqual(code, want)
+                self.assertLess(out.index("a note"), out.index("Recovery timeline, seconds"))
+                self.assertIn("  check pods ready", out)
+
+    def test_a_check_that_stops_the_gate_prints_its_timeline_first(self):
+        def stop(_):
+            sys.exit("GMS back ready: not done after 900 s")
+        code, out = self.main(stop)
+        self.assertEqual(code, "exit GMS back ready: not done after 900 s")
+        self.assertIn("Recovery timeline, seconds", out)
+
+    def test_a_timeline_that_cannot_be_read_never_fails_the_command(self):
+        def unreadable(timeline):
+            timeline.append(("not a time", "x"))
+            return [], []
+        code, out = self.main(unreadable)
+        self.assertEqual(code, 0)
+        self.assertIn("Recovery timeline: not measured (", out)
 
     def names(self):
         pid = os.getpid()
