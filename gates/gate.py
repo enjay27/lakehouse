@@ -1415,8 +1415,8 @@ KAFKA_POD_LABELS = f"app.kubernetes.io/name={release.DATAHUB_KAFKA}"
 KAFKA_RESTART_TIMEOUT = 300
 # Run in the check pod with `bash -s -- STEP BOOTSTRAP TOPIC`. `write` creates the topic, with
 # nothing of its own, so the broker's message.max.bytes is what decides, and produces one line;
-# `read` consumes the first message from the beginning; each prints the sha256 and size of what
-# it sent or received. `delete` deletes the topic. KAFKA_BIN is only for the tests.
+# `read` consumes the first message from the beginning and keeps the line that starts with the
+# topic's name; each prints the sha256 and size of what it sent or received. `delete` deletes the topic. KAFKA_BIN is only for the tests.
 KAFKA_CHECK = r"""
 set -euo pipefail
 step=$1 bootstrap=$2 topic=$3
@@ -1436,7 +1436,10 @@ case "$step" in
       --from-beginning --max-messages 1 --timeout-ms 120000 \
       --consumer-property max.partition.fetch.bytes=5242880 > received 2> consumer.log \
       || tail -n 5 consumer.log >&2
-    echo "received $(sha256sum < received | cut -d' ' -f1) $(wc -c < received | tr -d ' ')"
+    # The tool prints lines of its own on stdout too: only the message's line is compared.
+    grep -v "^$topic-" received >&2 || true
+    grep "^$topic-" received > message || true
+    echo "received $(sha256sum < message | cut -d' ' -f1) $(wc -c < message | tr -d ' ')"
     ;;
   delete)
     "$bin/kafka-topics.sh" --bootstrap-server "$bootstrap" --delete --topic "$topic" >&2
