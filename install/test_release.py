@@ -840,15 +840,59 @@ class Datahub(unittest.TestCase):
         self.assertEqual(get, ["kubectl", "--context", "kind-lakehouse-gate", "-n",
                                "catalog-datahub", "get", "secret", *self.SECRETS, "-o",
                                release.SECRET_KEYS_TEMPLATE])
+        values_file = helm[helm.index(release.DATAHUB_VALUES) + 2]
         self.assertEqual(helm, [
             "helm", "--kube-context", "kind-lakehouse-gate", "-n", "catalog-datahub", "upgrade",
             "--install", release.DATAHUB_RELEASE, release.DATAHUB_CHART, "-f",
-            release.DATAHUB_VALUES, "--wait", f"--timeout={release.DATAHUB_TIMEOUT}"])
-        # Nothing from .env but the namespace: the credentials are in the Secrets.
-        self.assertEqual(calls.values, [])
+            release.DATAHUB_VALUES, "-f", values_file, "--wait",
+            f"--timeout={release.DATAHUB_TIMEOUT}"])
+        self.assertTrue(values_file.endswith(".json"))
+        self.assertFalse(os.path.exists(values_file))
+        # From .env only the ingestion's Polaris URI, built from Polaris's namespace, and its
+        # catalogs (ADR-076 §2): the credentials are in the Secrets.
+        self.assertEqual(calls.values, [{"datahub-ingestion-cron": {"crons": {"polaris": {
+            "env": {"POLARIS_URI": "http://polaris.catalog-polaris.svc.cluster.local:8181"
+                                   "/api/catalog",
+                    "DATAHUB_INGEST_POLARIS_CATALOGS": ""},
+            "suspend": True}}}}])
         self.assertEqual(notes, [
             "Step 1: Datahub in catalog-datahub is installed: system-update's Jobs completed, "
-            "GMS and the frontend ready (ADR-071)."])
+            "GMS and the frontend ready; DATAHUB_INGEST_POLARIS_CATALOGS is empty, so the "
+            "ingestion CronJob is suspended (ADR-071, ADR-076)."])
+
+    def test_the_catalogs_to_ingest_reach_the_cronjob_which_runs(self):
+        # ADR-076 §2: names from .env, each checked; spaces around a name are dropped.
+        calls = datahub_calls()
+        env = {**POLARIS_ENV, "DATAHUB_EMITTER_NAMESPACE_LABEL": "a=b",
+               "DATAHUB_INGEST_POLARIS_CATALOGS": "sales, Ops-2,raw_data"}
+        problems, notes = self.step(calls, env=env)
+        self.assertEqual(problems, [])
+        (values,) = calls.values
+        cron = values["datahub-ingestion-cron"]["crons"]["polaris"]
+        self.assertEqual(cron["env"]["DATAHUB_INGEST_POLARIS_CATALOGS"], "sales,Ops-2,raw_data")
+        self.assertIs(cron["suspend"], False)
+        self.assertEqual(notes, [
+            "Step 1: Datahub in catalog-datahub is installed: system-update's Jobs completed, "
+            "GMS and the frontend ready; the ingestion CronJob runs daily for sales, Ops-2, "
+            "raw_data (ADR-071, ADR-076)."])
+
+    def test_a_catalog_name_outside_the_pattern_stops_before_any_call(self):
+        for value in ("sales;rm", "a,,b", "a,", "caf\u00e9", "a b"):
+            with self.subTest(value=value):
+                calls = datahub_calls()
+                problems, _ = self.step(calls, env={**POLARIS_ENV,
+                                                    "DATAHUB_INGEST_POLARIS_CATALOGS": value})
+                self.assertEqual(problems, [
+                    "DATAHUB_INGEST_POLARIS_CATALOGS must be Polaris catalog names matching "
+                    "^[A-Za-z0-9_-]+$, comma-separated (ADR-076)"])
+                self.assertEqual(calls.calls, [])
+
+    def test_an_empty_polaris_namespace_stops_before_any_call(self):
+        # The ingestion's URI names Polaris's namespace from .env, never one in a chart.
+        calls = datahub_calls()
+        problems, _ = self.step(calls, env={**POLARIS_ENV, "NS_CATALOG_POLARIS": ""})
+        self.assertIn("NS_CATALOG_POLARIS", "\n".join(problems))
+        self.assertEqual(calls.calls, [])
 
     def test_an_empty_emitters_label_is_said_and_the_install_goes_on(self):
         calls = datahub_calls()
@@ -858,7 +902,8 @@ class Datahub(unittest.TestCase):
         self.assertEqual(notes, [
             "Step 1: Datahub in catalog-datahub is installed: system-update's Jobs completed, "
             "GMS and the frontend ready; DATAHUB_EMITTER_NAMESPACE_LABEL is empty, so no "
-            "lineage emitter's namespace may reach GMS (ADR-071)."])
+            "lineage emitter's namespace may reach GMS; DATAHUB_INGEST_POLARIS_CATALOGS is "
+            "empty, so the ingestion CronJob is suspended (ADR-071, ADR-076)."])
 
     def test_a_missing_secret_stops_before_helm(self):
         calls = datahub_calls(secret=False)

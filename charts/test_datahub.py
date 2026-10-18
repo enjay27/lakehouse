@@ -601,6 +601,40 @@ class Rendered(unittest.TestCase):
         self.assertIn(f"Valid: {len(self.docs)}", result.stdout)
 
 
+class InstallValues(unittest.TestCase):
+    """ADR-076 §2: the chart rendered with the values install/release.py adds."""
+
+    def render(self, catalogs):
+        env = {"NS_CATALOG_POLARIS": "catalog-polaris",
+               "DATAHUB_INGEST_POLARIS_CATALOGS": catalogs}
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "install.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(gate.release.datahub_values(env), f)
+            result = subprocess.run(["helm", "template", RELEASE, CHART, "--namespace",
+                                     NAMESPACE, "-f", VALUES, "-f", path],
+                                    capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        (cron,) = [d for d in yaml.safe_load_all(result.stdout)
+                   if d and d["kind"] == "CronJob" and d["metadata"]["name"] == INGESTION]
+        return cron
+
+    def test_the_install_adds_polaris_uri_and_the_catalogs_to_the_environment(self):
+        cron = self.render("gate_ingest_catalog")
+        (c,) = pod_template(cron)["spec"]["containers"]
+        variables = env(c)
+        self.assertEqual(variables["POLARIS_URI"],
+                         "http://polaris.catalog-polaris.svc.cluster.local:8181/api/catalog")
+        self.assertEqual(variables["DATAHUB_INGEST_POLARIS_CATALOGS"], "gate_ingest_catalog")
+        self.assertEqual(variables["DATAHUB_SYSTEM_CLIENT_ID"], "__datahub_system")
+        self.assertEqual(variables["POLARIS_CLIENT_ID"],
+                         secret("datahub-polaris-principal", "clientId"))
+        self.assertIs(cron["spec"]["suspend"], False)
+
+    def test_no_catalog_suspends_the_cronjob(self):
+        self.assertIs(self.render("")["spec"]["suspend"], True)
+
+
 class CronEntry(unittest.TestCase):
     """Upstream's subchart reads each entry of `crons` inside `range`, as `$val.<key>` or
     `.<key>`, and its recipe as `$val.recipe.<key>`: every key of ours is one of those."""
