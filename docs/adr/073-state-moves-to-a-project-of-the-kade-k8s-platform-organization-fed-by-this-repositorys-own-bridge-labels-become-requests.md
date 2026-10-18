@@ -1,6 +1,6 @@
 # ADR-073: State moves to a Project of the kade-k8s-platform organization, fed by this repository's own bridge; labels become requests
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-18
 - **Related:** ADR-002, ADR-003, ADR-030, ADR-059, ADR-074
 
