@@ -1,17 +1,57 @@
 [
   {
+    "name": "cmd:status-backlog",
+    "color": "C5DEF5",
+    "description": "Request: sets Status: Backlog in the Project, then is removed (ADR-073)"
+  },
+  {
+    "name": "cmd:status-next",
+    "color": "C5DEF5",
+    "description": "Request: sets Status: Next in the Project, then is removed (ADR-073)"
+  },
+  {
     "name": "cmd:status-now",
     "color": "C5DEF5",
-    "description": "In progress now (ADR-003)"
+    "description": "Request: sets Status: Now in the Project, then is removed (ADR-073)"
+  },
+  {
+    "name": "cmd:status-in-review",
+    "color": "C5DEF5",
+    "description": "Request: sets Status: In review in the Project, then is removed (ADR-073)"
+  },
+  {
+    "name": "cmd:status-done",
+    "color": "C5DEF5",
+    "description": "Request: sets Status: Done in the Project, then is removed (ADR-073)"
+  },
+  {
+    "name": "cmd:verify-verified",
+    "color": "0E8A16",
+    "description": "Request: sets Verification: Verified in the Project, then is removed (ADR-073)"
   },
   {
     "name": "cmd:verify-not-verified",
     "color": "FBCA04",
-    "description": "Done, but a check could not run; the issue names it (ADR-003)"
+    "description": "Request: sets Verification: NOT VERIFIED in the Project, then is removed (ADR-073)"
   },
   {
     "name": "cmd:verify-needs-linux",
     "color": "D93F0B",
-    "description": "Needs a Linux test cluster with cluster access (ADR-003, ADR-004)"
+    "description": "Request: sets Verification: Needs Linux test cluster in the Project, then is removed (ADR-073)"
+  },
+  {
+    "name": "cmd:priority-p1",
+    "color": "D4C5F9",
+    "description": "Request: sets Priority: P1 in the Project, then is removed (ADR-073)"
+  },
+  {
+    "name": "cmd:priority-p2",
+    "color": "D4C5F9",
+    "description": "Request: sets Priority: P2 in the Project, then is removed (ADR-073)"
+  },
+  {
+    "name": "cmd:priority-p3",
+    "color": "D4C5F9",
+    "description": "Request: sets Priority: P3 in the Project, then is removed (ADR-073)"
   }
 ]
