@@ -1,9 +1,9 @@
 # The image built from images/polaris-log-batch, tagged with a hash of the files that go into
 # it (install/release.py batch_image). charts/test_polaris_log_batch.py fails when this tag no
 # longer matches them: change it with the Dockerfile or the script. The repository is where the
-# release workflow pushes it (ADR-042); install/release.py sets the one from IMAGE_REGISTRY.
+# release workflow pushes it (ADR-042, ADR-074); install/release.py sets the one from IMAGE_REGISTRY.
 image:
-  repository: ghcr.io/enjay27/lakehouse/polaris-log-batch
+  repository: ghcr.io/kade-k8s-platform/lakehouse/polaris-log-batch
   tag: "de86f42f373e"
   pullPolicy: IfNotPresent
 
