@@ -269,7 +269,15 @@ Started on 2026-10-18 (Kade).
   installed after datahub-pg in step 1. The smoke gate's `check-datahub-kafka` round-trips a
   4.5 MiB message across a restart of the broker's pod. The recovery of Datahub's topics after
   the broker's volume is lost is proven with Datahub's chart (ADR-025).
-- A single-node OpenSearch in `NS_CATALOG_DATAHUB`, then Datahub itself (ADR-025).
+- Datahub's OpenSearch (ADR-070): `charts/datahub-opensearch`, upstream's opensearch chart
+  2.38.0 unchanged with our `values-lakehouse.yaml`, one node of
+  `opensearchproject/opensearch` 2.19.6 with its security plugin off, no root or privileged
+  container; plain HTTP on 9200 for pods labelled `lakehouse/datahub-opensearch-client`;
+  installed after datahub-kafka in step 1. The smoke gate's `check-datahub-opensearch`
+  writes a document over plain HTTP and finds it again after a restart of the node's pod.
+  Datahub's chart sets `ELASTICSEARCH_NUM_REPLICAS_PER_INDEX` to 0 when it enters; the
+  Linux test server's `vm.max_map_count` is read before the check is first proven there.
+- Datahub itself (ADR-025).
 - Datahub ingests Polaris's catalog with its own read-only principal.
 - Its own login through SSO, against a stand-in on the gate.
 - A runbook, proven on a Linux test cluster, moves Datahub's metadata from the target
