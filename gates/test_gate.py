@@ -78,13 +78,15 @@ class Pins(unittest.TestCase):
             f"/{version}-standalone-strict/networkpolicy-networking-v1.json"))
         self.assertTrue(pin["source"])
 
-    def test_the_statefulset_and_service_schemas_are_pinned_beside_the_network_policys(self):
-        # ADR-068 §1, ADR-016: kubeconform validates charts/datahub-kafka's StatefulSet and
-        # Service in the static gate, from the same commit and Kubernetes version.
+    def test_the_workload_schemas_are_pinned_beside_the_network_policys(self):
+        # ADR-068 §1, ADR-070 §1, ADR-016: kubeconform validates charts/datahub-kafka's and
+        # charts/datahub-opensearch's StatefulSet, Services and ConfigMap in the static gate,
+        # from the same commit and Kubernetes version.
         schemas = gate.load_pins(os.path.join(HERE, "pins.json"))["kubernetes_schemas"]
         commit_dir = schemas["networkpolicy"]["url"].rsplit("/", 1)[0]
         for name, file in (("statefulset", "statefulset-apps-v1.json"),
-                           ("service", "service-v1.json")):
+                           ("service", "service-v1.json"),
+                           ("configmap", "configmap-v1.json")):
             with self.subTest(schema=name):
                 pin = schemas[name]
                 self.assertEqual(pin["url"], f"{commit_dir}/{file}")
