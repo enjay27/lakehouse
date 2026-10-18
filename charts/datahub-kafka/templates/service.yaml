@@ -1,0 +1,19 @@
+# Headless: each broker has a stable name, <pod>.datahub-kafka.<namespace>.svc.cluster.local, which
+# it advertises to clients. Published before the broker is ready, so that name resolves while it
+# starts.
+apiVersion: v1
+kind: Service
+metadata:
+  name: datahub-kafka
+  labels:
+    {{- include "datahub-kafka.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "datahub-kafka.selector" . | nindent 4 }}
+  ports:
+    - name: kafka
+      port: 9092
+      targetPort: kafka
+      protocol: TCP

@@ -1,0 +1,33 @@
+# Tuning values, not measured (ADR-068 §2, Kade): a measurement that shows they matter changes
+# them here. The broker's settings Datahub needs (5 MiB messages, replication 1, no topic
+# auto-creation) are in the template, not values. values.schema.json refuses unknown keys, so a
+# misspelt value fails instead of being ignored (ADR-016). There is no replica count: one broker
+# (ADR-025).
+
+# apache/kafka, the JVM build, pinned by tag and digest (ADR-025). Docker Hub's index digest for
+# 4.3.1, read 2026-10-18; 4.3.1 was published 2026-06-23 and is still the newest release.
+image: apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837
+
+# The KRaft cluster ID the image formats the volume with on first start (ADR-068 §1): a UUID in
+# 22 characters of base64url. Not a secret and the same in every environment. Changing it on a
+# formatted volume stops the broker from starting.
+clusterId: GHIPhyPgQceDC6guEH7sYQ
+
+# The JVM's heap, both -Xms and -Xmx: <n>m or <n>g.
+heap: 1g
+
+# Hours a topic keeps its messages before they are deleted (log.retention.hours).
+retentionHours: 168
+
+storage:
+  size: 10Gi
+  # Empty: the cluster's default StorageClass.
+  storageClass: ""
+
+# The limit leaves room above the heap for the JVM's other memory and the page cache's share.
+resources:
+  requests:
+    cpu: 250m
+    memory: 1536Mi
+  limits:
+    memory: 2Gi

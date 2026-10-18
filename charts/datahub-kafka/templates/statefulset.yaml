@@ -1,0 +1,122 @@
+# One broker (ADR-025), broker and controller in one process (ADR-068 §1). Every setting is a
+# KAFKA_* variable: the image's setup (KafkaDockerWrapper) writes them to server.properties and
+# never uses its default file, then formats the volume with CLUSTER_ID on first start, keeping an
+# already formatted one. It formats only with static voters (ADR-069).
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: datahub-kafka
+  labels:
+    {{- include "datahub-kafka.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  serviceName: datahub-kafka
+  selector:
+    matchLabels:
+      {{- include "datahub-kafka.selector" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "datahub-kafka.labels" . | nindent 8 }}
+    spec:
+      # The image turns every KAFKA_* variable into a setting, and a Service named kafka in the
+      # namespace would inject KAFKA_PORT and others.
+      enableServiceLinks: false
+      # The image's user, appuser, is a name; Kubernetes checks runAsNonRoot only by number.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: kafka
+          image: {{ .Values.image | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: kafka
+              containerPort: 9092
+              protocol: TCP
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: CLUSTER_ID
+              value: {{ .Values.clusterId | quote }}
+            - name: KAFKA_HEAP_OPTS
+              value: {{ printf "-Xms%s -Xmx%s" .Values.heap .Values.heap | quote }}
+            # ADR-068 §1, amended by ADR-069: one process, its controller a static voter that
+            # listens on localhost only, so no network rule covers it.
+            - name: KAFKA_PROCESS_ROLES
+              value: "broker,controller"
+            - name: KAFKA_NODE_ID
+              value: "1"
+            - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+              value: "1@localhost:9093"
+            - name: KAFKA_CONTROLLER_LISTENER_NAMES
+              value: "CONTROLLER"
+            - name: KAFKA_LISTENERS
+              value: "PLAINTEXT://:9092,CONTROLLER://localhost:9093"
+            - name: KAFKA_ADVERTISED_LISTENERS
+              value: "PLAINTEXT://$(POD_NAME).datahub-kafka.$(POD_NAMESPACE).svc.cluster.local:9092"
+            # ADR-068 §3: plaintext, behind the network policy.
+            - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+              value: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+            - name: KAFKA_INTER_BROKER_LISTENER_NAME
+              value: "PLAINTEXT"
+            # ADR-068 §2: Datahub sends messages up to 5 MiB; the broker's default is about 1 MiB.
+            - name: KAFKA_MESSAGE_MAX_BYTES
+              value: "5242880"
+            - name: KAFKA_REPLICA_FETCH_MAX_BYTES
+              value: "5242880"
+            # One broker.
+            - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_DEFAULT_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR
+              value: "1"
+            - name: KAFKA_MIN_INSYNC_REPLICAS
+              value: "1"
+            # Datahub's system-update creates its topics; a missing one fails loudly.
+            - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
+              value: "false"
+            - name: KAFKA_LOG_RETENTION_HOURS
+              value: {{ .Values.retentionHours | toString | quote }}
+            # A folder below the mount, so the volume's lost+found is never read as a partition.
+            - name: KAFKA_LOG_DIRS
+              value: "/var/lib/kafka/data/logs"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/kafka/data
+          # Ready once the client port answers. No liveness probe: a busy broker would become a
+          # restart, with no standby to take over (ADR-068 §1, #179). A broker that exits
+          # restarts through the pod's restart policy.
+          readinessProbe:
+            tcpSocket:
+              port: kafka
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.storage.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.storage.size | quote }}

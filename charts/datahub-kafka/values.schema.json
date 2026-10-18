@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["image", "clusterId", "heap", "retentionHours", "storage", "resources"],
+  "properties": {
+    "image": {"type": "string", "pattern": "^[^@\\s]+:[^@\\s]+@sha256:[0-9a-f]{64}$"},
+    "clusterId": {"type": "string", "pattern": "^[A-Za-z0-9_-]{22}$"},
+    "heap": {"type": "string", "pattern": "^[1-9][0-9]*[mg]$"},
+    "retentionHours": {"type": "integer", "minimum": 1},
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["size"],
+      "properties": {
+        "size": {"type": "string", "minLength": 1},
+        "storageClass": {"type": "string"}
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requests", "limits"],
+      "properties": {
+        "requests": {"type": "object"},
+        "limits": {"type": "object"}
+      }
+    }
+  }
+}

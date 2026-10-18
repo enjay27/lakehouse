@@ -20,10 +20,8 @@ import yaml
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(ROOT, "gates"))
 import gate  # noqa: E402
-import kubeconform_schemas  # noqa: E402
 
 CHART = os.path.join(HERE, "datahub-kafka")
 NAME = "datahub-kafka"
@@ -46,10 +44,9 @@ def setUpModule():
                            "`python3 gates/gate.py tools BIN_DIR helm kubeconform` first")
     SCHEMAS = tempfile.TemporaryDirectory()
     pins = gate.load_pins()["kubernetes_schemas"]
-    for name, path in (("statefulset", os.path.join("apps", "statefulset_v1.json")),
-                       ("service", "service_v1.json")):
-        path = os.path.join(SCHEMAS.name, path)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+    for name in ("statefulset", "service"):
+        # Each file under its upstream name, statefulset-apps-v1.json and service-v1.json.
+        path = os.path.join(SCHEMAS.name, pins[name]["url"].rsplit("/", 1)[1])
         with open(path, "wb") as f:
             f.write(gate.fetch(pins[name]["url"], pins[name]["sha256"]))
 
@@ -90,9 +87,8 @@ def values_of(docs):
 
 
 def kubeconform(manifests_text):
-    # Core kinds have no group: kubeconform's {{ .Group }} is empty for them.
-    location = os.path.join(SCHEMAS.name, "{{ .Group }}",
-                            "{{ .ResourceKind }}_{{ .ResourceAPIVersion }}.json")
+    # kubeconform's own naming, which also covers core kinds: -apps-v1 or -v1.
+    location = os.path.join(SCHEMAS.name, "{{ .ResourceKind }}{{ .KindSuffix }}.json")
     return subprocess.run(["kubeconform", "-strict", "-summary", "-schema-location", location,
                            "-"], input=manifests_text, capture_output=True, text=True,
                           check=False)
