@@ -140,7 +140,7 @@
       }
     },
     {
-      "name": "Polaris never asked for vended credentials",
+      "name": "Polaris never asked for vended credentials, but for datahub_ingest's load check-datahub-ingestion makes refused on purpose (ADR-076)",
       "must": "not_exist",
       "match": {
         "proto": "http",
@@ -150,6 +150,9 @@
         },
         "request_headers.user-agent": {
           "regex": "^Apache-HttpClient/"
+        },
+        "request_body.json.input.actor.principal": {
+          "regex": "^(?!datahub_ingest$)"
         }
       }
     },
