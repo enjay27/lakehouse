@@ -189,14 +189,16 @@ class FakeCalls:
                  label=(0, ""), generations=((1, "NotFound"),), rollout=(0, ""),
                  backup_keys=("accessKeyId", "region", "secretAccessKey"),
                  pg=release.POLARIS_PG, db_secret=release.POLARIS_DB_SECRET,
-                 backup_secret=release.POLARIS_BACKUP_SECRET):
+                 backup_secret=release.POLARIS_BACKUP_SECRET, secret_keys=None):
         self.secret, self.helm, self.wait, self.calls = secret, helm, wait, []
         # `kubectl rollout status`, as Datahub's Kafka step waits for its StatefulSet.
         self.rollout = rollout
         # The Cluster and Secrets of the service whose step this answers: Polaris's by default.
         self.pg, self.db_secret, self.backup_secret = pg, db_secret, backup_secret
-        # The key names the Secrets read gives for polaris-backup-s3 (ADR-060).
+        # The key names the Secrets read gives for polaris-backup-s3 (ADR-060), and for any
+        # other Secret named in `secret_keys`; every other Secret has the keys init-env writes.
         self.backup_keys = backup_keys
+        self.secret_keys = dict(secret_keys or {})
         self.pods, self.label = pods, label
         # The Cluster's generation as each read gives it, before the helm upgrade and after
         # Ready; the last answer repeats. By default there is no Cluster.
@@ -217,8 +219,8 @@ class FakeCalls:
         if "secret" in argv:
             if not self.secret:
                 return (1, "NotFound")
-            return (0, f"{self.db_secret}: password username\n"
-                       f"{self.backup_secret}: {' '.join(self.backup_keys)}\n")
+            names = argv[argv.index("secret") + 1:argv.index("-o")]
+            return (0, "".join(f"{name}: {' '.join(self.keys_of(name))}\n" for name in names))
         if "wait" in argv:
             return self.wait
         if "rollout" in argv:
@@ -233,6 +235,14 @@ class FakeCalls:
             answer = self.clusters.pop(0) if len(self.clusters) > 1 else self.clusters[0]
             return (0, json.dumps(answer)) if isinstance(answer, dict) else answer
         raise AssertionError(f"unexpected call {argv}")
+
+    def keys_of(self, name):
+        if name == self.backup_secret:
+            return sorted(self.backup_keys)
+        if name in self.secret_keys:
+            return sorted(self.secret_keys[name])
+        (secret,) = [s for s in release.SECRETS if s.name == name]
+        return sorted({**secret.from_env, **secret.fixed})
 
 
 def cluster_status(phase="Cluster in healthy state", ready=3, instances=3):
@@ -584,9 +594,33 @@ class DatahubNetworkPolicies(unittest.TestCase):
                           release.DATAHUB_NETPOL_CHART])
         self.assertTrue(os.path.isfile(os.path.join(release.DATAHUB_NETPOL_CHART, "Chart.yaml")))
         self.assertNotIn("--dry-run=server", helm)
-        self.assertEqual(calls.values, [{"namespaces": {"operator": "cnpg-system"}}])
+        self.assertEqual(calls.values, [{"callers": {},
+                                         "namespaces": {"operator": "cnpg-system"}}])
+        self.assertEqual(notes, [
+            "Step 1: Datahub's network policies in catalog-datahub, installed; no namespace "
+            "label in INGRESS_NAMESPACE_LABEL, DATAHUB_EMITTER_NAMESPACE_LABEL, so those callers "
+            "are refused (ADR-048, ADR-066, ADR-071)."])
+
+    def test_the_ingress_and_emitters_labels_become_caller_classes(self):
+        calls = datahub_calls()
+        env = {**POLARIS_ENV, "INGRESS_NAMESPACE_LABEL": "team/role=ingress",
+               "DATAHUB_EMITTER_NAMESPACE_LABEL": "team/role=lineage"}
+        problems, notes = self.step(calls, env=env)
+        self.assertEqual(problems, [])
+        self.assertEqual(calls.values, [{
+            "callers": {"ingress": {"key": "team/role", "value": "ingress"},
+                        "emitter": {"key": "team/role", "value": "lineage"}},
+            "namespaces": {"operator": "cnpg-system"}}])
         self.assertEqual(notes, ["Step 1: Datahub's network policies in catalog-datahub, "
-                                 "installed (ADR-048, ADR-066)."])
+                                 "installed (ADR-048, ADR-066, ADR-071)."])
+
+    def test_an_emitters_label_that_is_not_key_value_stops_before_any_call(self):
+        calls = datahub_calls()
+        problems, _ = self.step(calls, env={**POLARIS_ENV,
+                                            "DATAHUB_EMITTER_NAMESPACE_LABEL": "lineage"})
+        self.assertEqual(problems, ["DATAHUB_EMITTER_NAMESPACE_LABEL must be one namespace "
+                                    "label, key=value (ADR-048)"])
+        self.assertEqual(calls.calls, [])
 
     def test_an_empty_namespace_stops_before_any_call(self):
         for var in ("NS_CATALOG_DATAHUB", "NS_CNPG_SYSTEM"):
@@ -780,6 +814,96 @@ class DatahubOpensearch(unittest.TestCase):
             "error: timed out waiting for the condition"])
 
 
+class Datahub(unittest.TestCase):
+    """ADR-071 §7: Datahub after datahub-opensearch in its part of step 1 (ADR-045)."""
+
+    SECRETS = ["datahub-auth-secrets", "datahub-encryption-secrets", "datahub-frontend-secret",
+               "datahub-root-user"]
+
+    def step(self, calls, env=POLARIS_ENV, dry_run=False):
+        return release.datahub(env, calls, dry_run=dry_run)
+
+    def test_the_chart_and_its_values_are_the_ones_the_chart_test_renders(self):
+        self.assertEqual(release.DATAHUB_RELEASE, "datahub")
+        self.assertEqual(release.DATAHUB_CHART, os.path.join(release.ROOT, "charts", "datahub"))
+        self.assertEqual(release.DATAHUB_VALUES,
+                         os.path.join(release.DATAHUB_CHART, "values-lakehouse.yaml"))
+        self.assertTrue(os.path.isfile(release.DATAHUB_VALUES))
+        self.assertEqual(list(release.DATAHUB_SECRETS), self.SECRETS)
+
+    def test_checks_the_secrets_key_names_then_installs_and_waits_on_helm(self):
+        calls = datahub_calls()
+        problems, notes = self.step(calls, env={**POLARIS_ENV,
+                                                "DATAHUB_EMITTER_NAMESPACE_LABEL": "a=b"})
+        self.assertEqual(problems, [])
+        get, helm = calls.calls
+        self.assertEqual(get, ["kubectl", "--context", "kind-lakehouse-gate", "-n",
+                               "catalog-datahub", "get", "secret", *self.SECRETS, "-o",
+                               release.SECRET_KEYS_TEMPLATE])
+        self.assertEqual(helm, [
+            "helm", "--kube-context", "kind-lakehouse-gate", "-n", "catalog-datahub", "upgrade",
+            "--install", release.DATAHUB_RELEASE, release.DATAHUB_CHART, "-f",
+            release.DATAHUB_VALUES, "--wait", f"--timeout={release.DATAHUB_TIMEOUT}"])
+        # Nothing from .env but the namespace: the credentials are in the Secrets.
+        self.assertEqual(calls.values, [])
+        self.assertEqual(notes, [
+            "Step 1: Datahub in catalog-datahub is installed: system-update's Jobs completed, "
+            "GMS and the frontend ready (ADR-071)."])
+
+    def test_an_empty_emitters_label_is_said_and_the_install_goes_on(self):
+        calls = datahub_calls()
+        problems, notes = self.step(calls)
+        self.assertEqual(problems, [])
+        self.assertEqual([c[0] for c in calls.calls], ["kubectl", "helm"])
+        self.assertEqual(notes, [
+            "Step 1: Datahub in catalog-datahub is installed: system-update's Jobs completed, "
+            "GMS and the frontend ready; DATAHUB_EMITTER_NAMESPACE_LABEL is empty, so no "
+            "lineage emitter's namespace may reach GMS (ADR-071)."])
+
+    def test_a_missing_secret_stops_before_helm(self):
+        calls = datahub_calls(secret=False)
+        problems, _ = self.step(calls)
+        self.assertEqual(problems, [
+            f"Secrets {', '.join(self.SECRETS)} must exist in catalog-datahub: run "
+            "scripts/init_env.py --apply-secrets first (ADR-006, ADR-071)"])
+        self.assertEqual([c[0] for c in calls.calls], ["kubectl"])
+
+    def test_a_secret_without_its_keys_stops_before_helm_naming_keys_only(self):
+        calls = datahub_calls(secret_keys={"datahub-auth-secrets": ["system_client_secret"],
+                                           "datahub-root-user": []})
+        problems, _ = self.step(calls)
+        self.assertEqual(problems, [
+            "Secret datahub-auth-secrets in catalog-datahub lacks token_service_salt, "
+            "token_service_signing_key: run scripts/init_env.py --apply-secrets with this "
+            "release first (ADR-071)",
+            "Secret datahub-root-user in catalog-datahub lacks user.props: run "
+            "scripts/init_env.py --apply-secrets with this release first (ADR-071)"])
+        self.assertEqual([c[0] for c in calls.calls], ["kubectl"])
+
+    def test_an_empty_namespace_stops_before_any_call(self):
+        calls = datahub_calls()
+        problems, _ = self.step(calls, env={**POLARIS_ENV, "NS_CATALOG_DATAHUB": ""})
+        self.assertIn("NS_CATALOG_DATAHUB", "\n".join(problems))
+        self.assertEqual(calls.calls, [])
+
+    def test_dry_run_is_server_side_and_waits_for_nothing(self):
+        calls = datahub_calls()
+        problems, notes = self.step(calls, dry_run=True)
+        self.assertEqual(problems, [])
+        _, helm = calls.calls
+        self.assertEqual(helm[-1], "--dry-run=server")
+        self.assertNotIn("--wait", helm)
+        self.assertIn("dry-run", "\n".join(notes))
+
+    def test_a_failed_or_timed_out_helm_stops_the_install(self):
+        calls = datahub_calls(helm=(1, "Error: failed pre-install: job datahub-system-update "
+                                       "failed: BackoffLimitExceeded"))
+        problems, _ = self.step(calls)
+        self.assertEqual(problems, [
+            "helm upgrade datahub in catalog-datahub failed: Error: failed pre-install: job "
+            "datahub-system-update failed: BackoffLimitExceeded"])
+
+
 class Settle(unittest.TestCase):
     """settle reads the Cluster it is given, polaris-pg unless told otherwise."""
 
@@ -855,7 +979,7 @@ class Steps(unittest.TestCase):
                                           dry_run=False)
         self.assertEqual(problems, [])
         self.assertEqual([n.split(":")[0] for n in notes],
-                         ["Step 0"] * 2 + ["Step 1"] * 10 + ["Step 2"] * 2)
+                         ["Step 0"] * 2 + ["Step 1"] * 11 + ["Step 2"] * 2)
         self.assertIn("Barman Cloud Plugin", notes[1])
         self.assertIn("network policies", notes[2])
         self.assertIn("polaris-pg", notes[3])
@@ -869,8 +993,10 @@ class Steps(unittest.TestCase):
         self.assertIn("datahub-pg", notes[9])
         self.assertIn("datahub-kafka", notes[10])
         self.assertIn("datahub-opensearch", notes[11])
-        self.assertIn("cronjob/polaris-log-batch", notes[12])
-        self.assertIn("console is not enabled", notes[13])
+        # ADR-071 §7: then Datahub itself.
+        self.assertIn("Datahub in catalog-datahub is installed", notes[12])
+        self.assertIn("cronjob/polaris-log-batch", notes[13])
+        self.assertIn("console is not enabled", notes[14])
         # ADR-045 §2: the policies first in step 1, before polaris-pg.
         helms = [c for c in pg.calls if c[0] == "helm"]
         self.assertEqual([h[h.index("--install") + 1] for h in helms],
@@ -878,7 +1004,8 @@ class Steps(unittest.TestCase):
         helms = [c for c in dh.calls if c[0] == "helm"]
         self.assertEqual([h[h.index("--install") + 1] for h in helms],
                          [release.DATAHUB_NETPOL_RELEASE, release.DATAHUB_PG_RELEASE,
-                          release.DATAHUB_KAFKA_RELEASE, release.DATAHUB_OPENSEARCH_RELEASE])
+                          release.DATAHUB_KAFKA_RELEASE, release.DATAHUB_OPENSEARCH_RELEASE,
+                          release.DATAHUB_RELEASE])
 
     def test_failed_network_policies_stop_before_polaris_pg(self):
         step0, pg = FakeKubectl(), FakeCalls(helm=(1, "values don't meet the schema"))
@@ -921,7 +1048,7 @@ class Steps(unittest.TestCase):
                                           ["1.30"], dry_run=False)
         self.assertIn("image tag invalid", "\n".join(problems))
         self.assertEqual(console.calls, [])
-        self.assertIn("datahub-opensearch", notes[-1])
+        self.assertIn("Datahub in catalog-datahub", notes[-1])
 
     def test_a_failed_datahub_pg_stops_the_install_before_the_log_batch(self):
         """ADR-045: every service of step 1 before step 2."""
