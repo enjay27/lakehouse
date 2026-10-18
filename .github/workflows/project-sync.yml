@@ -1,0 +1,56 @@
+# Adds this repository's issues to its Project ("Lakehouse", kade-k8s-platform) and applies
+# their command labels (cmd:status-now, cmd:verify-needs-linux, ...), then removes them:
+# labels are requests, the Project is the state (ADR-073 §3, §5). The token comes from the
+# organization's own bridge App; the bridge is scripts/project_bridge.py from this checkout.
+#
+# Needs vars.PROJECT_NUMBER, vars.BRIDGE_APP_CLIENT_ID and secrets.BRIDGE_APP_PRIVATE_KEY
+# (Kade's settings); skipped while PROJECT_NUMBER is empty. Logs are public (ADR-002): the
+# bridge never prints issue titles.
+name: Project sync
+
+on:
+  issues:
+    types: [opened, reopened, labeled]
+
+permissions: {}
+
+jobs:
+  sync:
+    name: sync issue to Project
+    if: vars.PROJECT_NUMBER != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write  # remove applied command labels; read the sender's permission
+    concurrency:
+      group: project-sync-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Get a Project token from the bridge App
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.BRIDGE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.BRIDGE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-organization-projects: write
+          permission-issues: read
+
+      - name: Sync
+        env:
+          PROJECT_TOKEN: ${{ steps.app-token.outputs.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          ORG: ${{ github.repository_owner }}
+          PROJECT_NUMBER: ${{ vars.PROJECT_NUMBER }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_NODE_ID: ${{ github.event.issue.node_id }}
+          EVENT_ACTION: ${{ github.event.action }}
+          EVENT_LABEL: ${{ github.event.label.name }}
+          ISSUE_LABELS: ${{ toJSON(github.event.issue.labels.*.name) }}
+          SENDER: ${{ github.event.sender.login }}
+        run: python3 scripts/project_bridge.py sync
