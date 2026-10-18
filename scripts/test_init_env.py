@@ -147,7 +147,8 @@ class Merge(unittest.TestCase):
                                  "POLARIS_TOKEN_SIGNING_KEY", "DATAHUB_DB_PASSWORD",
                                  "DATAHUB_SYSTEM_CLIENT_SECRET", "DATAHUB_TOKEN_SIGNING_KEY",
                                  "DATAHUB_TOKEN_SALT", "DATAHUB_ENCRYPTION_KEY",
-                                 "DATAHUB_FRONTEND_SECRET", "DATAHUB_ROOT_PASSWORD"])
+                                 "DATAHUB_FRONTEND_SECRET", "DATAHUB_ROOT_PASSWORD",
+                                 "DATAHUB_POLARIS_CLIENT_ID", "DATAHUB_POLARIS_CLIENT_SECRET"])
         self.assertEqual(env["NS_CATALOG_DATAHUB"], "catalog-datahub")
         self.assertEqual(env["POLARIS_ROOT_CLIENT_SECRET"], "kept")
         self.assertEqual(env["POLARIS_S3_SECRET_ACCESS_KEY"], "")
