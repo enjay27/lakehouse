@@ -846,6 +846,13 @@ class BatchImage(unittest.TestCase):
 
 
 class GateEnv(unittest.TestCase):
+    def test_datahub_ingests_the_gates_ingestion_catalog(self):
+        # ADR-076 §6: check-datahub-ingestion seeds it and runs the CronJob over it.
+        env = gate.init_env.parse(gate.gate_env(TEMPLATE + "DATAHUB_INGEST_POLARIS_CATALOGS=\n",
+                                                gen=lambda name: "x"))
+        self.assertEqual(env["DATAHUB_INGEST_POLARIS_CATALOGS"], "gate_ingest_catalog")
+        self.assertEqual(gate.INGEST_CATALOG, "gate_ingest_catalog")
+
     def test_the_gate_context_and_the_stand_in_credentials_are_set(self):
         env = gate.init_env.parse(gate.gate_env(TEMPLATE, gen=lambda name: f"gen-{name}"))
         self.assertEqual(env["KUBE_CONTEXT"], gate.CONTEXT)
@@ -3239,6 +3246,168 @@ class CheckDatahubRecovery(unittest.TestCase):
 
     def test_it_is_a_command_of_the_gate(self):
         self.assertIn("| check-datahub-recovery |", gate.__doc__.strip().splitlines()[-1])
+
+
+ROOT_ID, ROOT_SECRET = "rootid0123456789", "RootSecretValue0123456789abcdefg"
+INGEST_ID, INGEST_SECRET = "ingestid01234567", "IngestSecretValue0123456789abcde"
+INGEST_ENV = {"NS_CATALOG_DATAHUB": "catalog-datahub", "NS_CATALOG_POLARIS": "catalog-polaris",
+              "S3_ENDPOINT": "http://recorder.standins.svc.cluster.local:8333",
+              "S3_REGION": "us-east-1", "POLARIS_WAREHOUSE_BUCKET": "polaris-warehouse"}
+INGEST_LOG = ("catalog gate_ingest_catalog: ingesting\n"
+              "Pipeline finished successfully; produced 9 events in 21.3 seconds.\n"
+              "catalog gate_ingest_catalog: passed\n")
+
+
+def ingest_job(state=None):
+    conditions = {"succeeded": [{"type": "Complete", "status": "True"}],
+                  "failed": [{"type": "Failed", "status": "True"}]}.get(state, [])
+    return {"status": {"startTime": "2026-10-19T10:00:00Z",
+                       "completionTime": "2026-10-19T10:01:30Z", "conditions": conditions}}
+
+
+class CheckDatahubIngestion(unittest.TestCase):
+    """ADR-076 §6: seed, one ingestion run from the CronJob, what Datahub holds, what
+    datahub_ingest may not do, then clean-up."""
+
+    def fake_cluster(self, job_states=("succeeded",), pod_out=None, log=INGEST_LOG):
+        """gate.output answering the reads and the Job's creation, subprocess.run the pods and
+        the log; every call recorded."""
+        reads, pods = [], []
+        states = list(job_states)
+        secrets = {"polaris-root": {"data": {"clientId": b64(ROOT_ID),
+                                             "clientSecret": b64(ROOT_SECRET)}},
+                   "datahub-auth-secrets": {"data": {"system_client_secret":
+                                                     b64(DATAHUB_SECRET)}},
+                   "datahub-polaris-principal": {"data": {"clientId": b64(INGEST_ID),
+                                                          "clientSecret": b64(INGEST_SECRET)}}}
+        pod_out = dict(pod_out or {})
+
+        def fake_output(argv, stdin=None):
+            reads.append((argv, stdin))
+            if "secret" in argv:
+                return json.dumps(secrets[argv[argv.index("secret") + 1]])
+            if argv[5:7] == ["create", "job"]:
+                return "job.batch/created\n"
+            if argv[5:7] == ["get", "job"]:
+                state = states.pop(0) if len(states) > 1 else states[0]
+                return json.dumps(ingest_job(state))
+            raise AssertionError(f"unexpected {argv}")
+
+        def fake_run(argv, input=None, **kwargs):
+            if "logs" in argv:
+                pods.append((argv, input))
+                return subprocess.CompletedProcess(argv, 0, log, "")
+            pods.append((argv, input))
+            step = argv[argv.index("-c") + 2]
+            out = pod_out.get(step, f"ok   {step} done\n")
+            return subprocess.CompletedProcess(argv, 1 if "FAIL" in out else 0, out, "")
+        return reads, pods, fake_output, fake_run
+
+    def check(self, fake_output, fake_run, timeout=900):
+        pins = {"standin_images": {"recorder": {"image": PYTHON_IMAGE}}}
+        clock = [0.0]
+
+        def sleep(seconds):
+            clock[0] += seconds
+        with mock.patch.object(gate, "output", side_effect=fake_output), \
+                mock.patch.object(gate.subprocess, "run", side_effect=fake_run), \
+                mock.patch.object(gate, "INGESTION_TIMEOUT", timeout):
+            return gate.check_datahub_ingestion(INGEST_ENV, pins, sleep=sleep,
+                                                clock=lambda: clock[0])
+
+    def steps(self, pods):
+        return [argv[argv.index("-c") + 2] for argv, _ in pods if "logs" not in argv]
+
+    def test_seed_run_read_refuse_then_clean_in_order(self):
+        reads, pods, fake_output, fake_run = self.fake_cluster()
+        problems, notes = self.check(fake_output, fake_run)
+        self.assertEqual(problems, [])
+        self.assertEqual(self.steps(pods), ["seed", "ingested", "refused", "clean"])
+        (create,) = [argv for argv, _ in reads if argv[5:7] == ["create", "job"]]
+        self.assertEqual(create, [
+            "kubectl", "--context", gate.CONTEXT, "-n", "catalog-datahub", "create", "job",
+            "--from=cronjob/datahub-datahub-ingestion-cron-polaris",
+            f"check-ingest-{os.getpid()}"])
+        self.assertIn("catalog gate_ingest_catalog: passed", notes)
+        self.assertTrue(any("completed in 90 s" in n for n in notes), notes)
+
+    def test_each_pod_its_namespace_labels_arguments_and_credential(self):
+        _, pods, fake_output, fake_run = self.fake_cluster()
+        self.check(fake_output, fake_run)
+        by_step = {argv[argv.index("-c") + 2]: (argv, stdin) for argv, stdin in pods
+                   if "logs" not in argv}
+        polaris = "http://polaris.catalog-polaris.svc.cluster.local:8181"
+        gms = "http://datahub-datahub-gms.catalog-datahub.svc.cluster.local:8080"
+        seed, seed_in = by_step["seed"]
+        self.assertEqual(seed[seed.index("-c") + 2:], [
+            "seed", polaris, "POLARIS", "gate_ingest_catalog",
+            "http://recorder.standins.svc.cluster.local:8333", "us-east-1", "polaris-warehouse"])
+        self.assertEqual(seed_in, f"{ROOT_ID}:{ROOT_SECRET}\n")
+        for step in ("ingested", "clean"):
+            argv, stdin = by_step[step]
+            self.assertIn("--labels=lakehouse/datahub-gms-client=true", argv)
+            self.assertEqual(argv[argv.index("-c") + 2:], [step, gms, "gate_ingest_catalog"])
+            self.assertEqual(stdin, DATAHUB_SECRET + "\n")
+        refused, refused_in = by_step["refused"]
+        self.assertEqual(refused[refused.index("-c") + 2:],
+                         ["refused", polaris, "POLARIS", "gate_ingest_catalog"])
+        self.assertFalse([a for a in refused if a.startswith("--labels")])
+        flag = refused[refused.index("--overrides") + 1]
+        (container,) = json.loads(flag)["spec"]["containers"]
+        self.assertEqual(container["name"], refused[refused.index("run") + 1])
+        self.assertEqual({e["name"]: e["valueFrom"]["secretKeyRef"] for e in container["env"]}, {
+            "CLIENT_ID": {"name": "datahub-polaris-principal", "key": "clientId"},
+            "CLIENT_SECRET": {"name": "datahub-polaris-principal", "key": "clientSecret"}})
+        self.assertEqual(refused_in.strip(), "")
+        for argv, _ in by_step.values():
+            self.assertEqual(argv[argv.index("-n") + 1], "catalog-datahub")
+            self.assertNotIn(gate.CHECK_POD_LABEL, argv)
+            for value in (ROOT_ID, ROOT_SECRET, INGEST_SECRET, DATAHUB_SECRET):
+                self.assertNotIn(value, " ".join(argv))
+
+    def test_a_failed_seed_stops_before_the_run(self):
+        reads, pods, fake_output, fake_run = self.fake_cluster(
+            pod_out={"seed": "FAIL catalog gate_ingest_catalog created: HTTP 500\n"})
+        problems, _ = self.check(fake_output, fake_run)
+        self.assertEqual(problems, ["catalog gate_ingest_catalog created: HTTP 500"])
+        self.assertEqual(self.steps(pods), ["seed"])
+        self.assertFalse([a for a, _ in reads if a[5:7] == ["create", "job"]])
+
+    def test_a_failed_run_prints_its_log_skips_the_reads_and_still_cleans(self):
+        log = (f"catalog gate_ingest_catalog: ingesting\nerror 403 for {INGEST_ID}\n"
+               "catalog gate_ingest_catalog: failed\n")
+        _, pods, fake_output, fake_run = self.fake_cluster(job_states=(None, "failed"), log=log)
+        problems, _ = self.check(fake_output, fake_run)
+        (problem,) = problems
+        self.assertIn("Job check-ingest-", problem)
+        self.assertIn("failed", problem)
+        self.assertIn("error 403 for <redacted>", problem)
+        self.assertNotIn(INGEST_ID, problem)
+        self.assertEqual(self.steps(pods), ["seed", "refused", "clean"])
+
+    def test_a_run_past_the_time_limit_fails_and_still_cleans(self):
+        _, pods, fake_output, fake_run = self.fake_cluster(job_states=(None,))
+        problems, _ = self.check(fake_output, fake_run, timeout=30)
+        self.assertTrue(any("not finished within 30 s" in p for p in problems), problems)
+        self.assertEqual(self.steps(pods)[-1], "clean")
+
+    def test_a_failed_read_or_refusal_is_a_problem_and_clean_still_runs(self):
+        _, pods, fake_output, fake_run = self.fake_cluster(pod_out={
+            "ingested": "FAIL urn:x ingested with its fields a: HTTP 404\n",
+            "refused": "FAIL datahub_ingest creating a namespace refused: HTTP 200\n"})
+        problems, _ = self.check(fake_output, fake_run)
+        self.assertEqual(problems, ["urn:x ingested with its fields a: HTTP 404",
+                                    "datahub_ingest creating a namespace refused: HTTP 200"])
+        self.assertEqual(self.steps(pods)[-1], "clean")
+
+    def test_it_is_a_command_of_the_gate(self):
+        self.assertIn("| check-datahub-ingestion |", gate.__doc__.strip().splitlines()[-1])
+        with mock.patch.object(gate, "check_datahub_ingestion",
+                               return_value=([], ["ok"])) as called, \
+                mock.patch.object(gate.release, "load_env", return_value=INGEST_ENV), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(gate.main(["gate.py", "check-datahub-ingestion"]), 0)
+        called.assert_called_once()
 
 
 if __name__ == "__main__":
