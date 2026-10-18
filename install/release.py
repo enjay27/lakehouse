@@ -94,6 +94,7 @@ DATAHUB_NETPOL_CHART = os.path.join(ROOT, "charts", DATAHUB_NETPOL_RELEASE)
 DATAHUB_PG_CLIENT_LABEL = "lakehouse/datahub-pg-client"
 DATAHUB_KAFKA_CLIENT_LABEL = "lakehouse/datahub-kafka-client"
 DATAHUB_OPENSEARCH_CLIENT_LABEL = "lakehouse/datahub-opensearch-client"
+DATAHUB_GMS_CLIENT_LABEL = "lakehouse/datahub-gms-client"
 # Polaris's pods, by the labels upstream's chart sets with release name POLARIS.
 POLARIS_POD_SELECTOR = "app.kubernetes.io/name=polaris,app.kubernetes.io/instance=polaris"
 # One namespace label per caller class in other teams' namespaces (ADR-048 §2).

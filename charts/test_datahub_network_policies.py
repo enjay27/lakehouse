@@ -201,7 +201,9 @@ class Rendered(unittest.TestCase):
                                                             EMITTER["value"]}}}]}])
 
     def test_without_the_emitters_label_gms_admits_its_clients_only(self):
-        policies = by_name(render("callers.emitter=null"))
+        policies = by_name(render("namespaces.operator=cnpg-system",
+                                  f"callers.ingress.key={INGRESS['key']}",
+                                  f"callers.ingress.value={INGRESS['value']}", lint=False))
         self.assertEqual(policies["datahub-gms"]["spec"]["ingress"], [{
             "ports": [{"protocol": "TCP", "port": 8080}],
             "from": [{"podSelector": {"matchLabels": {
@@ -216,7 +218,11 @@ class Rendered(unittest.TestCase):
                                                             INGRESS["value"]}}}]}])
 
     def test_without_the_ingress_label_the_frontend_has_no_rule(self):
-        self.assertNotIn("datahub-frontend", by_name(render("callers.ingress=null")))
+        policies = by_name(render("namespaces.operator=cnpg-system",
+                                  f"callers.emitter.key={EMITTER['key']}",
+                                  f"callers.emitter.value={EMITTER['value']}", lint=False))
+        self.assertNotIn("datahub-frontend", policies)
+        self.assertIn("datahub-gms", policies)
 
     def test_the_gms_client_label_is_its_own(self):
         self.assertEqual(release.DATAHUB_GMS_CLIENT_LABEL, "lakehouse/datahub-gms-client")

@@ -1,0 +1,29 @@
+# GMS's API, 8080: Datahub's own pods, each labelled as GMS's client by charts/datahub's
+# global.podLabels, and the lineage emitters' namespaces, a caller class (ADR-048 §2, ADR-071 §5).
+# Without the emitters' label no namespace of that class may connect. Its metrics ports, 4318 and
+# 4319, get no rule until Datahub's scrape contract. The pods are selected by the labels
+# upstream's chart gives GMS with release datahub.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: datahub-gms
+  labels:
+    {{- include "datahub-network-policies.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: datahub-gms
+      app.kubernetes.io/instance: datahub
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 8080
+      from:
+        - podSelector:
+            matchLabels:
+              lakehouse/datahub-gms-client: "true"
+        {{- with .Values.callers.emitter }}
+        {{- include "datahub-network-policies.namespace" . | nindent 8 }}
+        {{- end }}
