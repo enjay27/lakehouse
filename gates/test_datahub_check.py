@@ -79,7 +79,8 @@ class FakeFrontend:
         accepted = body["username"] == "datahub" and (body["password"] == self.password
                                                       or self.broken == "image-password")
         if not accepted:
-            return 401, {}, b"Invalid Credentials"
+            # datahub-frontend's AuthenticationController.logIn at v1.7.0: a bad request.
+            return 400, {}, json.dumps({"message": "Invalid Credentials"}).encode()
         cookies = {} if self.broken == "no-cookie" else {"set-cookie": "PLAY_SESSION=x"}
         return 200, cookies, b"{}"
 
@@ -179,6 +180,16 @@ class Login(unittest.TestCase):
 
     def test_the_images_password_still_accepted_fails(self):
         code, out = run_login(FakeFrontend(broken="image-password"))
+        self.assertEqual(code, 1)
+        self.assertIn("FAIL", out)
+
+    def test_another_bad_request_is_not_a_refused_password(self):
+        class Broken(FakeFrontend):
+            def __call__(self, method, url, headers, body=None):
+                if body["password"] == "datahub":
+                    return 400, {}, json.dumps({"message": "User name must not be empty."}).encode()
+                return super().__call__(method, url, headers, body)
+        code, out = run_login(Broken())
         self.assertEqual(code, 1)
         self.assertIn("FAIL", out)
 
