@@ -3,6 +3,7 @@
 import base64
 import json
 import os
+import re
 import sys
 import unittest
 
@@ -398,6 +399,33 @@ class Cases(unittest.TestCase):
             with self.subTest(action=action):
                 self.assertIn(f'"{action}"', block)
         self.assertIn(f'in_catalog(target, "{seed.CATALOG}")', block)
+
+    def test_the_ingestion_principal_may_read_in_any_catalog_and_nothing_else(self):
+        # ADR-076 §4: the four actions Datahub's Iceberg source causes, in any catalog, with a
+        # target; no write, no delegation, no view, no catalog list, no management call.
+        cases = [c for c in standins.load_cases(os.path.join(HERE, "opa", "cases.json"))
+                 if c["input"]["actor"]["principal"] == "datahub_ingest"]
+        allowed = [c for c in cases if c["allow"]]
+        self.assertEqual({c["input"]["action"] for c in allowed}, set(standins.INGEST_ACTIONS))
+        catalogs = {p["name"] for c in allowed for t in c["input"]["resource"]["targets"]
+                    for p in [t] + t["parents"] if p["type"] == "CATALOG"}
+        self.assertGreater(len(catalogs), 1, "allowed in more than one catalog")
+        refused = {c["input"]["action"] for c in cases if not c["allow"]}
+        self.assertLessEqual({"CREATE_NAMESPACE", "LOAD_TABLE_WITH_WRITE_DELEGATION",
+                              "LOAD_TABLE_WITH_READ_DELEGATION", "LIST_VIEWS", "LIST_CATALOGS",
+                              "CREATE_PRINCIPAL", "LOAD_TABLE"}, refused)
+        self.assertTrue(any(not c["input"]["resource"].get("targets") and not c["allow"]
+                            for c in cases), "an action it may do, with no target, refused")
+
+    def test_the_policy_names_every_ingestion_action_and_no_other(self):
+        with open(os.path.join(HERE, "opa", "policy.rego"), encoding="utf-8") as f:
+            rego = f.read()
+        block = rego[rego.index('input.actor.principal == "datahub_ingest"'):]
+        block = block[:block.index("}\n}")]
+        named = set(re.findall(r'"([A-Z_]+)"', block))
+        self.assertEqual(named, set(standins.INGEST_ACTIONS))
+        self.assertIn("count(input.resource.targets) > 0", block)
+        self.assertIn("in_a_catalog(target)", block)
 
 
 if __name__ == "__main__":

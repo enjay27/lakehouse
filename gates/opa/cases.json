@@ -1453,6 +1453,445 @@
           "request_id": "00000000-0000-0000-0000-000000000000"
         }
       }
+    },
+    {
+      "name": "datahub_ingest lists the namespaces of a catalog",
+      "allow": true,
+      "input": {
+        "actor": {
+          "principal": "datahub_ingest",
+          "roles": []
+        },
+        "action": "LIST_NAMESPACES",
+        "resource": {
+          "targets": [
+            {
+              "type": "CATALOG",
+              "name": "gate_ingest_catalog",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "datahub_ingest loads a namespace's properties",
+      "allow": true,
+      "input": {
+        "actor": {
+          "principal": "datahub_ingest",
+          "roles": []
+        },
+        "action": "LOAD_NAMESPACE_METADATA",
+        "resource": {
+          "targets": [
+            {
+              "type": "NAMESPACE",
+              "name": "ingest",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                },
+                {
+                  "type": "CATALOG",
+                  "name": "gate_ingest_catalog",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "datahub_ingest lists the tables of a namespace",
+      "allow": true,
+      "input": {
+        "actor": {
+          "principal": "datahub_ingest",
+          "roles": []
+        },
+        "action": "LIST_TABLES",
+        "resource": {
+          "targets": [
+            {
+              "type": "NAMESPACE",
+              "name": "ingest",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                },
+                {
+                  "type": "CATALOG",
+                  "name": "gate_ingest_catalog",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "datahub_ingest loads a table in another catalog",
+      "allow": true,
+      "input": {
+        "actor": {
+          "principal": "datahub_ingest",
+          "roles": []
+        },
+        "action": "LOAD_TABLE",
+        "resource": {
+          "targets": [
+            {
+              "type": "TABLE_LIKE",
+              "name": "orders",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                },
+                {
+                  "type": "CATALOG",
+                  "name": "gate_catalog",
+                  "parents": []
+                },
+                {
+                  "type": "NAMESPACE",
+                  "name": "ingest",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "datahub_ingest creates a namespace",
+      "allow": false,
+      "input": {
+        "actor": {
+          "principal": "datahub_ingest",
+          "roles": []
+        },
+        "action": "CREATE_NAMESPACE",
+        "resource": {
+          "targets": [
+            {
+              "type": "CATALOG",
+              "name": "gate_ingest_catalog",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "datahub_ingest loads a table asking for write delegation",
+      "allow": false,
+      "input": {
+        "actor": {
+          "principal": "datahub_ingest",
+          "roles": []
+        },
+        "action": "LOAD_TABLE_WITH_WRITE_DELEGATION",
+        "resource": {
+          "targets": [
+            {
+              "type": "TABLE_LIKE",
+              "name": "orders",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                },
+                {
+                  "type": "CATALOG",
+                  "name": "gate_ingest_catalog",
+                  "parents": []
+                },
+                {
+                  "type": "NAMESPACE",
+                  "name": "ingest",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "datahub_ingest loads a table asking for read delegation",
+      "allow": false,
+      "input": {
+        "actor": {
+          "principal": "datahub_ingest",
+          "roles": []
+        },
+        "action": "LOAD_TABLE_WITH_READ_DELEGATION",
+        "resource": {
+          "targets": [
+            {
+              "type": "TABLE_LIKE",
+              "name": "orders",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                },
+                {
+                  "type": "CATALOG",
+                  "name": "gate_ingest_catalog",
+                  "parents": []
+                },
+                {
+                  "type": "NAMESPACE",
+                  "name": "ingest",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "datahub_ingest appends to a table",
+      "allow": false,
+      "input": {
+        "actor": {
+          "principal": "datahub_ingest",
+          "roles": []
+        },
+        "action": "ADD_TABLE_SNAPSHOT",
+        "resource": {
+          "targets": [
+            {
+              "type": "TABLE_LIKE",
+              "name": "orders",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                },
+                {
+                  "type": "CATALOG",
+                  "name": "gate_ingest_catalog",
+                  "parents": []
+                },
+                {
+                  "type": "NAMESPACE",
+                  "name": "ingest",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "datahub_ingest drops a table",
+      "allow": false,
+      "input": {
+        "actor": {
+          "principal": "datahub_ingest",
+          "roles": []
+        },
+        "action": "DROP_TABLE_WITHOUT_PURGE",
+        "resource": {
+          "targets": [
+            {
+              "type": "TABLE_LIKE",
+              "name": "orders",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                },
+                {
+                  "type": "CATALOG",
+                  "name": "gate_ingest_catalog",
+                  "parents": []
+                },
+                {
+                  "type": "NAMESPACE",
+                  "name": "ingest",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "datahub_ingest lists the views of a namespace",
+      "allow": false,
+      "input": {
+        "actor": {
+          "principal": "datahub_ingest",
+          "roles": []
+        },
+        "action": "LIST_VIEWS",
+        "resource": {
+          "targets": [
+            {
+              "type": "NAMESPACE",
+              "name": "ingest",
+              "parents": [
+                {
+                  "type": "ROOT",
+                  "name": "root_container",
+                  "parents": []
+                },
+                {
+                  "type": "CATALOG",
+                  "name": "gate_ingest_catalog",
+                  "parents": []
+                }
+              ]
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "datahub_ingest lists the catalogs",
+      "allow": false,
+      "input": {
+        "actor": {
+          "principal": "datahub_ingest",
+          "roles": []
+        },
+        "action": "LIST_CATALOGS",
+        "resource": {
+          "targets": [
+            {
+              "type": "ROOT",
+              "name": "root_container",
+              "parents": []
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "datahub_ingest creates a principal",
+      "allow": false,
+      "input": {
+        "actor": {
+          "principal": "datahub_ingest",
+          "roles": []
+        },
+        "action": "CREATE_PRINCIPAL",
+        "resource": {
+          "targets": [
+            {
+              "type": "ROOT",
+              "name": "root_container",
+              "parents": []
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "datahub_ingest loads a table outside any catalog",
+      "allow": false,
+      "input": {
+        "actor": {
+          "principal": "datahub_ingest",
+          "roles": []
+        },
+        "action": "LOAD_TABLE",
+        "resource": {
+          "targets": [
+            {
+              "type": "ROOT",
+              "name": "root_container",
+              "parents": []
+            }
+          ]
+        },
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
+    },
+    {
+      "name": "datahub_ingest loads a table with no target",
+      "allow": false,
+      "input": {
+        "actor": {
+          "principal": "datahub_ingest",
+          "roles": []
+        },
+        "action": "LOAD_TABLE",
+        "resource": {},
+        "context": {
+          "request_id": "00000000-0000-0000-0000-000000000000"
+        }
+      }
     }
   ]
 }
