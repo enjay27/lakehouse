@@ -1,6 +1,6 @@
 # ADR-072: Datahub's chart gets one patched line so GMS runs by digest, and three of ADR-071's details follow the chart as it is
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-18
 - **Related:** ADR-006, ADR-009, ADR-016, ADR-048, ADR-071
 
