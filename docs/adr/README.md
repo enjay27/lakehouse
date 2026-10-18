@@ -119,7 +119,7 @@ flowchart LR
 | [068](068-datahubs-kafka-is-one-plaintext-kraft-broker-in-a-chart-of-its-own-reached-only-by-datahubs-labelled-pods.md) | Datahub's Kafka is one plaintext KRaft broker in a chart of its own, reached only by Datahub's labelled pods | Amended by ADR-069 |
 | [069](069-datahubs-kafka-names-its-controller-as-a-static-voter-as-the-apache-kafka-image-requires.md) | Datahub's Kafka names its controller as a static voter, as the apache/kafka image requires | Accepted |
 | [070](070-datahubs-opensearch-is-one-node-from-upstreams-chart-unchanged-with-its-security-plugin-off-reached-only-by-datahubs-labelled-pods.md) | Datahub's OpenSearch is one node from upstream's chart, unchanged, with its security plugin off, reached only by Datahub's labelled pods | Accepted |
-| [071](071-datahub-runs-from-upstreams-chart-unchanged-gms-with-its-consumers-the-frontend-and-system-update-on-its-three-stores-with-credentials-from-init-env.md) | Datahub runs from upstream's chart, unchanged: GMS with its consumers, the frontend and system-update on its three stores, with credentials from init-env | Proposed |
+| [071](071-datahub-runs-from-upstreams-chart-unchanged-gms-with-its-consumers-the-frontend-and-system-update-on-its-three-stores-with-credentials-from-init-env.md) | Datahub runs from upstream's chart, unchanged: GMS with its consumers, the frontend and system-update on its three stores, with credentials from init-env | Accepted |
 
 ## Not ADRs
 
