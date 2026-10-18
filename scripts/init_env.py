@@ -38,13 +38,19 @@ SECRET_ALPHABET = string.ascii_letters + string.digits
 IDENTITY_ALPHABET = string.ascii_lowercase + string.digits
 ADDED_COMMENT = "# Added from .env.template by scripts/init_env.py"
 
-# Credentials this repository creates, so init-env generates them (ADR-006, ADR-026).
+# Credentials this repository creates, so init-env generates them (ADR-006, ADR-026,
+# ADR-071 §6). A value already in .env is kept: DATAHUB_ENCRYPTION_KEY above all, since GMS
+# encrypts the secrets users store with it.
 GENERATED = {"POLARIS_DB_PASSWORD", "POLARIS_ROOT_CLIENT_ID", "POLARIS_ROOT_CLIENT_SECRET",
-             "POLARIS_TOKEN_SIGNING_KEY", "DATAHUB_DB_PASSWORD"}
+             "POLARIS_TOKEN_SIGNING_KEY", "DATAHUB_DB_PASSWORD", "DATAHUB_SYSTEM_CLIENT_SECRET",
+             "DATAHUB_TOKEN_SIGNING_KEY", "DATAHUB_TOKEN_SALT", "DATAHUB_ENCRYPTION_KEY",
+             "DATAHUB_FRONTEND_SECRET", "DATAHUB_ROOT_PASSWORD"}
 
 # A Secret: its name, the .env variable naming its namespace (ADR-007), its type, the keys
-# filled from .env variables, and keys with fixed values.
-Secret = namedtuple("Secret", "name namespace_var type from_env fixed")
+# filled from .env variables, keys with fixed values, and the format a key's value is written
+# in, `{}` standing for the variable's value (the key's value as it is when not named).
+Secret = namedtuple("Secret", "name namespace_var type from_env fixed formats",
+                    defaults=(None,))
 SECRETS = [
     Secret("polaris-db", "NS_CATALOG_POLARIS", "kubernetes.io/basic-auth",
            {"password": "POLARIS_DB_PASSWORD"}, {"username": "polaris"}),
@@ -75,6 +81,19 @@ SECRETS = [
            {"accessKeyId": "DATAHUB_BACKUP_S3_ACCESS_KEY_ID",
             "secretAccessKey": "DATAHUB_BACKUP_S3_SECRET_ACCESS_KEY",
             "region": "S3_REGION"}, {}),
+    # Datahub's own credentials, under the names and keys upstream's chart reads, its own Secrets
+    # turned off (ADR-071 §6). The root user's password is the frontend's user.props line for
+    # the user datahub, mounted over the image's datahub:datahub.
+    Secret("datahub-auth-secrets", "NS_CATALOG_DATAHUB", "Opaque",
+           {"system_client_secret": "DATAHUB_SYSTEM_CLIENT_SECRET",
+            "token_service_signing_key": "DATAHUB_TOKEN_SIGNING_KEY",
+            "token_service_salt": "DATAHUB_TOKEN_SALT"}, {}),
+    Secret("datahub-encryption-secrets", "NS_CATALOG_DATAHUB", "Opaque",
+           {"encryption_key_secret": "DATAHUB_ENCRYPTION_KEY"}, {}),
+    Secret("datahub-frontend-secret", "NS_CATALOG_DATAHUB", "Opaque",
+           {"secret": "DATAHUB_FRONTEND_SECRET"}, {}),
+    Secret("datahub-root-user", "NS_CATALOG_DATAHUB", "Opaque",
+           {"user.props": "DATAHUB_ROOT_PASSWORD"}, {}, {"user.props": "datahub:{}"}),
 ]
 
 
@@ -166,7 +185,9 @@ def manifests(env):
     out = []
     for s in SECRETS:
         ns = env[s.namespace_var]
-        data = {key: b64(env[var]) for key, var in s.from_env.items()}
+        formats = s.formats or {}
+        data = {key: b64(formats.get(key, "{}").format(env[var]))
+                for key, var in s.from_env.items()}
         data.update({key: b64(value) for key, value in s.fixed.items()})
         out.append((ns, {
             "apiVersion": "v1",
