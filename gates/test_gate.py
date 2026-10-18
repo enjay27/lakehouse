@@ -2274,7 +2274,7 @@ class CheckDatahubKafka(unittest.TestCase):
         self.assertEqual(log, ["topics --bootstrap-server b:9092 --delete --topic gate-check-1"])
 
     def test_the_broker_is_back_when_a_new_pod_is_ready(self):
-        back = gate.broker_back({"old"})
+        back = gate.new_ready_pod({"old"})
         self.assertIsNone(back(kafka_pods()))
         self.assertIsNone(back(kafka_pods(("old", True))))
         self.assertIsNone(back(kafka_pods(("new", False))))

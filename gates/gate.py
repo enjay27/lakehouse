@@ -1482,8 +1482,8 @@ def kafka_lines(text):
     return found
 
 
-def broker_back(old_uids):
-    """For wait_for: the name of a ready pod of datahub-kafka that is none of `old_uids`."""
+def new_ready_pod(old_uids):
+    """For wait_for over a pod list: the name of a ready pod that is none of `old_uids`."""
     def done(pods):
         for pod in pods["items"]:
             ready = any(c["type"] == "Ready" and c["status"] == "True"
@@ -1515,7 +1515,7 @@ def check_datahub_kafka(env):
         pods = kubectl + ["get", "pods", "-l", KAFKA_POD_LABELS, "-o", "json"]
         old = {p["metadata"]["uid"] for p in json.loads(output(pods))["items"]}
         output(kubectl + ["delete", f"pod/{broker}", "--wait=true"])
-        back = wait_for(pods, broker_back(old), f"{broker} back ready",
+        back = wait_for(pods, new_ready_pod(old), f"{broker} back ready",
                         timeout=KAFKA_RESTART_TIMEOUT)
         received = kafka_lines(output(kafka_exec(ns, pod, "read", topic),
                                       KAFKA_CHECK)).get("received")
