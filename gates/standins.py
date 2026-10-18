@@ -59,6 +59,9 @@ STRESS_ACTIONS = ("LIST_NAMESPACES", "CREATE_NAMESPACE", "LIST_TABLES", "CREATE_
 # table made, appended to twice, given a column, and a view. Root writes everything else.
 SEED_ACTIONS = ("CREATE_TABLE_DIRECT", "LOAD_TABLE", "ADD_TABLE_SNAPSHOT", "SET_TABLE_SNAPSHOT_REF",
                 "ADD_TABLE_SCHEMA", "SET_TABLE_CURRENT_SCHEMA", "CREATE_VIEW")
+# What gates/opa/policy.rego lets datahub_ingest do, in any catalog (ADR-076 §4): the actions
+# Datahub v1.7.0.1's Iceberg source causes in Polaris 1.6.0, without delegation.
+INGEST_ACTIONS = ("LIST_NAMESPACES", "LOAD_NAMESPACE_METADATA", "LIST_TABLES", "LOAD_TABLE")
 # The stand-ins a stress install points Polaris at directly, with their ports.
 DIRECT = (("seaweedfs", S3_PORT), ("opa", OPA_PORT))
 
