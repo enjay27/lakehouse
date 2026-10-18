@@ -1,6 +1,6 @@
 # ADR-068: Datahub's Kafka is one plaintext KRaft broker in a chart of its own, reached only by Datahub's labelled pods
 
-- **Status:** Accepted
+- **Status:** Amended by ADR-069
 - **Date:** 2026-10-18
 - **Related:** ADR-016, ADR-025, ADR-039, ADR-043, ADR-045, ADR-048, ADR-050, ADR-059, ADR-066
 

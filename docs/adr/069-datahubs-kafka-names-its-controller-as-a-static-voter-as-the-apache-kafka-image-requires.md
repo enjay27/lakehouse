@@ -1,6 +1,6 @@
 # ADR-069: Datahub's Kafka names its controller as a static voter, as the apache/kafka image requires
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-18
 - **Related:** ADR-025, ADR-068
 
