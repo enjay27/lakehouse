@@ -19,7 +19,7 @@ The credential comes on stdin, one line, never on the command line: the system c
    whatever failed after.
 
 `login`, from a pod in the ingress controller's namespace: the frontend signs in `datahub` with
-the password, and refuses the image's own `datahub:datahub`.
+the password, and refuses the image's own `datahub:datahub` as invalid credentials.
 
 Prints one line per check, `ok` or `FAIL`, with the credential masked; exits 1 when any check
 failed, 2 on wrong arguments.
@@ -36,6 +36,7 @@ SYSTEM_CLIENT = "__datahub_system"
 ROOT_USER = "datahub"
 # The image's own user.props line, which datahub-root-user replaces (ADR-071 §6).
 IMAGE_PASSWORD = "datahub"
+INVALID_CREDENTIALS = "Invalid Credentials"
 PLATFORM = "urn:li:dataPlatform:hive"
 RESTLI = {"X-RestLi-Protocol-Version": "2.0.0"}
 POLL_SECONDS = 3
@@ -143,10 +144,14 @@ def check_login(http, report, frontend, password):
         report.check(False, f"{ROOT_USER}:{IMAGE_PASSWORD} refused",
                      "datahub-root-user holds the image's own password")
         return
-    status, _, _ = http("POST", f"{frontend}/logIn", {},
-                        {"username": ROOT_USER, "password": IMAGE_PASSWORD})
-    report.check(status == 401, f"the frontend refuses the image's {ROOT_USER}:{IMAGE_PASSWORD}",
-                 f"HTTP {status}")
+    status, _, raw = http("POST", f"{frontend}/logIn", {},
+                          {"username": ROOT_USER, "password": IMAGE_PASSWORD})
+    # datahub-frontend's AuthenticationController.logIn answers a failed login with a bad
+    # request, its message "Invalid Credentials" (v1.7.0).
+    message = _json(raw).get("message")
+    report.check(status == 400 and message == INVALID_CREDENTIALS,
+                 f"the frontend refuses the image's {ROOT_USER}:{IMAGE_PASSWORD}",
+                 f"HTTP {status}, {message}")
 
 
 def run(argv, secret, http=urllib_http, out=sys.stdout, sleep=time.sleep, clock=time.monotonic):
