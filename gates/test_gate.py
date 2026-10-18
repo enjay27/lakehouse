@@ -2470,8 +2470,9 @@ class CheckDatahubOpensearch(unittest.TestCase):
             with self.subTest(answer=answer):
                 self.assertFalse(gate.opensearch_found(lines(answer), "gate-check-1"))
 
-    def fake_cluster(self, reads=(opensearch_answer(),) * 2):
-        """gate.output answering each call of check_datahub_opensearch; records them in order."""
+    def fake_cluster(self, reads=({},) * 2):
+        """gate.output answering each call of check_datahub_opensearch, each read as `reads`
+        say (opensearch_answer's arguments) for the index it names; records them in order."""
         calls, reads = [], list(reads)
 
         def fake_output(argv, stdin=None):
@@ -2484,7 +2485,7 @@ class CheckDatahubOpensearch(unittest.TestCase):
                 if step == "write":
                     return f"health {json.dumps({'status': 'green'})}\n"
                 if step == "read":
-                    return reads.pop(0)
+                    return opensearch_answer(index=argv[-1], **reads.pop(0))
                 return "deleted\n"
             if "get" in argv:
                 return json.dumps(opensearch_pods(("old", True)))
@@ -2526,7 +2527,7 @@ class CheckDatahubOpensearch(unittest.TestCase):
         self.assertIn("deleted", notes[2])
 
     def test_a_document_not_found_is_a_problem_and_nothing_restarts(self):
-        calls, fake_output = self.fake_cluster(reads=(opensearch_answer(hits=0),))
+        calls, fake_output = self.fake_cluster(reads=({"hits": 0},))
         problems, _, _, wait_for, cleanup = self.check(fake_output)
         self.assertEqual(len(problems), 1)
         self.assertIn("gate-check-", problems[0])
@@ -2535,8 +2536,7 @@ class CheckDatahubOpensearch(unittest.TestCase):
         self.assertTrue(cleanup.called)
 
     def test_a_document_lost_with_the_restart_is_a_problem(self):
-        _, fake_output = self.fake_cluster(reads=(opensearch_answer(),
-                                                  opensearch_answer(hits=0)))
+        _, fake_output = self.fake_cluster(reads=({}, {"hits": 0}))
         problems, _, _, _, _ = self.check(fake_output)
         self.assertEqual(len(problems), 1)
         self.assertIn("after the restart", problems[0])
