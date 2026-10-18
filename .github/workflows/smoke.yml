@@ -147,6 +147,11 @@ jobs:
           set -euo pipefail
           python3 gates/gate.py check-datahub-opensearch | tee -a "$GITHUB_STEP_SUMMARY"
 
+      - name: Datahub writes a dataset through its three stores and finds it by search; its root user signs in with init-env's password only (ADR-071, ADR-072)
+        run: |
+          set -euo pipefail
+          python3 gates/gate.py check-datahub | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: The stand-ins answer as Polaris needs them to (ADR-026, ADR-031)
         run: |
           set -euo pipefail
@@ -234,6 +239,10 @@ jobs:
           kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_DATAHUB" logs -l cnpg.io/cluster=datahub-pg,cnpg.io/podRole=instance --all-containers --prefix --tail=60 || true
           kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_DATAHUB" logs -l app.kubernetes.io/name=datahub-kafka --prefix --tail=80 || true
           kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_DATAHUB" logs -l app.kubernetes.io/instance=datahub-opensearch --all-containers --prefix --tail=80 || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_DATAHUB" get jobs,deployments -o wide || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_DATAHUB" logs -l job-name=datahub-system-update --all-containers --prefix --tail=120 || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_DATAHUB" logs -l job-name=datahub-system-update-nonblk --all-containers --prefix --tail=80 || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_DATAHUB" logs -l app.kubernetes.io/instance=datahub --all-containers --prefix --tail=120 || true
           kubectl --context "$KUBE_CONTEXT" get networkpolicies -A || true
           kubectl --context "$KUBE_CONTEXT" -n "$NS_STANDINS" exec deployment/prometheus -- wget -qO- 'http://127.0.0.1:9090/api/v1/targets?state=active' || true
           kubectl --context "$KUBE_CONTEXT" -n "$NS_STANDINS" get pods -o wide || true
