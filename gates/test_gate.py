@@ -79,19 +79,34 @@ class Pins(unittest.TestCase):
         self.assertTrue(pin["source"])
 
     def test_the_workload_schemas_are_pinned_beside_the_network_policys(self):
-        # ADR-068 §1, ADR-070 §1, ADR-016: kubeconform validates charts/datahub-kafka's and
-        # charts/datahub-opensearch's StatefulSet, Services and ConfigMap in the static gate,
-        # from the same commit and Kubernetes version.
+        # ADR-068 §1, ADR-070 §1, ADR-071 §1, ADR-016: kubeconform validates
+        # charts/datahub-kafka's, charts/datahub-opensearch's and charts/datahub's kinds in the
+        # static gate, from the same commit and Kubernetes version.
         schemas = gate.load_pins(os.path.join(HERE, "pins.json"))["kubernetes_schemas"]
         commit_dir = schemas["networkpolicy"]["url"].rsplit("/", 1)[0]
         for name, file in (("statefulset", "statefulset-apps-v1.json"),
                            ("service", "service-v1.json"),
-                           ("configmap", "configmap-v1.json")):
+                           ("configmap", "configmap-v1.json"),
+                           ("deployment", "deployment-apps-v1.json"),
+                           ("serviceaccount", "serviceaccount-v1.json"),
+                           ("role", "role-rbac-v1.json"),
+                           ("rolebinding", "rolebinding-rbac-v1.json"),
+                           ("job", "job-batch-v1.json"),
+                           ("cronjob", "cronjob-batch-v1.json")):
             with self.subTest(schema=name):
                 pin = schemas[name]
                 self.assertEqual(pin["url"], f"{commit_dir}/{file}")
                 self.assertRegex(pin["sha256"], r"^[0-9a-f]{64}$")
                 self.assertTrue(pin["source"])
+
+    def test_datahubs_chart_is_upstreams_release_archive_by_its_digest(self):
+        # ADR-072 §1: the chart test compares charts/datahub with this archive, file by file.
+        pin = gate.load_pins(os.path.join(HERE, "pins.json"))["datahub_chart"]
+        self.assertRegex(pin["version"], r"^\d+\.\d+\.\d+$")
+        self.assertEqual(pin["url"], "https://github.com/acryldata/datahub-helm/releases/download/"
+                         f"datahub-{pin['version']}/datahub-{pin['version']}.tgz")
+        self.assertRegex(pin["sha256"], r"^[0-9a-f]{64}$")
+        self.assertTrue(pin["source"])
 
     def test_the_operator_pin_is_supported_by_the_install_script(self):
         pins = gate.load_pins(os.path.join(HERE, "pins.json"))
