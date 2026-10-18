@@ -1,0 +1,120 @@
+# This repository's settings for upstream's datahub chart 1.1.7 (ADR-071, ADR-072); every other
+# file here is upstream's release archive, but the one line ADR-072 §1 patches. Nothing comes from
+# `.env`: the credentials reach the chart only as the Secrets init_env.py --apply-secrets creates
+# (ADR-006). Upstream's values schema refuses no unknown key: charts/test_datahub.py checks that
+# each key below is in upstream's values or read by its templates, and the rendered output for
+# each value (ADR-016, ADR-072 §3).
+
+# GMS, one replica with its MCE, MAE and platform-event consumers inside (ADR-071 §2).
+datahub-gms:
+  image:
+    # Docker Hub index digest, read 2026-10-18 (pushed 2026-09-03). The chart and the images move
+    # together, in a PR of their own (ADR-071 §1, §3). ADR-072 §1's patched line keeps the digest
+    # out of GMS's version label.
+    tag: "v1.7.0.1@sha256:74e15e982b94d0e147de41d05133ef3df48f74a1004a9c997805e0aa7e010173"
+  service:
+    type: ClusterIP
+  extraEnvs:
+    # One node holds every index: no replica, so the indices go green (ADR-070).
+    - name: ELASTICSEARCH_NUM_REPLICAS_PER_INDEX
+      value: "0"
+    # Upstream passes the key only with managed ingestion on, which is off below; without it GMS
+    # encrypts with a built-in key (ADR-072 §2). The ingestion PR drops this entry.
+    - name: SECRET_SERVICE_ENCRYPTION_KEY
+      valueFrom:
+        secretKeyRef:
+          name: datahub-encryption-secrets
+          key: encryption_key_secret
+
+# The frontend, one replica. Its secret is init-env's, not one the chart draws anew on every
+# render, and its root user's password replaces the image's datahub:datahub (ADR-071 §6).
+datahub-frontend:
+  image:
+    tag: "v1.7.0.1@sha256:99513cc1c45e4cc053ceb0f9aeb04a3263a8a747907bb0e85cac2eb03461310d"
+  service:
+    type: ClusterIP
+  existingGmsSecret:
+    name: datahub-frontend-secret
+    key: secret
+  extraVolumes:
+    - name: root-user
+      secret:
+        secretName: datahub-root-user
+  extraVolumeMounts:
+    - name: root-user
+      mountPath: /datahub-frontend/conf/user.props
+      subPath: user.props
+      readOnly: true
+
+# Not until ingestion enters: its executor installs packages from PyPI at run time (ADR-071 §2).
+acryl-datahub-actions:
+  enabled: false
+
+# The restore-indices CronJob template, suspended, from which a Job is created by hand
+# (ADR-071 §2).
+datahubUpgrade:
+  enabled: true
+  image:
+    tag: "v1.7.0.1@sha256:c3db54d8fb94bc761be611c014c5ede3fd02daac1f15c8c177d69eceee79a24c"
+
+# The blocking pre-install Job and the non-blocking post-install one, upstream's ZDU defaults.
+datahubSystemUpdate:
+  image:
+    tag: "v1.7.0.1@sha256:c3db54d8fb94bc761be611c014c5ede3fd02daac1f15c8c177d69eceee79a24c"
+  sql:
+    setup:
+      # datahub-pg's chart creates the database and its owner (ADR-066 §2). Upstream renders
+      # `createDatabase | default "true"`, so this false still reaches the Job as "true"; its schema
+      # takes a boolean only. On PostgreSQL the step then finds the database in pg_database and
+      # creates nothing.
+      createDatabase: false
+      createUser: false
+  extraEnvs:
+    # System-update creates the indices (ADR-070).
+    - name: ELASTICSEARCH_NUM_REPLICAS_PER_INDEX
+      value: "0"
+
+global:
+  # Every Datahub pod is a client of its three stores and of GMS (ADR-071 §4, §5): the hook Jobs
+  # take no other labels, and the frontend reaches Kafka and OpenSearch itself.
+  podLabels:
+    lakehouse/datahub-pg-client: "true"
+    lakehouse/datahub-kafka-client: "true"
+    lakehouse/datahub-opensearch-client: "true"
+    lakehouse/datahub-gms-client: "true"
+
+  # datahub-pg (ADR-066), its owner's password from init-env's Secret datahub-db.
+  sql:
+    datasource:
+      host: datahub-pg-rw:5432
+      port: "5432"
+      url: jdbc:postgresql://datahub-pg-rw:5432/datahub
+      driver: org.postgresql.Driver
+      username: datahub
+      password:
+        secretRef: datahub-db
+        secretKey: password
+
+  # datahub-kafka, plaintext (ADR-068). Upstream's 5 MiB message size, topics with one partition
+  # and replication factor 1, and its internal schema registry stay.
+  kafka:
+    bootstrap:
+      server: datahub-kafka:9092
+
+  # datahub-opensearch, plain HTTP without login and no index prefix (ADR-070).
+  elasticsearch:
+    host: datahub-opensearch
+    port: "9200"
+    useSSL: "false"
+
+  datahub:
+    # Off while no executor runs (ADR-071 §2).
+    managed_ingestion:
+      enabled: false
+    # init-env's Secrets under upstream's names and keys, never the chart's own (ADR-071 §6).
+    metadata_service_authentication:
+      provisionSecrets:
+        enabled: false
+    encryptionKey:
+      provisionSecret:
+        enabled: false

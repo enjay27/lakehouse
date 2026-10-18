@@ -1,6 +1,11 @@
 # install/release.py passes every value from .env (ADR-048 §2). values.schema.json refuses
 # unknown keys, so a misspelt value fails instead of being ignored (ADR-016).
 
+# One namespace label per caller class in other teams' namespaces, as {key, value}, parsed from
+# INGRESS_NAMESPACE_LABEL (ingress) and DATAHUB_EMITTER_NAMESPACE_LABEL (emitter) (ADR-071 §5). A
+# class left out allows no namespace: its part of a rule is not rendered.
+callers: {}
+
 # The operator's namespace, selected by kubernetes.io/metadata.name with the name from .env
 # (NS_CNPG_SYSTEM). No default: never a name in a chart.
 namespaces:

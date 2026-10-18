@@ -79,19 +79,34 @@ class Pins(unittest.TestCase):
         self.assertTrue(pin["source"])
 
     def test_the_workload_schemas_are_pinned_beside_the_network_policys(self):
-        # ADR-068 §1, ADR-070 §1, ADR-016: kubeconform validates charts/datahub-kafka's and
-        # charts/datahub-opensearch's StatefulSet, Services and ConfigMap in the static gate,
-        # from the same commit and Kubernetes version.
+        # ADR-068 §1, ADR-070 §1, ADR-071 §1, ADR-016: kubeconform validates
+        # charts/datahub-kafka's, charts/datahub-opensearch's and charts/datahub's kinds in the
+        # static gate, from the same commit and Kubernetes version.
         schemas = gate.load_pins(os.path.join(HERE, "pins.json"))["kubernetes_schemas"]
         commit_dir = schemas["networkpolicy"]["url"].rsplit("/", 1)[0]
         for name, file in (("statefulset", "statefulset-apps-v1.json"),
                            ("service", "service-v1.json"),
-                           ("configmap", "configmap-v1.json")):
+                           ("configmap", "configmap-v1.json"),
+                           ("deployment", "deployment-apps-v1.json"),
+                           ("serviceaccount", "serviceaccount-v1.json"),
+                           ("role", "role-rbac-v1.json"),
+                           ("rolebinding", "rolebinding-rbac-v1.json"),
+                           ("job", "job-batch-v1.json"),
+                           ("cronjob", "cronjob-batch-v1.json")):
             with self.subTest(schema=name):
                 pin = schemas[name]
                 self.assertEqual(pin["url"], f"{commit_dir}/{file}")
                 self.assertRegex(pin["sha256"], r"^[0-9a-f]{64}$")
                 self.assertTrue(pin["source"])
+
+    def test_datahubs_chart_is_upstreams_release_archive_by_its_digest(self):
+        # ADR-072 §1: the chart test compares charts/datahub with this archive, file by file.
+        pin = gate.load_pins(os.path.join(HERE, "pins.json"))["datahub_chart"]
+        self.assertRegex(pin["version"], r"^\d+\.\d+\.\d+$")
+        self.assertEqual(pin["url"], "https://github.com/acryldata/datahub-helm/releases/download/"
+                         f"datahub-{pin['version']}/datahub-{pin['version']}.tgz")
+        self.assertRegex(pin["sha256"], r"^[0-9a-f]{64}$")
+        self.assertTrue(pin["source"])
 
     def test_the_operator_pin_is_supported_by_the_install_script(self):
         pins = gate.load_pins(os.path.join(HERE, "pins.json"))
@@ -676,6 +691,7 @@ POLARIS_GATEWAY_NAMESPACE_LABEL=
 POLARIS_QUERY_NAMESPACE_LABEL=
 METRICS_NAMESPACE_LABEL=
 INGRESS_NAMESPACE_LABEL=
+DATAHUB_EMITTER_NAMESPACE_LABEL=
 POLARIS_CONSOLE_ENABLED=false
 POLARIS_CONSOLE_ORIGIN=
 POLARIS_CONSOLE_API_URL=
@@ -774,6 +790,11 @@ class GateEnv(unittest.TestCase):
             "POLARIS_QUERY_NAMESPACE_LABEL": "lakehouse-gate/caller=query",
             "METRICS_NAMESPACE_LABEL": "lakehouse-gate/caller=metrics",
             "INGRESS_NAMESPACE_LABEL": "lakehouse-gate/caller=ingress"})
+
+    def test_the_emitters_class_gets_the_gates_namespace_label(self):
+        # ADR-071 §5: check-network's emitters' namespace (ADR-048 §6).
+        env = gate.init_env.parse(gate.gate_env(TEMPLATE, gen=lambda name: "x"))
+        self.assertEqual(env["DATAHUB_EMITTER_NAMESPACE_LABEL"], "lakehouse-gate/caller=emitter")
 
     def test_the_console_is_enabled_at_its_service_and_reaches_polaris_at_its_service(self):
         env = gate.init_env.parse(gate.gate_env(TEMPLATE, gen=lambda name: "x"))
@@ -2543,6 +2564,158 @@ class CheckDatahubOpensearch(unittest.TestCase):
 
     def test_it_is_a_command_of_the_gate(self):
         self.assertIn("| check-datahub-opensearch |", gate.__doc__.strip().splitlines()[-1])
+
+
+DATAHUB_SECRET = "SystemSecret0123456789abcdefABCD"
+DATAHUB_PASSWORD = "RootPassword0123456789abcdefABCD"
+PYTHON_IMAGE = "python:3.12.14-slim@sha256:" + "f" * 64
+
+
+def b64(text):
+    import base64
+    return base64.b64encode(text.encode()).decode()
+
+
+def datahub_jobs(*complete):
+    """A job list of the two system-update Jobs, each Complete or not."""
+    names = ("datahub-system-update", "datahub-system-update-nonblk")
+    return {"items": [{"metadata": {"name": name},
+                       "status": {"conditions": [{"type": "Complete" if done else "Failed",
+                                                  "status": "True"}]}}
+                      for name, done in zip(names, complete)]}
+
+
+class CheckDatahub(unittest.TestCase):
+    """ADR-071 §8, ADR-072 §4: system-update done, a dataset through every store, the login."""
+
+    def test_both_system_update_jobs_must_have_completed(self):
+        self.assertEqual(gate.system_update_problems(datahub_jobs(True, True)), [])
+        self.assertEqual(gate.system_update_problems(datahub_jobs(True, False)), [
+            "Job datahub-system-update-nonblk in Datahub's namespace has not completed"])
+        self.assertEqual(gate.system_update_problems(datahub_jobs(True)), [
+            "Job datahub-system-update-nonblk in Datahub's namespace has not completed"])
+
+    def test_the_root_password_is_the_user_props_line_for_datahub(self):
+        self.assertEqual(gate.root_password(f"datahub:{DATAHUB_PASSWORD}\n"), DATAHUB_PASSWORD)
+        for text in ("admin:x", "datahub:", "datahub"):
+            with self.subTest(text=text):
+                self.assertIsNone(gate.root_password(text))
+
+    def test_a_secrets_value_is_decoded_from_its_data(self):
+        secret = {"data": {"system_client_secret": b64(DATAHUB_SECRET)}}
+        self.assertEqual(gate.secret_value(secret, "system_client_secret"), DATAHUB_SECRET)
+
+    def test_the_urls_are_the_services_upstreams_chart_names(self):
+        self.assertEqual(gate.datahub_urls("catalog-datahub"), (
+            "http://datahub-datahub-gms.catalog-datahub.svc.cluster.local:8080",
+            "http://datahub-datahub-frontend.catalog-datahub.svc.cluster.local:9002"))
+
+    def test_the_check_pod_runs_the_script_from_its_arguments_and_never_the_check_label(self):
+        argv = gate.datahub_check_command("catalog-datahub", PYTHON_IMAGE, "c-1",
+                                          ["gms", "http://g", "n", "180"],
+                                          labels={"lakehouse/datahub-gms-client": "true"})
+        with open(gate.DATAHUB_CHECK, encoding="utf-8") as f:
+            script = f.read()
+        self.assertEqual(argv, [
+            "kubectl", "--context", gate.CONTEXT, "-n", "catalog-datahub", "run", "c-1",
+            "--labels=lakehouse/datahub-gms-client=true", f"--image={PYTHON_IMAGE}",
+            "--restart=Never", "--rm", "-i", "--quiet", "--pod-running-timeout=3m",
+            "--command", "--", "python3", "-c", script, "gms", "http://g", "n", "180"])
+        self.assertNotIn(gate.CHECK_POD_LABEL, argv)
+        unlabelled = gate.datahub_check_command("ns", PYTHON_IMAGE, "c-2", ["login", "u"])
+        self.assertFalse([a for a in unlabelled if a.startswith("--labels")])
+
+    def test_ok_lines_are_notes_and_fail_lines_problems(self):
+        self.assertEqual(gate.datahub_lines("ok   one\nFAIL two: why\nnoise\n"),
+                         (["two: why"], ["one"]))
+
+    def fake_cluster(self, jobs=(True, True), gms_out="ok   GMS answers /health\n",
+                     login_out="ok   the frontend signs in datahub\n"):
+        """gate.output answering check_datahub's reads, subprocess.run its two pods; both
+        record their calls."""
+        reads, pods = [], []
+        secrets = {"datahub-auth-secrets": {"data": {"system_client_secret":
+                                                     b64(DATAHUB_SECRET)}},
+                   "datahub-root-user": {"data": {"user.props":
+                                                  b64(f"datahub:{DATAHUB_PASSWORD}")}}}
+
+        def fake_output(argv, stdin=None):
+            reads.append((argv, stdin))
+            if "jobs" in argv:
+                return json.dumps(datahub_jobs(*jobs))
+            if "secret" in argv:
+                return json.dumps(secrets[argv[argv.index("secret") + 1]])
+            return ""
+
+        def fake_run(argv, input=None, **kwargs):
+            pods.append((argv, input))
+            out = gms_out if "gms" in argv else login_out
+            return subprocess.CompletedProcess(argv, 1 if "FAIL" in out else 0, out, "")
+        return reads, pods, fake_output, fake_run
+
+    def check(self, fake_output, fake_run):
+        env = {"NS_CATALOG_DATAHUB": "catalog-datahub",
+               "INGRESS_NAMESPACE_LABEL": "lakehouse-gate/caller=ingress"}
+        pins = {"standin_images": {"recorder": {"image": PYTHON_IMAGE}}}
+        with mock.patch.object(gate, "output", side_effect=fake_output), \
+                mock.patch.object(gate.subprocess, "run", side_effect=fake_run):
+            return gate.check_datahub(env, pins)
+
+    def test_gms_from_its_client_and_the_login_from_the_ingress_namespace(self):
+        reads, pods, fake_output, fake_run = self.fake_cluster()
+        problems, notes = self.check(fake_output, fake_run)
+        self.assertEqual(problems, [])
+        self.assertIn("system-update", notes[0])
+        (apply,) = [(argv, stdin) for argv, stdin in reads if "apply" in argv]
+        namespace = json.loads(apply[1])
+        self.assertEqual(namespace["metadata"], {
+            "name": "gate-net-ingress", "labels": {"lakehouse-gate/caller": "ingress"}})
+        (gms, gms_in), (login, login_in) = pods
+        self.assertEqual(gms[gms.index("-n") + 1], "catalog-datahub")
+        self.assertIn("--labels=lakehouse/datahub-gms-client=true", gms)
+        self.assertEqual(gms[-4:], [
+            "gms", "http://datahub-datahub-gms.catalog-datahub.svc.cluster.local:8080",
+            f"gate_check_{os.getpid()}", str(gate.DATAHUB_SEARCH_SECONDS)])
+        self.assertEqual(gms_in, DATAHUB_SECRET + "\n")
+        self.assertEqual(login[login.index("-n") + 1], "gate-net-ingress")
+        self.assertFalse([a for a in login if a.startswith("--labels")])
+        self.assertEqual(login[-2:], [
+            "login", "http://datahub-datahub-frontend.catalog-datahub.svc.cluster.local:9002"])
+        self.assertEqual(login_in, DATAHUB_PASSWORD + "\n")
+        for argv, _ in pods + reads:
+            self.assertNotIn(DATAHUB_SECRET, " ".join(argv))
+            self.assertNotIn(DATAHUB_PASSWORD, " ".join(argv))
+        self.assertIn("GMS answers /health", notes)
+        self.assertIn("the frontend signs in datahub", notes)
+
+    def test_system_update_not_done_stops_before_any_pod(self):
+        _, pods, fake_output, fake_run = self.fake_cluster(jobs=(False, True))
+        problems, _ = self.check(fake_output, fake_run)
+        self.assertEqual(problems, [
+            "Job datahub-system-update in Datahub's namespace has not completed"])
+        self.assertEqual(pods, [])
+
+    def test_a_failed_line_from_either_pod_is_a_problem(self):
+        _, _, fake_output, fake_run = self.fake_cluster(
+            gms_out="ok   GMS answers /health\nFAIL found by search: not within 180 s\n",
+            login_out="FAIL the frontend refuses the image's datahub:datahub: HTTP 200\n")
+        problems, _ = self.check(fake_output, fake_run)
+        self.assertEqual(problems, ["found by search: not within 180 s",
+                                    "the frontend refuses the image's datahub:datahub: HTTP 200"])
+
+    def test_a_pod_that_failed_without_a_line_is_a_problem_with_the_secret_masked(self):
+        _, _, fake_output, _ = self.fake_cluster()
+
+        def fake_run(argv, input=None, **kwargs):
+            return subprocess.CompletedProcess(argv, 1, "", f"error: {DATAHUB_SECRET} timed out")
+        problems, _ = self.check(fake_output, fake_run)
+        self.assertEqual(len(problems), 2)
+        for problem in problems:
+            self.assertNotIn(DATAHUB_SECRET, problem)
+            self.assertIn("<redacted>", problem)
+
+    def test_it_is_a_command_of_the_gate(self):
+        self.assertIn("| check-datahub |", gate.__doc__.strip().splitlines()[-1])
 
 
 if __name__ == "__main__":

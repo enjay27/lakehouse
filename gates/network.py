@@ -9,8 +9,9 @@
   short-lived pod in each, and from an unlabelled pod in Polaris's namespace, PROBE tries a TCP
   connection to each target of CASES. Three more pods carry CNPG's join label (POD_LABELS), in
   Polaris's namespace, the unlabelled one and Datahub's (ADR-048 §6), one in Datahub's
-  namespace datahub-pg's client label (ADR-066 §4), one there Kafka's (ADR-068 §3), and one
-  there OpenSearch's (ADR-070 §2). An allowed case must connect; a refused one
+  namespace datahub-pg's client label (ADR-066 §4), one there Kafka's (ADR-068 §3), one
+  there OpenSearch's (ADR-070 §2), and one there GMS's (ADR-071 §5); Datahub's emitters are a
+  caller class of their own. An allowed case must connect; a refused one
   must time out or be reset. A refused case that connects means the cluster does not enforce
   NetworkPolicy: ADR-048 says to stop there. polaris-pg's own Services expose 5432 only, so
   the gate adds one, METRICS_SERVICE, for the instances' exporter on 9187.
@@ -26,9 +27,11 @@ import release  # noqa: E402
 import standins  # noqa: E402
 
 CHECK_LABEL = standins.CHECK_LABEL
-# The namespace label the gate's `.env` gives each caller class, and its source namespaces.
+# The namespace label the gate's `.env` gives each caller class, Polaris's and Datahub's (the
+# ingress controller's is both), and its source namespaces.
 CALLER_KEY = "lakehouse-gate/caller"
-GATE_CALLER_LABELS = {var: f"{CALLER_KEY}={name}" for name, var in release.CALLER_VARS.items()}
+CALLER_VARS = {**release.CALLER_VARS, **release.DATAHUB_CALLER_VARS}
+GATE_CALLER_LABELS = {var: f"{CALLER_KEY}={name}" for name, var in CALLER_VARS.items()}
 SOURCE_PREFIX = "gate-net-"
 UNLABELLED = "none"
 # Seconds a refused connection waits before it counts as blocked.
@@ -40,7 +43,8 @@ JOIN = {"cnpg.io/jobRole": "join"}
 POD_LABELS = {"polaris-join": JOIN, "none-join": JOIN, "datahub-join": JOIN,
               "datahub-client": {release.DATAHUB_PG_CLIENT_LABEL: "true"},
               "datahub-kafka-client": {release.DATAHUB_KAFKA_CLIENT_LABEL: "true"},
-              "datahub-opensearch-client": {release.DATAHUB_OPENSEARCH_CLIENT_LABEL: "true"}}
+              "datahub-opensearch-client": {release.DATAHUB_OPENSEARCH_CLIENT_LABEL: "true"},
+              "datahub-gms-client": {release.DATAHUB_GMS_CLIENT_LABEL: "true"}}
 # The gate's Service for CNPG's exporter on polaris-pg's instances (ADR-046 §4).
 METRICS_SERVICE = "gate-polaris-pg-metrics"
 PG_METRICS_PORT = 9187
@@ -49,15 +53,21 @@ KAFKA_PORT = 9092
 # datahub-opensearch's HTTP port, and its transport port, which no rule opens (ADR-070 §2).
 OPENSEARCH_PORT = 9200
 OPENSEARCH_TRANSPORT_PORT = 9300
+# GMS's API and the frontend's HTTP port, through the Services upstream's chart names
+# (ADR-071 §5).
+GMS_PORT = 8080
+FRONTEND_PORT = 9002
 NAME = "kubernetes.io/metadata.name"
 
 Case = collections.namedtuple("Case", "source target allowed")
 # One allowed and one refused connection per rule of ADR-048 §3, ADR-066 §4, ADR-067,
-# ADR-068 §3 and ADR-070 §5, by source: a caller class, `none` (a namespace with no label),
+# ADR-068 §3, ADR-070 §5 and ADR-071 §8, by source: a caller class (`emitter` is Datahub's lineage
+# emitters'), `none` (a namespace with no label),
 # `datahub` (NS_CATALOG_DATAHUB), `polaris` (a pod in NS_CATALOG_POLARIS without the check
 # label), `polaris-join`, `none-join` and `datahub-join` (a pod with CNPG's join label in those
 # namespaces), `datahub-client` (a pod in NS_CATALOG_DATAHUB with datahub-pg's client label),
-# `datahub-kafka-client` (one there with Kafka's) or `datahub-opensearch-client` (OpenSearch's).
+# `datahub-kafka-client` (one there with Kafka's), `datahub-opensearch-client` (OpenSearch's)
+# or `datahub-gms-client` (GMS's).
 CASES = [
     Case("gateway", "polaris-api", True),
     Case("gateway", "polaris-management", False),
@@ -107,6 +117,16 @@ CASES = [
     Case("datahub", "datahub-opensearch", False),
     Case(UNLABELLED, "datahub-opensearch", False),
     Case("datahub-opensearch-client", "datahub-opensearch-transport", False),
+    Case("datahub-gms-client", "datahub-gms", True),
+    Case("emitter", "datahub-gms", True),
+    Case("datahub", "datahub-gms", False),
+    Case(UNLABELLED, "datahub-gms", False),
+    Case("polaris", "datahub-gms", False),
+    Case("ingress", "datahub-frontend", True),
+    Case(UNLABELLED, "datahub-frontend", False),
+    Case("emitter", "datahub-frontend", False),
+    Case("datahub", "datahub-frontend", False),
+    Case("emitter", "polaris-api", False),
 ]
 
 # Connects to each `host:port` argument at once and prints `host:port RESULT` for each:
@@ -158,6 +178,9 @@ def targets(env):
         "datahub-opensearch": _svc(release.DATAHUB_OPENSEARCH, dh, OPENSEARCH_PORT),
         "datahub-opensearch-transport": _svc(release.DATAHUB_OPENSEARCH, dh,
                                              OPENSEARCH_TRANSPORT_PORT),
+        "datahub-gms": _svc(f"{release.DATAHUB_RELEASE}-datahub-gms", dh, GMS_PORT),
+        "datahub-frontend": _svc(f"{release.DATAHUB_RELEASE}-datahub-frontend", dh,
+                                 FRONTEND_PORT),
     }
 
 
@@ -166,7 +189,7 @@ def source_namespaces(env):
     that source: Polaris's, which it neither creates nor labels, and the join sources', which
     other sources already name."""
     sources = {}
-    for name, var in release.CALLER_VARS.items():
+    for name, var in CALLER_VARS.items():
         key, _, value = env[var].partition("=")
         sources[name] = (SOURCE_PREFIX + name, {key: value})
     sources[UNLABELLED] = (SOURCE_PREFIX + UNLABELLED, {})
@@ -178,6 +201,7 @@ def source_namespaces(env):
     sources["datahub-join"] = (env["NS_CATALOG_DATAHUB"], None)
     sources["datahub-kafka-client"] = (env["NS_CATALOG_DATAHUB"], None)
     sources["datahub-opensearch-client"] = (env["NS_CATALOG_DATAHUB"], None)
+    sources["datahub-gms-client"] = (env["NS_CATALOG_DATAHUB"], None)
     return sources
 
 

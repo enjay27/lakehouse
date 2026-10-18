@@ -19,7 +19,8 @@ ENV = {"NS_CATALOG_POLARIS": "catalog-polaris", "NS_STANDINS": "standins",
        "POLARIS_GATEWAY_NAMESPACE_LABEL": "lakehouse-gate/caller=gateway",
        "POLARIS_QUERY_NAMESPACE_LABEL": "lakehouse-gate/caller=query",
        "METRICS_NAMESPACE_LABEL": "lakehouse-gate/caller=metrics",
-       "INGRESS_NAMESPACE_LABEL": "lakehouse-gate/caller=ingress"}
+       "INGRESS_NAMESPACE_LABEL": "lakehouse-gate/caller=ingress",
+       "DATAHUB_EMITTER_NAMESPACE_LABEL": "lakehouse-gate/caller=emitter"}
 PYTHON = "python:3.12.14-slim@sha256:" + "f" * 64
 
 
@@ -106,7 +107,8 @@ class Cases(unittest.TestCase):
         expected = {c.target: c.allowed for c in network.CASES if c.source == "polaris"}
         self.assertEqual(expected, {"polaris-api": False, "polaris-pg": False,
                                     "seaweedfs": False, "opa": False, "recorder": True,
-                                    "datahub-pg": False, "datahub-kafka": False})
+                                    "datahub-pg": False, "datahub-kafka": False,
+                                    "datahub-gms": False})
 
     def test_datahub_pg_from_its_clients_and_join_pods_in_datahubs_namespace_only(self):
         # ADR-066 §4: datahub-pg's rules as polaris-pg's, for Datahub's own label.
@@ -136,6 +138,26 @@ class Cases(unittest.TestCase):
                 self.assertIs(expected[(source, "datahub-opensearch")], False)
         self.assertIs(expected[("datahub-opensearch-client", "datahub-opensearch-transport")],
                       False)
+
+    def test_gms_from_its_clients_and_the_emitters_namespace_only(self):
+        # ADR-071 §5, §8: 8080 from pods with GMS's client label and the emitters' class.
+        expected = {(c.source, c.target): c.allowed for c in network.CASES}
+        self.assertIs(expected[("datahub-gms-client", "datahub-gms")], True)
+        self.assertIs(expected[("emitter", "datahub-gms")], True)
+        for source in ("datahub", "none", "polaris"):
+            with self.subTest(source=source):
+                self.assertIs(expected[(source, "datahub-gms")], False)
+
+    def test_the_frontend_from_the_ingress_namespace_only(self):
+        expected = {(c.source, c.target): c.allowed for c in network.CASES}
+        self.assertIs(expected[("ingress", "datahub-frontend")], True)
+        for source in ("none", "emitter", "datahub"):
+            with self.subTest(source=source):
+                self.assertIs(expected[(source, "datahub-frontend")], False)
+
+    def test_the_emitters_class_opens_no_door_to_polaris(self):
+        expected = {(c.source, c.target): c.allowed for c in network.CASES}
+        self.assertIs(expected[("emitter", "polaris-api")], False)
 
     def test_datahubs_namespace_reaches_the_recorders_s3_port_only(self):
         # ADR-067 §4: its backups go through the recorder; OPA and the PostgreSQL port stay shut.
@@ -174,6 +196,10 @@ class Cases(unittest.TestCase):
                          "datahub-opensearch.catalog-datahub.svc.cluster.local:9200")
         self.assertEqual(addresses["datahub-opensearch-transport"],
                          "datahub-opensearch.catalog-datahub.svc.cluster.local:9300")
+        self.assertEqual(addresses["datahub-gms"],
+                         "datahub-datahub-gms.catalog-datahub.svc.cluster.local:8080")
+        self.assertEqual(addresses["datahub-frontend"],
+                         "datahub-datahub-frontend.catalog-datahub.svc.cluster.local:9002")
         self.assertEqual({c.target for c in network.CASES}, set(addresses))
 
 
@@ -185,6 +211,7 @@ class Sources(unittest.TestCase):
             "query": ("gate-net-query", {"lakehouse-gate/caller": "query"}),
             "metrics": ("gate-net-metrics", {"lakehouse-gate/caller": "metrics"}),
             "ingress": ("gate-net-ingress", {"lakehouse-gate/caller": "ingress"}),
+            "emitter": ("gate-net-emitter", {"lakehouse-gate/caller": "emitter"}),
             "none": ("gate-net-none", {}),
             "datahub": ("catalog-datahub", {}),
             "polaris": ("catalog-polaris", None),
@@ -193,7 +220,8 @@ class Sources(unittest.TestCase):
             "datahub-client": ("catalog-datahub", None),
             "datahub-join": ("catalog-datahub", None),
             "datahub-kafka-client": ("catalog-datahub", None),
-            "datahub-opensearch-client": ("catalog-datahub", None)})
+            "datahub-opensearch-client": ("catalog-datahub", None),
+            "datahub-gms-client": ("catalog-datahub", None)})
 
     def test_the_join_sources_carry_cnpgs_join_label_and_datahubs_client_its_own(self):
         self.assertEqual(network.POD_LABELS, {
@@ -202,7 +230,8 @@ class Sources(unittest.TestCase):
             "datahub-join": {"cnpg.io/jobRole": "join"},
             "datahub-client": {"lakehouse/datahub-pg-client": "true"},
             "datahub-kafka-client": {"lakehouse/datahub-kafka-client": "true"},
-            "datahub-opensearch-client": {"lakehouse/datahub-opensearch-client": "true"}})
+            "datahub-opensearch-client": {"lakehouse/datahub-opensearch-client": "true"},
+            "datahub-gms-client": {"lakehouse/datahub-gms-client": "true"}})
 
     def test_the_namespaces_manifest_leaves_polaris_alone(self):
         manifest = network.namespaces_manifest(ENV)

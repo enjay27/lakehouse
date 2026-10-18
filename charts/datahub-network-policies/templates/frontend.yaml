@@ -1,0 +1,25 @@
+{{- with .Values.callers.ingress }}
+# The frontend's HTTP port, 9002: the ingress controller's namespace only (ADR-048 §3,
+# ADR-071 §5). Without its label the rule is not rendered and default deny refuses everyone. Its
+# metrics ports, 4318 and 4319, get no rule until Datahub's scrape contract. The pods are selected
+# by the labels upstream's chart gives the frontend with release datahub.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: datahub-frontend
+  labels:
+    {{- include "datahub-network-policies.labels" $ | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: datahub-frontend
+      app.kubernetes.io/instance: datahub
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 9002
+      from:
+        {{- include "datahub-network-policies.namespace" . | nindent 8 }}
+{{- end }}

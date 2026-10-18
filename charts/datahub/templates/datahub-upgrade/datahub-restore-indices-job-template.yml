@@ -1,0 +1,155 @@
+{{- if .Values.datahubUpgrade.enabled -}}
+# Job template for restoring indices by sending MAE corresponding to all entities in the local db
+# Creates a suspended cronJob that you can use to create an adhoc job when ready to run clean up.
+# Run the following command to do so
+# kubectl create job --from=cronjob/<<release-name>>-datahub-restore-indices-job-template datahub-restore-indices-job
+apiVersion: {{ include "datahub.cronjob.apiVersion" $}}
+kind: CronJob
+metadata:
+  name: {{ printf "%s-datahub-restore-indices-job-template" .Release.Name | trunc 52 }}
+  labels:
+    {{- include "datahub.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.datahubUpgrade.restoreIndices.schedule | default "0 0 * * 0" }}
+  suspend: true
+  concurrencyPolicy: {{ .Values.datahubUpgrade.restoreIndices.concurrencyPolicy | default "Allow" }}
+  jobTemplate:
+    metadata:
+      labels:
+        {{- include "datahub.labels" . | nindent 8 }}
+        {{- with .Values.datahubUpgrade.restoreIndices.labels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      template:
+        {{- if or .Values.global.podLabels .Values.datahubUpgrade.podAnnotations }}
+        metadata:
+        {{- with .Values.datahubUpgrade.podAnnotations }}
+          annotations:
+            {{- toYaml . | nindent 12 }}
+        {{- end }}
+        {{- with .Values.global.podLabels }}
+          labels:
+            {{- range $key, $value := . }}
+            {{ $key }}: {{ $value | quote }}
+            {{- end }}
+        {{- end }}
+        {{- end }}
+        spec:
+        {{- with .Values.global.hostAliases }}
+          hostAliases:
+            {{- toYaml . | nindent 12 }}
+        {{- end }}
+        {{- $jobSa := default (include "datahub.appServiceAccountName" .) .Values.datahubUpgrade.serviceAccount }}
+        {{- with $jobSa }}
+          serviceAccountName: {{ . }}
+        {{- end }}
+        {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+        {{- end }}
+          volumes:
+            {{- with .Values.global.credentialsAndCertsSecrets }}
+            - name: datahub-certs-dir
+              secret:
+                defaultMode: 0444
+                secretName: {{ .name }}
+            {{- end }}
+          {{- with .Values.datahubUpgrade.extraVolumes }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          restartPolicy: Never
+          securityContext:
+            {{- toYaml .Values.datahubUpgrade.podSecurityContext | nindent 12 }}
+          initContainers:
+          {{- with .Values.datahubUpgrade.extraInitContainers }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: datahub-upgrade-job
+              image: {{ include "datahub.image" (dict "imageRegistry" .Values.global.imageRegistry "version" .Values.global.datahub.version "image" .Values.datahubUpgrade.image) }}
+              imagePullPolicy: {{ .Values.datahubUpgrade.image.pullPolicy | default "IfNotPresent" }}
+              {{- if .Values.datahubUpgrade.restoreIndices.image.command }}
+              command: {{ .Values.datahubUpgrade.restoreIndices.image.command | toRawJson }}
+              {{- end }}
+              {{- if .Values.datahubUpgrade.restoreIndices.image.args }}
+              args: {{ .Values.datahubUpgrade.restoreIndices.image.args | toRawJson }}
+              {{- else }}
+              args:
+                - "-u"
+                - "RestoreIndices"
+                - "-a"
+                - "batchSize={{ .Values.datahubUpgrade.batchSize }}"
+                - "-a"
+                - "batchDelayMs={{ .Values.datahubUpgrade.batchDelayMs }}"
+                {{- if .Values.datahubUpgrade.restoreIndices.args.lePitEpochMs }}
+                - "-a"
+                - "lePitEpochMs={{ .Values.datahubUpgrade.restoreIndices.args.lePitEpochMs }}"
+                {{- end}}
+                {{- if .Values.datahubUpgrade.restoreIndices.args.gePitEpochMs }}
+                - "-a"
+                - "gePitEpochMs={{ .Values.datahubUpgrade.restoreIndices.args.gePitEpochMs }}"
+                {{- end}}
+                {{- if .Values.datahubUpgrade.restoreIndices.args.lastUrn }}
+                - "-a"
+                - "lastUrn={{ .Values.datahubUpgrade.restoreIndices.args.lastUrn }}"
+                {{- end}}
+                {{- if .Values.datahubUpgrade.restoreIndices.args.lastAspect}}
+                - "-a"
+                - "lastAspect={{ .Values.datahubUpgrade.restoreIndices.args.lastAspect }}"
+                {{- end}}
+                {{- if .Values.datahubUpgrade.restoreIndices.args.urnBasedPagination}}
+                - "-a"
+                - "urnBasedPagination={{ .Values.datahubUpgrade.restoreIndices.args.urnBasedPagination }}"
+                {{- end}}
+                {{- if .Values.datahubUpgrade.restoreIndices.args.aspectNames}}
+                - "-a"
+                - "aspectNames={{ .Values.datahubUpgrade.restoreIndices.args.aspectNames }}"
+                {{- end}}
+                {{- if .Values.datahubUpgrade.restoreIndices.args.urnLike}}
+                - "-a"
+                - "urnLike={{ .Values.datahubUpgrade.restoreIndices.args.urnLike }}"
+                {{- end}}
+                {{- if .Values.datahubUpgrade.restoreIndices.args.startingOffset}}
+                - "-a"
+                - "startingOffset={{ .Values.datahubUpgrade.restoreIndices.args.startingOffset }}"
+                {{- end}}
+                {{- if .Values.datahubUpgrade.restoreIndices.args.numThreads}}
+                - "-a"
+                - "numThreads={{ .Values.datahubUpgrade.restoreIndices.args.numThreads }}"
+                {{- end}}
+              {{- end }}
+              env:
+                {{- include "datahub.upgrade.env" . | nindent 16 }}
+                {{- include "datahub.upgrade.auth.env" . | nindent 16 }}
+              {{- with .Values.datahubUpgrade.extraEnvs }}
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              securityContext:
+                {{- toYaml .Values.datahubUpgrade.securityContext | nindent 16 }}
+              volumeMounts:
+              {{- with .Values.global.credentialsAndCertsSecrets }}
+                - name: datahub-certs-dir
+                  mountPath: {{ .path | default "/mnt/certs" }}
+              {{- end }}
+              {{- with .Values.datahubUpgrade.extraVolumeMounts }}
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              resources:
+                {{- toYaml .Values.datahubUpgrade.restoreIndices.resources | nindent 16 }}
+            {{- with .Values.datahubUpgrade.restoreIndices.extraSidecars }}
+              {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with default .Values.global.nodeSelector .Values.datahubUpgrade.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.datahubUpgrade.affinity }}
+          affinity:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with default .Values.global.tolerations .Values.datahubUpgrade.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end -}}
