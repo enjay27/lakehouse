@@ -26,8 +26,10 @@
       from `.env` (the database host, the policy endpoint, and the console's origin, allowed
       by CORS only while the console is enabled), waited on until rolled out. Its pods write
       their log files to the claim.
-   f. Datahub's network policies (ADR-048 §4, ADR-066 §4): charts/datahub-network-policies,
-      default deny in its namespace, datahub-pg open to its clients and the operator.
+   f. Datahub's network policies (ADR-048 §4, ADR-066 §4, ADR-071 §5):
+      charts/datahub-network-policies, default deny in its namespace, each store and GMS open
+      to their labelled clients, datahub-pg to the operator, GMS to the emitters' namespaces and
+      the frontend to the ingress controller's, from `.env`.
    g. Datahub's PostgreSQL: the `Cluster` datahub-pg from charts/datahub-postgres (ADR-066),
       asynchronous, waited on as polaris-pg is. Its backups go to `DATAHUB_BACKUP_BUCKET` on
       `S3_ENDPOINT` with the key in `datahub-backup-s3`.
@@ -35,7 +37,12 @@
       KRaft broker, waited on until rolled out and ready.
    i. Datahub's OpenSearch: the StatefulSet datahub-opensearch from upstream's chart in
       charts/datahub-opensearch with its values-lakehouse.yaml (ADR-070), one node, waited on
-      until rolled out and ready. Datahub itself follows here when its chart enters (ADR-025).
+      until rolled out and ready.
+   j. Datahub (ADR-071 §7): its four Secrets from init-env read for their key names, then
+      upstream's chart in charts/datahub with its values-lakehouse.yaml, through helm's --wait:
+      the blocking system-update Job completes before GMS and the frontend start, both are
+      ready, and the non-blocking Job completes. An empty DATAHUB_EMITTER_NAMESPACE_LABEL is
+      said, not a problem.
 2. After every service of step 1 (ADR-029, ADR-037):
    a. The log batch (ADR-036): charts/polaris-log-batch with the image built from this
       checkout (batch_image), pulled from `IMAGE_REGISTRY` or, when it is empty, the GitHub
@@ -95,6 +102,10 @@ DATAHUB_PG_CLIENT_LABEL = "lakehouse/datahub-pg-client"
 DATAHUB_KAFKA_CLIENT_LABEL = "lakehouse/datahub-kafka-client"
 DATAHUB_OPENSEARCH_CLIENT_LABEL = "lakehouse/datahub-opensearch-client"
 DATAHUB_GMS_CLIENT_LABEL = "lakehouse/datahub-gms-client"
+# Datahub's caller classes in other teams' namespaces (ADR-071 §5): the ingress controller's,
+# shared with Polaris, and the lineage emitters'.
+DATAHUB_CALLER_VARS = {"ingress": "INGRESS_NAMESPACE_LABEL",
+                       "emitter": "DATAHUB_EMITTER_NAMESPACE_LABEL"}
 # Polaris's pods, by the labels upstream's chart sets with release name POLARIS.
 POLARIS_POD_SELECTOR = "app.kubernetes.io/name=polaris,app.kubernetes.io/instance=polaris"
 # One namespace label per caller class in other teams' namespaces (ADR-048 §2).
@@ -126,6 +137,15 @@ DATAHUB_OPENSEARCH = "datahub-opensearch"
 DATAHUB_OPENSEARCH_RELEASE = "datahub-opensearch"
 DATAHUB_OPENSEARCH_CHART = os.path.join(ROOT, "charts", DATAHUB_OPENSEARCH_RELEASE)
 DATAHUB_OPENSEARCH_VALUES = os.path.join(DATAHUB_OPENSEARCH_CHART, "values-lakehouse.yaml")
+DATAHUB_RELEASE = "datahub"
+DATAHUB_CHART = os.path.join(ROOT, "charts", DATAHUB_RELEASE)
+DATAHUB_VALUES = os.path.join(DATAHUB_CHART, "values-lakehouse.yaml")
+# The Secrets init-env creates for Datahub's chart, its own turned off (ADR-071 §6).
+DATAHUB_SECRETS = ("datahub-auth-secrets", "datahub-encryption-secrets",
+                   "datahub-frontend-secret", "datahub-root-user")
+# helm's limit for each hook Job and for the wait: the three images are pulled first, and GMS's
+# readiness probe starts at 120 s.
+DATAHUB_TIMEOUT = "1200s"
 # Step 1 reads the Secrets it needs for their key names only, one line per Secret, never a value.
 SECRET_KEYS_TEMPLATE = ('go-template={{range .items}}{{.metadata.name}}:'
                         '{{range $key, $value := .data}} {{$key}}{{end}}{{println}}{{end}}')
@@ -403,16 +423,18 @@ def datahub_postgres(env, run, dry_run=False):
 
 
 def datahub_network_policies(env, run, dry_run=False):
-    """Step 1, Datahub's part, first: its network policies (ADR-048 §4, ADR-066 §4), in
-    NS_CATALOG_DATAHUB, admitting the operator's namespace to datahub-pg. Returns (problems,
+    """Step 1, Datahub's part, first: its network policies (ADR-048 §4, ADR-066 §4, ADR-071 §5),
+    in NS_CATALOG_DATAHUB, admitting the operator's namespace to datahub-pg, and the ingress
+    controller's and the emitters' namespaces by their labels in `.env`. Returns (problems,
     notes)."""
-    problems = [f"{var} is empty: Datahub's network policies need it in .env (ADR-066)"
-                for var in ("NS_CATALOG_DATAHUB", "NS_CNPG_SYSTEM") if not env.get(var)]
+    callers, problems, empty = caller_labels(env, DATAHUB_CALLER_VARS)
+    problems += [f"{var} is empty: Datahub's network policies need it in .env (ADR-066)"
+                 for var in ("NS_CATALOG_DATAHUB", "NS_CNPG_SYSTEM") if not env.get(var)]
     if problems:
         return problems, []
     namespace, context = env["NS_CATALOG_DATAHUB"], env["KUBE_CONTEXT"]
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
-        json.dump({"namespaces": {"operator": env["NS_CNPG_SYSTEM"]}}, f)
+        json.dump({"callers": callers, "namespaces": {"operator": env["NS_CNPG_SYSTEM"]}}, f)
     try:
         helm = ["helm", "--kube-context", context, "-n", namespace, "upgrade", "--install",
                 DATAHUB_NETPOL_RELEASE, DATAHUB_NETPOL_CHART, "-f", f.name]
@@ -423,7 +445,10 @@ def datahub_network_policies(env, run, dry_run=False):
         return [f"helm upgrade {DATAHUB_NETPOL_RELEASE} in {namespace} failed: "
                 f"{out.strip()}"], []
     done = "server-side dry-run passed" if dry_run else "installed"
-    return [], [f"Step 1: Datahub's network policies in {namespace}, {done} (ADR-048, ADR-066)."]
+    refused = (f"; no namespace label in {', '.join(empty)}, so those callers are refused"
+               if empty else "")
+    return [], [f"Step 1: Datahub's network policies in {namespace}, {done}{refused} (ADR-048, "
+                "ADR-066, ADR-071)."]
 
 
 def datahub_kafka(env, run, dry_run=False):
@@ -474,6 +499,49 @@ def datahub_opensearch(env, run, dry_run=False):
                 f"{out.strip()}"], []
     return [], [f"Step 1: StatefulSet {DATAHUB_OPENSEARCH} in {namespace} is rolled out and "
                 "ready (ADR-070)."]
+
+
+def datahub(env, run, dry_run=False):
+    """Step 1, Datahub itself, after datahub-opensearch (ADR-071 §7): stops unless init-env's
+    four Secrets exist with their keys, read by name only; says so when the emitters' label is
+    empty; then upstream's chart with our values, nothing from `.env` but the namespace, and
+    helm's --wait, under which the hooks run in order. Returns (problems, notes)."""
+    namespace = env.get("NS_CATALOG_DATAHUB", "")
+    if not namespace:
+        return ["NS_CATALOG_DATAHUB is empty: set Datahub's namespace in .env (ADR-007)"], []
+    context = env["KUBE_CONTEXT"]
+    code, out = run(["kubectl", "--context", context, "-n", namespace, "get", "secret",
+                     *DATAHUB_SECRETS, "-o", SECRET_KEYS_TEMPLATE])
+    if code != 0:
+        return [f"Secrets {', '.join(DATAHUB_SECRETS)} must exist in {namespace}: run "
+                "scripts/init_env.py --apply-secrets first (ADR-006, ADR-071)"], []
+    found = {name.strip(): set(rest.split())
+             for name, _, rest in (line.partition(":") for line in out.splitlines()) if name}
+    problems = []
+    for secret in SECRETS:
+        if secret.name not in DATAHUB_SECRETS:
+            continue
+        lacking = sorted({*secret.from_env, *secret.fixed} - found.get(secret.name, set()))
+        if lacking:
+            problems.append(f"Secret {secret.name} in {namespace} lacks {', '.join(lacking)}: "
+                            "run scripts/init_env.py --apply-secrets with this release first "
+                            "(ADR-071)")
+    if problems:
+        return problems, []
+    helm = ["helm", "--kube-context", context, "-n", namespace, "upgrade", "--install",
+            DATAHUB_RELEASE, DATAHUB_CHART, "-f", DATAHUB_VALUES]
+    code, out = run(helm + (["--dry-run=server"] if dry_run
+                            else ["--wait", f"--timeout={DATAHUB_TIMEOUT}"]))
+    if code != 0:
+        return [f"helm upgrade {DATAHUB_RELEASE} in {namespace} failed: {out.strip()}"], []
+    emitters = ("" if env.get("DATAHUB_EMITTER_NAMESPACE_LABEL", "").strip() else
+                "; DATAHUB_EMITTER_NAMESPACE_LABEL is empty, so no lineage emitter's namespace "
+                "may reach GMS")
+    if dry_run:
+        return [], [f"Step 1: Datahub in {namespace}, server-side dry-run passed{emitters} "
+                    "(ADR-071)."]
+    return [], [f"Step 1: Datahub in {namespace} is installed: system-update's Jobs completed, "
+                f"GMS and the frontend ready{emitters} (ADR-071)."]
 
 
 def postgres(env, run, pg, dry_run=False):
@@ -852,6 +920,7 @@ def install(env, run, supported, dry_run):
                  lambda: datahub_postgres(env, run, dry_run),
                  lambda: datahub_kafka(env, run, dry_run),
                  lambda: datahub_opensearch(env, run, dry_run),
+                 lambda: datahub(env, run, dry_run),
                  lambda: log_batch(env, run, dry_run)):
         problems, more = step()
         notes += more
