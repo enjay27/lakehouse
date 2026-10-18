@@ -18,8 +18,8 @@ datahub-gms:
     # One node holds every index: no replica, so the indices go green (ADR-070).
     - name: ELASTICSEARCH_NUM_REPLICAS_PER_INDEX
       value: "0"
-    # Upstream passes the key only with managed ingestion on, which is off below; without it GMS
-    # encrypts with a built-in key (ADR-072 §2). The ingestion PR drops this entry.
+    # Upstream passes the key only with managed ingestion on, which stays off below; without it
+    # GMS encrypts with a built-in key (ADR-072 §2, ADR-076 §1).
     - name: SECRET_SERVICE_ENCRYPTION_KEY
       valueFrom:
         secretKeyRef:
@@ -46,9 +46,88 @@ datahub-frontend:
       subPath: user.props
       readOnly: true
 
-# Not until ingestion enters: its executor installs packages from PyPI at run time (ADR-071 §2).
+# Off: its executor installs packages from PyPI at run time (ADR-071 §2); ingestion runs from the
+# CronJob below (ADR-076 §1).
 acryl-datahub-actions:
   enabled: false
+
+# Ingestion of Polaris's catalogs (ADR-076 §1, §2): one CronJob, polaris, running one ingestion per
+# catalog of DATAHUB_INGEST_POLARIS_CATALOGS in turn. The install adds POLARIS_URI and that list to
+# `env`, and suspends the CronJob while the list is empty (install/release.py).
+datahub-ingestion-cron:
+  enabled: true
+  image:
+    # The full variant, the only one with the iceberg source. Docker Hub index digest, read
+    # 2026-10-19 (pushed 2026-09-03); it moves with Datahub's version (ADR-071 §1).
+    tag: "v1.7.0.1@sha256:8845102fd495f2589e1ffc00dbd85cee3cbb700abc20d62fac1929ce95535620"
+  crons:
+    polaris:
+      # Tuning values (ADR-076 §1): daily, in the controller's time zone; never two at once.
+      schedule: "0 3 * * *"
+      concurrencyPolicy: Forbid
+      restartPolicy: Never
+      backoffLimit: 1
+      successfulJobsHistoryLimit: 3
+      failedJobsHistoryLimit: 3
+      # Every catalog runs, each named in the log; the Job fails if any run failed. The install
+      # checks each name against ^[A-Za-z0-9_-]+$, so the list splits on commas alone. Upstream
+      # writes this value unquoted into `command: ["/bin/sh", "-c", ...]`, so it carries its own
+      # YAML single quotes, and the shell inside uses double quotes only; folded to one line.
+      command: >-
+        'status=0;
+        for catalog in $(echo "$DATAHUB_INGEST_POLARIS_CATALOGS" | tr "," " "); do
+        echo "catalog $catalog: ingesting";
+        if POLARIS_CATALOG="$catalog" datahub ingest -c /etc/recipe/polaris.yml;
+        then echo "catalog $catalog: passed";
+        else echo "catalog $catalog: failed"; status=1;
+        fi;
+        done;
+        exit $status'
+      env:
+        DATAHUB_SYSTEM_CLIENT_ID: __datahub_system
+      envFromSecrets:
+        POLARIS_CLIENT_ID:
+          secret: datahub-polaris-principal
+          key: clientId
+        POLARIS_CLIENT_SECRET:
+          secret: datahub-polaris-principal
+          key: clientSecret
+        # The sink authenticates as GMS's system client (ADR-076 §2).
+        DATAHUB_SYSTEM_CLIENT_SECRET:
+          secret: datahub-auth-secrets
+          key: system_client_secret
+      # No credential: the source expands each ${VAR} from the environment. No vended
+      # credentials, no profiling, so no S3; stateful ingestion removes what a catalog dropped,
+      # each catalog under its own pipeline.
+      recipe:
+        configmapName: datahub-ingestion-polaris-recipe
+        fileName: polaris.yml
+        fileContent:
+          source:
+            type: iceberg
+            config:
+              catalog:
+                polaris:
+                  type: rest
+                  uri: ${POLARIS_URI}
+                  oauth2-server-uri: ${POLARIS_URI}/v1/oauth/tokens
+                  credential: ${POLARIS_CLIENT_ID}:${POLARIS_CLIENT_SECRET}
+                  scope: PRINCIPAL_ROLE:ALL
+                  warehouse: ${POLARIS_CATALOG}
+                  header.Polaris-Realm: POLARIS
+                  header.X-Iceberg-Access-Delegation: ""
+              platform_instance: ${POLARIS_CATALOG}
+              env: PROD
+              profiling:
+                enabled: false
+              stateful_ingestion:
+                enabled: true
+                remove_stale_metadata: true
+          pipeline_name: polaris-${POLARIS_CATALOG}
+          sink:
+            type: datahub-rest
+            config:
+              server: http://datahub-datahub-gms:8080
 
 # The restore-indices CronJob template, suspended, from which a Job is created by hand
 # (ADR-071 §2).
@@ -108,7 +187,7 @@ global:
     useSSL: "false"
 
   datahub:
-    # Off while no executor runs (ADR-071 §2).
+    # Off: no executor runs (ADR-071 §2, ADR-076 §1).
     managed_ingestion:
       enabled: false
     # init-env's Secrets under upstream's names and keys, never the chart's own (ADR-071 §6).
