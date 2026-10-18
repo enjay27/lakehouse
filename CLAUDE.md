@@ -34,8 +34,8 @@ storage, observability, SSO and the catalog gateway are other teams' services, r
 | `charts/`, `images/` | Local charts: `polaris-postgres` with its backups (ADR-010, ADR-043); `polaris-network-policies`, ingress to Polaris's namespace (ADR-048, ADR-046); `datahub-postgres` and `datahub-network-policies`, Datahub's copies (ADR-066); `datahub-kafka`, one KRaft broker (ADR-068, ADR-069); `polaris`, upstream's 1.6.0, `polaris-console`, polaris-tools at a pinned commit, and `datahub-opensearch`, upstream's opensearch 2.38.0, each unchanged with our `values-lakehouse.yaml` (ADR-009, ADR-028, ADR-070); `datahub`, upstream's datahub 1.1.7 archive but one patched line, with ours (ADR-071, ADR-072); `images/polaris-console` builds the console on the gate from that commit with our lockfile; `polaris-log-batch` and `images/polaris-log-batch`, the log batch's CronJob and image, its contract in `docs/contracts/` (ADR-036); tests render each chart, check its values schema, run kubeconform on CNPG's CRD and each kind's pinned schema (ADR-016) |
 | `install/` | `release.py` installs a release in ADR-045's order (step 0 the CNPG and plugin preconditions; step 1 Polaris's network policies, its PostgreSQL, the S3 and policy endpoints answering, the realm bootstrap, Polaris, then Datahub's network policies, PostgreSQL (ADR-066), Kafka (ADR-068), OpenSearch (ADR-070) and Datahub (ADR-071); step 2 the log batch, whose failure stops the install (ADR-037), then the console when enabled, never blocking); `release_tag.py` names tags, reads the release gate, writes notes (ADR-033) |
 | `scripts/init_env.py` | init-env: `.env` with credentials per clone; `--apply-secrets` (ADR-006) |
-| `.github/workflows/` | `static.yml`, `gate-check.yml` (ADR-039), `dry-run.yml`, `smoke.yml` (ADR-050), `log-batch.yml`, `create-fixtures.yml` (ADR-040), `failover.yml` (ADR-047), `auto-merge.yml` (ADR-022), `branch-cleanup.yml` (ADR-032), `delete-gate-branch.yml` (ADR-049), `main-status.yml` (ADR-055), `stress.yml` by hand only (ADR-054), `release-gate.yml`, `release.yml` (ADR-033, ADR-042), `labels.yml` |
-| `.github/labels.json` | The state labels, synced by `labels.yml` (ADR-003) |
+| `.github/workflows/` | `static.yml`, `gate-check.yml` (ADR-039), `dry-run.yml`, `smoke.yml` (ADR-050), `log-batch.yml`, `create-fixtures.yml` (ADR-040), `failover.yml` (ADR-047), `auto-merge.yml` (ADR-022), `branch-cleanup.yml` (ADR-032), `delete-gate-branch.yml` (ADR-049), `main-status.yml` (ADR-055), `stress.yml` by hand only (ADR-054), `release-gate.yml`, `release.yml` (ADR-033, ADR-042), `labels.yml`; `project-sync.yml`, `project-snapshot.yml` running `scripts/project_bridge.py` (ADR-073) |
+| `.github/labels.json` | The `cmd:` request labels, one per bridge command, synced by `labels.yml` (ADR-073) |
 | `.env.template` | Every per-environment variable, credentials empty (ADR-002) |
 
 ## Gates
@@ -46,7 +46,7 @@ storage, observability, SSO and the catalog gateway are other teams' services, r
 | `docs/adr/`, living documents | `python3 scripts/adr_check.py` |
 | Everything tracked | `python3 scripts/repo_check.py`; `git diff --check $(git hash-object -t tree /dev/null) HEAD` |
 | `CLAUDE.md`, `.claude/` | `python3 scripts/claude_md_check.py` |
-| `init_env.py --apply-secrets` | Needs a Linux test cluster: label the issue `cmd:verify-needs-linux` |
+| `init_env.py --apply-secrets` | Needs a Linux test cluster: `cmd:verify-needs-linux` on the issue (Verification: Needs Linux test cluster) |
 
 CI runs these as the **static** gate on every push to `claude/**` and every PR (ADR-050), and on `main` after Claude's merges and weekly; a red run of static or smoke there opens `main is red` (ADR-055). **gate-check**
 (ADR-039, every PR into `main`): `charts/`, `images/`, `install/`, `gates/` or the gate workflows need
@@ -73,13 +73,13 @@ unread by gate-check (ADR-050 §3). How to push each head to `gate/<level>/<task
   Kubernetes Secrets, the only way credentials reach charts.
 - A credential that reaches a commit is rotated; pushed history is never rewritten.
 
-## State (ADR-003)
+## State (ADR-003, ADR-073)
 
-- Work, open questions and unverified items are issues in this repository, read over the
-  REST API. No `MEMORY.md`, no session or handoff files.
-- Labels: `cmd:status-now` (in progress), `cmd:verify-not-verified` (a check could not run),
-  `cmd:verify-needs-linux` (needs a Linux test cluster). A decision that is Kade's: the issue
-  is assigned to him, no label.
+- Work, open questions and unverified items are issues here; their state is the Project
+  "Lakehouse" (`kade-k8s-platform`): `STATUS.md` on the `status` branch (`project-snapshot.yml`
+  refreshes it), or the Project with `gh` locally. No `MEMORY.md`, no session or handoff files.
+- `cmd:` labels are requests (`.github/labels.json`): the bridge sets the field, then removes
+  the label. A decision that is Kade's: the issue is assigned to him, no label.
 - The PR is the session record: *What changed and why*, *Verified*, *NOT VERIFIED*, *Wrong
   turns*, and `Closes #N`.
 

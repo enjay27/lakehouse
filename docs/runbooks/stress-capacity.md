@@ -268,8 +268,8 @@ In a PR, from a branch of the measured commit:
 - **`docs/measurements/stress-capacity-<date>.json`** beside it: `OUT/summary.json`.
 - **`docs/measurements/stress-capacity-<date>-timeline.json`**: `OUT/timeline.json`.
 
-Close the run's issue (labelled `cmd:verify-needs-linux`) from that PR. A later run is a new
-file (ADR-003).
+Close the run's issue (Verification: Needs Linux test cluster, ADR-073) from that PR, and set
+it to Verified with `cmd:verify-verified`. A later run is a new file (ADR-003).
 
 ## Afterwards
 
