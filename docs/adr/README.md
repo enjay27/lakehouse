@@ -116,7 +116,8 @@ flowchart LR
 | [065](065-the-stress-test-runs-with-k6-only-when-kade-starts-it-tier-a-on-the-gate-tier-d-measures-one-polaris-on-a-linux-test-server.md) | The stress test runs with k6 only when Kade starts it: Tier A on the gate, Tier D measures one Polaris on a Linux test server | Proposed |
 | [066](066-datahubs-postgresql-is-a-chart-of-its-own-with-three-asynchronous-instances-backing-up-to-its-own-bucket-with-its-own-key.md) | Datahub's PostgreSQL is a chart of its own, with three asynchronous instances, backing up to its own bucket with its own key | Accepted |
 | [067](067-datahubs-namespace-reaches-the-gates-s3-stand-in-on-its-s3-port-only.md) | Datahub's namespace reaches the gate's S3 stand-in on its S3 port only | Accepted |
-| [068](068-datahubs-kafka-is-one-plaintext-kraft-broker-in-a-chart-of-its-own-reached-only-by-datahubs-labelled-pods.md) | Datahub's Kafka is one plaintext KRaft broker in a chart of its own, reached only by Datahub's labelled pods | Accepted |
+| [068](068-datahubs-kafka-is-one-plaintext-kraft-broker-in-a-chart-of-its-own-reached-only-by-datahubs-labelled-pods.md) | Datahub's Kafka is one plaintext KRaft broker in a chart of its own, reached only by Datahub's labelled pods | Amended by ADR-069 |
+| [069](069-datahubs-kafka-names-its-controller-as-a-static-voter-as-the-apache-kafka-image-requires.md) | Datahub's Kafka names its controller as a static voter, as the apache/kafka image requires | Accepted |
 
 ## Not ADRs
 
