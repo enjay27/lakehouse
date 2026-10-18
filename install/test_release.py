@@ -1,11 +1,14 @@
 """Tests for release.py. Run: python3 -m unittest discover -s install"""
 
+import http.server
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+import urllib.parse
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -1010,6 +1013,8 @@ class Steps(unittest.TestCase):
                 return endpoints(argv, stdin)
             if "storageclass" in argv or "apply" in argv:
                 return claim(argv, stdin)
+            if is_principal(argv):
+                return FakePrincipal()(argv, stdin)
             if "polaris-root" in argv or "run" in argv:
                 return boot(argv, stdin)
             if release.BATCH_CHART in argv or "cronjob/polaris-log-batch" in argv:
@@ -1024,7 +1029,7 @@ class Steps(unittest.TestCase):
                                           dry_run=False)
         self.assertEqual(problems, [])
         self.assertEqual([n.split(":")[0] for n in notes],
-                         ["Step 0"] * 2 + ["Step 1"] * 11 + ["Step 2"] * 2)
+                         ["Step 0"] * 2 + ["Step 1"] * 12 + ["Step 2"] * 2)
         self.assertIn("Barman Cloud Plugin", notes[1])
         self.assertIn("network policies", notes[2])
         self.assertIn("polaris-pg", notes[3])
@@ -1040,8 +1045,10 @@ class Steps(unittest.TestCase):
         self.assertIn("datahub-opensearch", notes[11])
         # ADR-071 §7: then Datahub itself.
         self.assertIn("Datahub in catalog-datahub is installed", notes[12])
-        self.assertIn("cronjob/polaris-log-batch", notes[13])
-        self.assertIn("console is not enabled", notes[14])
+        # ADR-076 §3: then its Polaris principal, last in step 1.
+        self.assertIn("principal datahub_ingest", notes[13])
+        self.assertIn("cronjob/polaris-log-batch", notes[14])
+        self.assertIn("console is not enabled", notes[15])
         # ADR-045 §2: the policies first in step 1, before polaris-pg.
         helms = [c for c in pg.calls if c[0] == "helm"]
         self.assertEqual([h[h.index("--install") + 1] for h in helms],
@@ -1077,6 +1084,8 @@ class Steps(unittest.TestCase):
                 return endpoints(argv, stdin)
             if "storageclass" in argv or "apply" in argv:
                 return claim(argv, stdin)
+            if is_principal(argv):
+                return FakePrincipal()(argv, stdin)
             if "polaris-root" in argv or "run" in argv:
                 return boot(argv, stdin)
             if release.BATCH_CHART in argv or "cronjob/polaris-log-batch" in argv:
@@ -1108,6 +1117,8 @@ class Steps(unittest.TestCase):
                 return endpoints(argv, stdin)
             if "storageclass" in argv or "apply" in argv:
                 return claim(argv, stdin)
+            if is_principal(argv):
+                return FakePrincipal()(argv, stdin)
             if "polaris-root" in argv or "run" in argv:
                 return boot(argv, stdin)
             if release.BATCH_CHART in argv or "cronjob/polaris-log-batch" in argv:
@@ -1138,6 +1149,8 @@ class Steps(unittest.TestCase):
                 return endpoints(argv, stdin)
             if "storageclass" in argv or "apply" in argv:
                 return claim(argv, stdin)
+            if is_principal(argv):
+                return FakePrincipal()(argv, stdin)
             if "polaris-root" in argv or "run" in argv:
                 return boot(argv, stdin)
             if release.BATCH_CHART in argv or "cronjob/polaris-log-batch" in argv:
@@ -1166,6 +1179,8 @@ class Steps(unittest.TestCase):
                 return endpoints(argv, stdin)
             if "storageclass" in argv or "apply" in argv:
                 return claim(argv, stdin)
+            if is_principal(argv):
+                return FakePrincipal()(argv, stdin)
             if "polaris-root" in argv or "run" in argv:
                 return boot(argv, stdin)
             if "polaris-s3" in argv or "rollout" in argv or release.POLARIS_CHART in argv:
@@ -1188,6 +1203,8 @@ class Steps(unittest.TestCase):
                 return endpoints(argv, stdin)
             if "storageclass" in argv or "apply" in argv:
                 return claim(argv, stdin)
+            if is_principal(argv):
+                return FakePrincipal()(argv, stdin)
             if "polaris-root" in argv or "run" in argv:
                 return boot(argv, stdin)
             if release.BATCH_CHART in argv or "cronjob/polaris-log-batch" in argv:
@@ -1218,6 +1235,8 @@ class Steps(unittest.TestCase):
                 return endpoints(argv, stdin)
             if "storageclass" in argv or "apply" in argv:
                 return claim(argv, stdin)
+            if is_principal(argv):
+                return FakePrincipal()(argv, stdin)
             if "polaris-root" in argv or "run" in argv:
                 return boot(argv, stdin)
             if "polaris-s3" in argv or "rollout" in argv or release.POLARIS_CHART in argv:
@@ -1534,6 +1553,236 @@ class BootstrapWrapper(unittest.TestCase):
                                     input="\n", capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 3)
         self.assertEqual((result.stdout, result.stderr), ("", "args: bootstrap -r R\n"))
+
+
+PRINCIPAL_ENV = {**BOOTSTRAP_ENV, "DATAHUB_POLARIS_CLIENT_ID": "ingestid012345678",
+                 "DATAHUB_POLARIS_CLIENT_SECRET": "IngestSecretValue0123456789abcde"}
+INGESTION = "docker.io/acryldata/datahub-ingestion:v1.7.0.1@sha256:" + "d" * 64
+
+
+def is_principal(argv):
+    """The principal step's calls (ADR-076 §3), as the install's routers tell them apart."""
+    return release.DATAHUB_PRINCIPAL_SECRET in argv or "datahub-principal-" in " ".join(argv)
+
+
+class FakePrincipal:
+    """Answers the principal step's Secret read and its `kubectl run`; records every call."""
+
+    def __init__(self, keys="clientId clientSecret", answer=(0, "ok   done\n")):
+        self.keys, self.answer, self.calls, self.stdin = keys, answer, [], None
+
+    def __call__(self, argv, stdin=None):
+        self.calls.append(argv)
+        if "secret" in argv:
+            return (1, "NotFound") if self.keys is None else (0, self.keys)
+        if "run" in argv:
+            self.stdin = stdin
+            return self.answer
+        raise AssertionError(f"unexpected call {argv}")
+
+
+class DatahubPrincipal(unittest.TestCase):
+    """ADR-076 §3: step 1's last part, after Datahub: datahub_ingest created by root and given
+    init-env's credential, from a pod in Datahub's namespace."""
+
+    def step(self, calls, env=PRINCIPAL_ENV, dry_run=False):
+        return release.datahub_principal(env, calls, image=INGESTION,
+                                         name="datahub-principal-test", dry_run=dry_run)
+
+    def run_call(self, calls):
+        (argv,) = [c for c in calls.calls if "run" in c]
+        return argv
+
+    def test_the_name_and_the_secret(self):
+        self.assertEqual(release.DATAHUB_PRINCIPAL, "datahub_ingest")
+        self.assertEqual(release.DATAHUB_PRINCIPAL_SECRET, "datahub-polaris-principal")
+
+    def test_the_image_is_the_ingestion_cronjobs_from_the_values_file(self):
+        image = release.ingestion_image()
+        self.assertRegex(image, r"^docker\.io/acryldata/datahub-ingestion:v1\.7\.0\.1"
+                                r"@sha256:[0-9a-f]{64}$")
+        with open(release.DATAHUB_VALUES, encoding="utf-8") as f:
+            self.assertIn(image.split(":", 1)[1], f.read())
+
+    def test_reads_the_secrets_key_names_then_runs_one_pod_in_datahubs_namespace(self):
+        calls = FakePrincipal()
+        problems, notes = self.step(calls)
+        self.assertEqual(problems, [])
+        get, argv = calls.calls
+        self.assertEqual(get, ["kubectl", "--context", "kind-lakehouse-gate", "-n",
+                               "catalog-datahub", "get", "secret", "datahub-polaris-principal",
+                               "-o", release.SECRET_ONE_KEYS_TEMPLATE])
+        self.assertEqual(argv[:7], ["kubectl", "--context", "kind-lakehouse-gate", "-n",
+                                    "catalog-datahub", "run", "datahub-principal-test"])
+        for flag in ("--rm", "-i", "--restart=Never", f"--image={INGESTION}",
+                     "--override-type=strategic"):
+            self.assertIn(flag, argv)
+        tail = argv[argv.index("--command") + 1:]
+        self.assertEqual(tail[:3], ["--", "python3", "-c"])
+        self.assertEqual(tail[3], release.PRINCIPAL_SCRIPT)
+        self.assertEqual(tail[4:], ["http://polaris.catalog-polaris.svc.cluster.local:8181",
+                                    "POLARIS", "datahub_ingest"])
+        self.assertEqual(notes, [
+            "Step 1: Polaris principal datahub_ingest has datahub-polaris-principal's "
+            "credential and gets a token with it (ADR-076)."])
+
+    def test_the_pod_mounts_the_secret_and_gets_roots_credential_on_stdin(self):
+        calls = FakePrincipal()
+        self.step(calls)
+        argv = self.run_call(calls)
+        flag = next(a for a in argv if a.startswith("--overrides="))
+        (container,) = json.loads(flag.split("=", 1)[1])["spec"]["containers"]
+        self.assertEqual((container["name"], container["image"], container["stdin"],
+                          container["stdinOnce"]), ("datahub-principal-test", INGESTION, True,
+                                                    True))
+        env = {e["name"]: e["valueFrom"]["secretKeyRef"] for e in container["env"]}
+        self.assertEqual(env, {
+            "CLIENT_ID": {"name": "datahub-polaris-principal", "key": "clientId"},
+            "CLIENT_SECRET": {"name": "datahub-polaris-principal", "key": "clientSecret"}})
+        self.assertEqual(calls.stdin, "rootid0123456789\nRootSecretValue0123456789abcdefg\n")
+        text = " ".join(argv)
+        for var in ("POLARIS_ROOT_CLIENT_ID", "POLARIS_ROOT_CLIENT_SECRET",
+                    "DATAHUB_POLARIS_CLIENT_ID", "DATAHUB_POLARIS_CLIENT_SECRET"):
+            self.assertNotIn(PRINCIPAL_ENV[var], text)
+
+    def test_a_missing_secret_or_key_stops_before_the_pod(self):
+        for keys, lacking in ((None, None), ("clientId", "clientSecret")):
+            with self.subTest(keys=keys):
+                calls = FakePrincipal(keys=keys)
+                problems, _ = self.step(calls)
+                if lacking:
+                    self.assertEqual(problems, [
+                        "Secret datahub-polaris-principal in catalog-datahub lacks clientSecret: "
+                        "run scripts/init_env.py --apply-secrets with this release first "
+                        "(ADR-076)"])
+                else:
+                    self.assertEqual(problems, [
+                        "Secret datahub-polaris-principal must exist in catalog-datahub: run "
+                        "scripts/init_env.py --apply-secrets first (ADR-006, ADR-076)"])
+                self.assertEqual([c for c in calls.calls if "run" in c], [])
+
+    def test_a_failed_pod_stops_the_install_with_its_lines_masked(self):
+        said = ("ok   a token as root\nFAIL resetting datahub_ingest's credentials: HTTP 403, "
+                "ingestid012345678 refused\n")
+        problems, _ = self.step(FakePrincipal(answer=(1, said)))
+        self.assertEqual(problems, [
+            "Polaris principal datahub_ingest in catalog-datahub was not set (exit 1):\n"
+            "ok   a token as root\nFAIL resetting datahub_ingest's credentials: HTTP 403, "
+            "<redacted> refused"])
+
+    def test_dry_run_makes_no_call_and_says_so(self):
+        calls = FakePrincipal()
+        problems, notes = self.step(calls, dry_run=True)
+        self.assertEqual((problems, calls.calls), ([], []))
+        self.assertEqual(notes, ["Step 1: Polaris principal datahub_ingest is not set in a "
+                                 "dry-run (ADR-076)."])
+
+
+class FakePolarisApi(http.server.BaseHTTPRequestHandler):
+    """Polaris's token and principal endpoints, as PRINCIPAL_SCRIPT calls them."""
+
+    credentials = {}
+    existing = set()
+    requests = []
+    reset_status = 200
+
+    def log_message(self, *args):
+        pass
+
+    def answer(self, status, body=None):
+        raw = json.dumps(body or {}).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length).decode()
+        cls = type(self)
+        cls.requests.append((self.path, self.headers.get("Polaris-Realm"),
+                             self.headers.get("Authorization")))
+        if self.path == "/api/catalog/v1/oauth/tokens":
+            form = urllib.parse.parse_qs(raw)
+            cid, secret = form["client_id"][0], form["client_secret"][0]
+            if cls.credentials.get(cid) != secret or form["scope"] != ["PRINCIPAL_ROLE:ALL"]:
+                return self.answer(401, {"error": "unauthorized_client"})
+            return self.answer(200, {"access_token": f"token-{cid}"})
+        body = json.loads(raw)
+        if self.path == "/api/management/v1/principals":
+            name = body["principal"]["name"]
+            if name in cls.existing:
+                return self.answer(409, {"error": {"message": "already exists"}})
+            cls.existing.add(name)
+            return self.answer(201, {"credentials": {"clientId": "x", "clientSecret": "y"}})
+        if self.path.startswith("/api/management/v1/principals/") and self.path.endswith(
+                "/reset"):
+            if cls.reset_status != 200:
+                return self.answer(cls.reset_status, {"error": {"message": "refused"}})
+            cls.credentials[body["clientId"]] = body["clientSecret"]
+            return self.answer(200, {})
+        return self.answer(404)
+
+
+class PrincipalScript(unittest.TestCase):
+    """PRINCIPAL_SCRIPT run here against a stand-in Polaris (ADR-076 §3)."""
+
+    def setUp(self):
+        FakePolarisApi.credentials = {"rootid": "rootsecret"}
+        FakePolarisApi.existing = set()
+        FakePolarisApi.requests = []
+        FakePolarisApi.reset_status = 200
+        self.server = http.server.HTTPServer(("127.0.0.1", 0), FakePolarisApi)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.server.server_port}"
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+    def run_script(self, stdin="rootid\nrootsecret\n"):
+        return subprocess.run([sys.executable, "-c", release.PRINCIPAL_SCRIPT, self.url,
+                               "POLARIS", "datahub_ingest"], input=stdin, capture_output=True,
+                              text=True, check=False, timeout=60,
+                              env={**os.environ, "CLIENT_ID": "ingestid",
+                                   "CLIENT_SECRET": "ingestsecret"})
+
+    def test_creates_the_principal_sets_its_credential_and_gets_its_token(self):
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            "ok   a token as root",
+            "ok   principal datahub_ingest created",
+            "ok   datahub_ingest's credentials reset to datahub-polaris-principal's",
+            "ok   a token as datahub_ingest"])
+        self.assertEqual([r[0] for r in FakePolarisApi.requests], [
+            "/api/catalog/v1/oauth/tokens", "/api/management/v1/principals",
+            "/api/management/v1/principals/datahub_ingest/reset",
+            "/api/catalog/v1/oauth/tokens"])
+        self.assertTrue(all(r[1] == "POLARIS" for r in FakePolarisApi.requests))
+        self.assertEqual(FakePolarisApi.requests[1][2], "Bearer token-rootid")
+        for secret in ("rootsecret", "ingestsecret"):
+            self.assertNotIn(secret, result.stdout + result.stderr)
+
+    def test_a_principal_already_there_is_kept_and_reset(self):
+        FakePolarisApi.existing = {"datahub_ingest"}
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("ok   principal datahub_ingest already there", result.stdout)
+        self.assertIn("ok   a token as datahub_ingest", result.stdout)
+
+    def test_a_wrong_root_credential_fails_first(self):
+        result = self.run_script("rootid\nwrong\n")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout.splitlines(), ["FAIL a token as root: HTTP 401"])
+
+    def test_a_refused_reset_fails_with_polariss_message(self):
+        FakePolarisApi.reset_status = 403
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout.splitlines()[-1],
+                         "FAIL resetting datahub_ingest's credentials: HTTP 403, refused")
 
 
 class FakePolaris:

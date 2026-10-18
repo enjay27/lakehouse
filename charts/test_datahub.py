@@ -631,6 +631,11 @@ class InstallValues(unittest.TestCase):
                          secret("datahub-polaris-principal", "clientId"))
         self.assertIs(cron["spec"]["suspend"], False)
 
+    def test_the_principals_pod_runs_the_cronjobs_image(self):
+        # ADR-076 §3: the install's principal pod reads the image from the values file.
+        (c,) = pod_template(self.render("x"))["spec"]["containers"]
+        self.assertEqual(c["image"], gate.release.ingestion_image())
+
     def test_no_catalog_suspends_the_cronjob(self):
         self.assertIs(self.render("")["spec"]["suspend"], True)
 
