@@ -120,6 +120,7 @@ flowchart LR
 | [069](069-datahubs-kafka-names-its-controller-as-a-static-voter-as-the-apache-kafka-image-requires.md) | Datahub's Kafka names its controller as a static voter, as the apache/kafka image requires | Accepted |
 | [070](070-datahubs-opensearch-is-one-node-from-upstreams-chart-unchanged-with-its-security-plugin-off-reached-only-by-datahubs-labelled-pods.md) | Datahub's OpenSearch is one node from upstream's chart, unchanged, with its security plugin off, reached only by Datahub's labelled pods | Accepted |
 | [071](071-datahub-runs-from-upstreams-chart-unchanged-gms-with-its-consumers-the-frontend-and-system-update-on-its-three-stores-with-credentials-from-init-env.md) | Datahub runs from upstream's chart, unchanged: GMS with its consumers, the frontend and system-update on its three stores, with credentials from init-env | Accepted |
+| [072](072-datahubs-chart-gets-one-patched-line-so-gms-runs-by-digest-and-three-of-adr-071s-details-follow-the-chart-as-it-is.md) | Datahub's chart gets one patched line so GMS runs by digest, and three of ADR-071's details follow the chart as it is | Proposed |
 
 ## Not ADRs
 
