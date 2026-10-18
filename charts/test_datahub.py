@@ -2,8 +2,8 @@
 its release archive with the one line ADR-072 §1 patches, proven against the archive itself,
 fetched by the URL and sha256 pinned in gates/pins.json; every key of values-lakehouse.yaml found
 in upstream's values or read by its templates, since its values schema refuses no unknown key
-(ADR-072 §3); every value ADR-071 §1 to §6 and ADR-072 §1 and §2 set checked on the rendered
-output; and kubeconform against the schemas of the gate's Kubernetes version, pinned in
+(ADR-072 §3); every value ADR-071 §1 to §6, ADR-072 §1 and §2 and ADR-076 §1 and §2 set checked
+on the rendered output; and kubeconform against the schemas of the gate's Kubernetes version, pinned in
 gates/pins.json.
 
 Run: python3 -m unittest discover -s charts
@@ -49,7 +49,9 @@ SUBCHARTS = ("datahub-gms", "datahub-frontend", "datahub-mae-consumer", "datahub
              "datahub-ingestion-cron", "acryl-datahub-actions")
 # Values whose contents are a map of labels or a Kubernetes object the chart passes through as it
 # is: their keys are not upstream's, and kubeconform's strict schemas check the objects.
-PASS_THROUGH = {"global.podLabels"}
+# Upstream's ingestion CronJob reads each entry of `crons` through `range`, never as
+# `.Values.…`: CronEntry checks those keys against its templates instead.
+PASS_THROUGH = {"global.podLabels", "datahub-ingestion-cron.crons"}
 VALUES_RE = re.compile(r"\.Values((?:\.[A-Za-z_][A-Za-z0-9_]*)+)")
 # A map passed as `"image" .Values.…` to upstream's `datahub.image` helper, which reads these keys
 # of it (templates/_helpers.tpl).
@@ -57,6 +59,7 @@ IMAGE_ARG_RE = re.compile(r'"image" \.Values((?:\.[A-Za-z_][A-Za-z0-9_]*)+)')
 IMAGE_KEYS = ("registry", "repository", "tag")
 VERSION = "v1.7.0.1"
 IMAGES = {"gms": "docker.io/acryldata/datahub-gms",
+          "ingestion": "docker.io/acryldata/datahub-ingestion",
           "frontend": "docker.io/acryldata/datahub-frontend-react",
           "upgrade": "docker.io/acryldata/datahub-upgrade"}
 DIGEST_RE = re.compile(r"@sha256:[0-9a-f]{64}$")
@@ -70,10 +73,35 @@ FRONTEND = f"{RELEASE}-datahub-frontend"
 SYSTEM_UPDATE = f"{RELEASE}-system-update"
 SYSTEM_UPDATE_NONBLOCKING = f"{RELEASE}-system-update-nonblk"
 RESTORE_INDICES = f"{RELEASE}-datahub-restore-indices-job-template"
+# ADR-076 §1, §2: one CronJob, polaris, its recipe in a ConfigMap of the chart's.
+INGESTION = f"{RELEASE}-datahub-ingestion-cron-polaris"
+RECIPE_CONFIGMAP = "datahub-ingestion-polaris-recipe"
+RECIPE_FILE = "polaris.yml"
+CRON_TEMPLATES = ("charts/datahub-ingestion-cron/templates/cron.yaml",
+                  "charts/datahub-ingestion-cron/templates/configmap.yaml")
+RECIPE = {
+    "source": {"type": "iceberg", "config": {
+        "catalog": {"polaris": {
+            "type": "rest",
+            "uri": "${POLARIS_URI}",
+            "oauth2-server-uri": "${POLARIS_URI}/v1/oauth/tokens",
+            "credential": "${POLARIS_CLIENT_ID}:${POLARIS_CLIENT_SECRET}",
+            "scope": "PRINCIPAL_ROLE:ALL",
+            "warehouse": "${POLARIS_CATALOG}",
+            "header.Polaris-Realm": "POLARIS",
+            "header.X-Iceberg-Access-Delegation": ""}},
+        "platform_instance": "${POLARIS_CATALOG}",
+        "env": "PROD",
+        "profiling": {"enabled": False},
+        "stateful_ingestion": {"enabled": True, "remove_stale_metadata": True}}},
+    "pipeline_name": "polaris-${POLARIS_CATALOG}",
+    "sink": {"type": "datahub-rest", "config": {"server": f"http://{RELEASE}-datahub-gms:8080"}},
+}
 OPERATOR = "datahub-operator"
 # The images' user in upstream's security contexts.
 DATAHUB_USER = 1000
-KINDS = ("deployment", "service", "serviceaccount", "role", "rolebinding", "job", "cronjob")
+KINDS = ("deployment", "service", "serviceaccount", "role", "rolebinding", "job", "cronjob",
+         "configmap")
 
 ARCHIVE = None
 SCHEMAS = None
@@ -325,9 +353,11 @@ class Rendered(unittest.TestCase):
 
     def test_the_kinds_and_names(self):
         # ADR-071 §2: GMS, the frontend, system-update with its ServiceAccount and Role, and
-        # restore-indices; no Secret, no actions, no standalone consumers, no ingestion cron.
+        # restore-indices; no Secret, no actions, no standalone consumers. ADR-076 §1: the
+        # ingestion CronJob polaris and its recipe.
         self.assertEqual(sorted(self.named), [
-            ("CronJob", RESTORE_INDICES), ("Deployment", FRONTEND), ("Deployment", GMS),
+            ("ConfigMap", RECIPE_CONFIGMAP), ("CronJob", INGESTION), ("CronJob", RESTORE_INDICES),
+            ("Deployment", FRONTEND), ("Deployment", GMS),
             ("Job", SYSTEM_UPDATE), ("Job", SYSTEM_UPDATE_NONBLOCKING),
             ("Role", f"{OPERATOR}-role"), ("RoleBinding", f"{OPERATOR}-role-binding"),
             ("Service", FRONTEND), ("Service", GMS), ("ServiceAccount", "datahub-app-sa"),
@@ -393,7 +423,8 @@ class Rendered(unittest.TestCase):
     def test_every_container_runs_by_tag_and_digest(self):
         # ADR-071 §3.
         expected = {GMS: "gms", FRONTEND: "frontend", SYSTEM_UPDATE: "upgrade",
-                    SYSTEM_UPDATE_NONBLOCKING: "upgrade", RESTORE_INDICES: "upgrade"}
+                    SYSTEM_UPDATE_NONBLOCKING: "upgrade", RESTORE_INDICES: "upgrade",
+                    INGESTION: "ingestion"}
         self.assertEqual(sorted(self.pods), sorted(expected))
         for name, pod in self.pods.items():
             for c in containers(pod):
@@ -501,10 +532,146 @@ class Rendered(unittest.TestCase):
         self.assertTrue(mount["readOnly"])
         self.assertEqual(volumes[mount["name"]]["secret"]["secretName"], "datahub-root-user")
 
+    def test_the_ingestion_cronjob_runs_daily_one_run_at_a_time(self):
+        # ADR-076 §1: tuning values in the values file.
+        spec = self.named[("CronJob", INGESTION)]["spec"]
+        self.assertEqual((spec["schedule"], spec["concurrencyPolicy"],
+                          spec["successfulJobsHistoryLimit"], spec["failedJobsHistoryLimit"],
+                          spec["suspend"]), ("0 3 * * *", "Forbid", 3, 3, False))
+        job = spec["jobTemplate"]["spec"]
+        self.assertEqual(job["backoffLimit"], 1)
+        self.assertEqual(job["template"]["spec"]["restartPolicy"], "Never")
+
+    def test_the_recipe_is_the_adrs_with_no_credential(self):
+        # ADR-076 §2: every value that varies is a ${VAR}; no credential is in it.
+        configmap = self.named[("ConfigMap", RECIPE_CONFIGMAP)]
+        self.assertEqual(list(configmap["data"]), [RECIPE_FILE])
+        self.assertEqual(yaml.safe_load(configmap["data"][RECIPE_FILE]), RECIPE)
+        pod = self.pods[INGESTION]["spec"]
+        (c,) = pod["containers"]
+        (mount,) = c["volumeMounts"]
+        self.assertEqual(mount["mountPath"], "/etc/recipe")
+        volumes = {v["name"]: v for v in pod["volumes"]}
+        self.assertEqual(volumes[mount["name"]]["configMap"]["name"], RECIPE_CONFIGMAP)
+
+    def test_the_ingestion_environment(self):
+        # ADR-076 §2: datahub_ingest's credential and the system client's secret from
+        # init-env's Secrets; the system client's ID as a value. POLARIS_URI and the catalogs
+        # come from the install (install/release.py).
+        (c,) = self.pods[INGESTION]["spec"]["containers"]
+        self.assertEqual(env(c), {
+            "DATAHUB_SYSTEM_CLIENT_ID": "__datahub_system",
+            "POLARIS_CLIENT_ID": secret("datahub-polaris-principal", "clientId"),
+            "POLARIS_CLIENT_SECRET": secret("datahub-polaris-principal", "clientSecret"),
+            "DATAHUB_SYSTEM_CLIENT_SECRET": secret("datahub-auth-secrets",
+                                                   "system_client_secret")})
+
+    def test_the_ingestion_command_runs_every_catalog_and_fails_if_one_did(self):
+        # ADR-076 §2: one run per catalog, one after another, each named in the log; every
+        # catalog runs after a failure; the Job fails if any run failed.
+        (c,) = self.pods[INGESTION]["spec"]["containers"]
+        self.assertEqual(c["command"][:2], ["/bin/sh", "-c"])
+        recipe = "datahub ingest -c /etc/recipe/polaris.yml for"
+        with tempfile.TemporaryDirectory() as d:
+            stub = os.path.join(d, "datahub")
+            with open(stub, "w", encoding="utf-8") as f:
+                f.write('#!/bin/sh\necho "datahub $* for $POLARIS_CATALOG"\n'
+                        '[ "$POLARIS_CATALOG" != bad ]\n')
+            os.chmod(stub, 0o755)
+            path = d + os.pathsep + os.environ["PATH"]
+            for catalogs, status, lines in (
+                    ("one,bad,two", 1, ["catalog one: ingesting", f"{recipe} one",
+                                        "catalog one: passed", "catalog bad: ingesting",
+                                        f"{recipe} bad", "catalog bad: failed",
+                                        "catalog two: ingesting", f"{recipe} two",
+                                        "catalog two: passed"]),
+                    ("one", 0, ["catalog one: ingesting", f"{recipe} one",
+                                "catalog one: passed"])):
+                with self.subTest(catalogs=catalogs):
+                    done = subprocess.run(c["command"], capture_output=True, text=True,
+                                          check=False, env={
+                                              "PATH": path,
+                                              "DATAHUB_INGEST_POLARIS_CATALOGS": catalogs})
+                    self.assertEqual((done.returncode, done.stdout.splitlines()),
+                                     (status, lines), done.stderr)
+
     def test_kubeconform_accepts_the_rendered_chart(self):
         result = kubeconform(helm_template().stdout)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn(f"Valid: {len(self.docs)}", result.stdout)
+
+
+class InstallValues(unittest.TestCase):
+    """ADR-076 §2: the chart rendered with the values install/release.py adds."""
+
+    def render(self, catalogs):
+        env = {"NS_CATALOG_POLARIS": "catalog-polaris",
+               "DATAHUB_INGEST_POLARIS_CATALOGS": catalogs}
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "install.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(gate.release.datahub_values(env), f)
+            result = subprocess.run(["helm", "template", RELEASE, CHART, "--namespace",
+                                     NAMESPACE, "-f", VALUES, "-f", path],
+                                    capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        (cron,) = [d for d in yaml.safe_load_all(result.stdout)
+                   if d and d["kind"] == "CronJob" and d["metadata"]["name"] == INGESTION]
+        return cron
+
+    def test_the_install_adds_polaris_uri_and_the_catalogs_to_the_environment(self):
+        cron = self.render("gate_ingest_catalog")
+        (c,) = pod_template(cron)["spec"]["containers"]
+        variables = env(c)
+        self.assertEqual(variables["POLARIS_URI"],
+                         "http://polaris.catalog-polaris.svc.cluster.local:8181/api/catalog")
+        self.assertEqual(variables["DATAHUB_INGEST_POLARIS_CATALOGS"], "gate_ingest_catalog")
+        self.assertEqual(variables["DATAHUB_SYSTEM_CLIENT_ID"], "__datahub_system")
+        self.assertEqual(variables["POLARIS_CLIENT_ID"],
+                         secret("datahub-polaris-principal", "clientId"))
+        self.assertIs(cron["spec"]["suspend"], False)
+
+    def test_the_principals_pod_runs_the_cronjobs_image(self):
+        # ADR-076 §3: the install's principal pod reads the image from the values file.
+        (c,) = pod_template(self.render("x"))["spec"]["containers"]
+        self.assertEqual(c["image"], gate.release.ingestion_image())
+
+    def test_no_catalog_suspends_the_cronjob(self):
+        self.assertIs(self.render("")["spec"]["suspend"], True)
+
+
+class CronEntry(unittest.TestCase):
+    """Upstream's subchart reads each entry of `crons` inside `range`, as `$val.<key>` or
+    `.<key>`, and its recipe as `$val.recipe.<key>`: every key of ours is one of those."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = ""
+        for path in CRON_TEMPLATES:
+            with open(os.path.join(CHART, path), encoding="utf-8") as f:
+                cls.text += f.read()
+        cls.crons = load("values-lakehouse.yaml")["datahub-ingestion-cron"]["crons"]
+
+    def read(self, key, recipe=False):
+        if recipe:
+            return re.search(r"\$val\.recipe\." + re.escape(key) + r"\b", self.text)
+        return re.search(r"(\$val|[\s(])\." + re.escape(key) + r"\b", self.text)
+
+    def test_one_entry_polaris(self):
+        self.assertEqual(list(self.crons), ["polaris"])
+
+    def test_every_key_of_the_entry_is_read_by_upstreams_templates(self):
+        for key in self.crons["polaris"]:
+            with self.subTest(key=key):
+                self.assertTrue(self.read(key), key)
+        for key in self.crons["polaris"]["recipe"]:
+            with self.subTest(recipe=key):
+                self.assertTrue(self.read(key, recipe=True), key)
+
+    def test_a_misspelt_key_is_not_found(self):
+        self.assertFalse(self.read("schedul"))
+        self.assertFalse(self.read("fileContents", recipe=True))
+        self.assertTrue(self.read("schedule"))
 
 
 if __name__ == "__main__":

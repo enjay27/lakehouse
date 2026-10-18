@@ -405,6 +405,36 @@ class DatahubRecovery(unittest.TestCase):
                          "(contains(needs.*.result, 'failure') && 'failure' || 'cancelled') }}")
 
 
+class DatahubIngestion(unittest.TestCase):
+    """check-datahub-ingestion runs in smoke's main job right after check-datahub, and the
+    recorder's check reads its expectations (ADR-076 §6)."""
+
+    def setUp(self):
+        self.jobs = read_workflow(os.path.join(WORKFLOWS, "smoke.yml"))["jobs"]
+        self.runs = [s.get("run", "") for s in self.jobs["smoke"]["steps"]]
+
+    def index(self, text):
+        return next(i for i, run in enumerate(self.runs) if text in run)
+
+    def test_it_runs_right_after_check_datahub(self):
+        step = self.jobs["smoke"]["steps"][self.index("python3 gates/gate.py check-datahub |") + 1]
+        self.assertIn("ADR-076", step["name"])
+        self.assertEqual([line.strip() for line in step["run"].strip().splitlines()],
+                         ["set -euo pipefail",
+                          'python3 gates/gate.py check-datahub-ingestion | tee -a '
+                          '"$GITHUB_STEP_SUMMARY"'])
+
+    def test_check_traffic_reads_its_expectations(self):
+        self.assertIn("gates/expectations/datahub-ingestion.json",
+                      self.runs[self.index("python3 gates/gate.py check-traffic ")])
+        self.assertLess(self.index("check-datahub-ingestion |"),
+                        self.index("python3 gates/gate.py check-traffic "))
+
+    def test_the_recovery_job_does_not_run_it(self):
+        for step in self.jobs["datahub-recovery"]["steps"]:
+            self.assertNotIn("check-datahub-ingestion", step.get("run", ""))
+
+
 class Stress(unittest.TestCase):
     """stress.yml runs only when Kade starts it, never on a push or in the release gate
     (ADR-054 §1); it builds the gate as smoke does, in direct mode (ADR-053 §4)."""

@@ -1,0 +1,130 @@
+{
+  "_comment": "What the recorder must have seen after gate.py check-datahub-ingestion (ADR-076 §6.5): Polaris 1.6.0 asking the policy endpoint about datahub_ingest, which lets it do the four actions Datahub's Iceberg source causes and refuses it a namespace create and both delegated loads (ADR-076 §4). Asked by Polaris's `Apache-HttpClient/` client. Read with standins.json, whose must-nots hold for every record. Matched by gates/traffic.py.",
+  "expectations": [
+    {
+      "name": "OPA allowed datahub_ingest to list a catalog's namespaces, asked by Polaris",
+      "must": "exist",
+      "match": {
+        "proto": "http",
+        "listener": "opa",
+        "method": "POST",
+        "status": 200,
+        "request_headers.user-agent": {
+          "regex": "^Apache-HttpClient/"
+        },
+        "request_body.json.input.actor.principal": "datahub_ingest",
+        "request_body.json.input.action": "LIST_NAMESPACES",
+        "response_body.json.result.allow": true
+      }
+    },
+    {
+      "name": "OPA allowed datahub_ingest to load a namespace's properties, asked by Polaris",
+      "must": "exist",
+      "match": {
+        "proto": "http",
+        "listener": "opa",
+        "method": "POST",
+        "status": 200,
+        "request_headers.user-agent": {
+          "regex": "^Apache-HttpClient/"
+        },
+        "request_body.json.input.actor.principal": "datahub_ingest",
+        "request_body.json.input.action": "LOAD_NAMESPACE_METADATA",
+        "response_body.json.result.allow": true
+      }
+    },
+    {
+      "name": "OPA allowed datahub_ingest to list a namespace's tables, asked by Polaris",
+      "must": "exist",
+      "match": {
+        "proto": "http",
+        "listener": "opa",
+        "method": "POST",
+        "status": 200,
+        "request_headers.user-agent": {
+          "regex": "^Apache-HttpClient/"
+        },
+        "request_body.json.input.actor.principal": "datahub_ingest",
+        "request_body.json.input.action": "LIST_TABLES",
+        "response_body.json.result.allow": true
+      }
+    },
+    {
+      "name": "OPA allowed datahub_ingest to load a table, asked by Polaris",
+      "must": "exist",
+      "match": {
+        "proto": "http",
+        "listener": "opa",
+        "method": "POST",
+        "status": 200,
+        "request_headers.user-agent": {
+          "regex": "^Apache-HttpClient/"
+        },
+        "request_body.json.input.actor.principal": "datahub_ingest",
+        "request_body.json.input.action": "LOAD_TABLE",
+        "response_body.json.result.allow": true
+      }
+    },
+    {
+      "name": "OPA refused datahub_ingest creating a namespace, asked by Polaris",
+      "must": "exist",
+      "match": {
+        "proto": "http",
+        "listener": "opa",
+        "method": "POST",
+        "status": 200,
+        "request_headers.user-agent": {
+          "regex": "^Apache-HttpClient/"
+        },
+        "request_body.json.input.actor.principal": "datahub_ingest",
+        "request_body.json.input.action": "CREATE_NAMESPACE",
+        "response_body.json.result.allow": false
+      }
+    },
+    {
+      "name": "OPA refused datahub_ingest a load with write delegation, asked by Polaris",
+      "must": "exist",
+      "match": {
+        "proto": "http",
+        "listener": "opa",
+        "method": "POST",
+        "status": 200,
+        "request_headers.user-agent": {
+          "regex": "^Apache-HttpClient/"
+        },
+        "request_body.json.input.actor.principal": "datahub_ingest",
+        "request_body.json.input.action": "LOAD_TABLE_WITH_WRITE_DELEGATION",
+        "response_body.json.result.allow": false
+      }
+    },
+    {
+      "name": "OPA refused datahub_ingest a load with read delegation, asked by Polaris",
+      "must": "exist",
+      "match": {
+        "proto": "http",
+        "listener": "opa",
+        "method": "POST",
+        "status": 200,
+        "request_headers.user-agent": {
+          "regex": "^Apache-HttpClient/"
+        },
+        "request_body.json.input.actor.principal": "datahub_ingest",
+        "request_body.json.input.action": "LOAD_TABLE_WITH_READ_DELEGATION",
+        "response_body.json.result.allow": false
+      }
+    },
+    {
+      "name": "OPA never allowed datahub_ingest anything but the four reads",
+      "must": "not_exist",
+      "match": {
+        "proto": "http",
+        "listener": "opa",
+        "request_body.json.input.actor.principal": "datahub_ingest",
+        "request_body.json.input.action": {
+          "regex": "^(?!(LIST_NAMESPACES|LOAD_NAMESPACE_METADATA|LIST_TABLES|LOAD_TABLE)$)"
+        },
+        "response_body.json.result.allow": true
+      }
+    }
+  ]
+}

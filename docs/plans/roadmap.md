@@ -288,7 +288,15 @@ Started on 2026-10-18 (Kade).
   `check-datahub-recovery` loses OpenSearch's volume, then Kafka's: Datahub's install step and a
   restore-indices Job rebuild the indices, the install step recreates the topics, and a dataset
   written before both is still read and found (ADR-071 §8).
-- Datahub ingests Polaris's catalog with its own read-only principal.
+- Datahub ingests Polaris's catalogs (ADR-076): upstream's ingestion CronJob in
+  `charts/datahub`, the full `acryldata/datahub-ingestion` image by digest, daily, one
+  ingestion per catalog of `DATAHUB_INGEST_POLARIS_CATALOGS` with stateful ingestion, suspended
+  while the list is empty; as the principal `datahub_ingest`, which the install creates as root
+  with init-env's credential (`datahub-polaris-principal`) and the policy lets only read
+  (`docs/contracts/datahub-polaris-ingestion.md`); GMS's system client as the sink. The smoke
+  gate's `check-datahub-ingestion` seeds a catalog, runs one ingestion from the CronJob, finds
+  its datasets, fields and container in Datahub, and sees the principal refused a write and a
+  delegated load. Requests and a memory limit for the CronJob come from the gate's runs.
 - Its own login through SSO, against a stand-in on the gate.
 - A runbook, proven on a Linux test cluster, moves Datahub's metadata from the target
   clusters' existing PostgreSQL-HA to the new `Cluster`.

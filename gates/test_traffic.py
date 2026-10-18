@@ -232,11 +232,11 @@ class RestartAllowances(unittest.TestCase):
 class VendedCredentials(unittest.TestCase):
     """iceberg.json's must-nots hold for Polaris's policy requests, not check-standins' curl."""
 
-    def delegation(self, user_agent):
+    def delegation(self, user_agent, principal="gate_smoke"):
         return {"proto": "http", "listener": "opa", "method": "POST", "status": 200,
                 "request_headers": {"user-agent": user_agent},
                 "request_body": {"json": {"input": {
-                    "actor": {"principal": "gate_smoke"},
+                    "actor": {"principal": principal},
                     "action": "LOAD_TABLE_WITH_READ_DELEGATION"}}},
                 "response_body": {"json": {"result": {"allow": False}}}}
 
@@ -251,6 +251,12 @@ class VendedCredentials(unittest.TestCase):
 
     def test_polaris_asking_fails(self):
         self.assertTrue(self.failed(self.delegation("Apache-HttpClient/5.5 (Java/21.0.8)")))
+
+    def test_polaris_asking_for_datahub_ingests_refused_load_passes(self):
+        # ADR-076 §6.4: check-datahub-ingestion asks for a delegated load as datahub_ingest,
+        # which the policy refuses; datahub-ingestion.json checks it was refused.
+        self.assertEqual(self.failed(self.delegation("Apache-HttpClient/5.5 (Java/21.0.8)",
+                                                     "datahub_ingest")), [])
 
 
 
@@ -279,6 +285,49 @@ class PyIcebergWrites(unittest.TestCase):
                      "/polaris-backup/polaris-pg/base/x"):
             with self.subTest(path=path):
                 self.assertTrue(self.failed(self.write(path)))
+
+
+class Ingestion(unittest.TestCase):
+    """datahub-ingestion.json (ADR-076 §6.5): the policy endpoint allowed datahub_ingest the
+    four read actions and refused its namespace create and delegated loads, and nothing else
+    was allowed it."""
+
+    def decision(self, action, allow, principal="datahub_ingest"):
+        return {"proto": "http", "listener": "opa", "method": "POST", "status": 200,
+                "request_headers": {"user-agent": "Apache-HttpClient/5.5 (Java/21.0.8)"},
+                "request_body": {"json": {"input": {"actor": {"principal": principal},
+                                                    "action": action}}},
+                "response_body": {"json": {"result": {"allow": allow}}}}
+
+    def problems(self, *recorded):
+        expectations = traffic.load(os.path.join(HERE, "expectations", "datahub-ingestion.json"))
+        problems, _ = traffic.check(list(recorded), expectations)
+        return problems
+
+    RUN = [("LIST_NAMESPACES", True), ("LOAD_NAMESPACE_METADATA", True), ("LIST_TABLES", True),
+           ("LOAD_TABLE", True), ("CREATE_NAMESPACE", False),
+           ("LOAD_TABLE_WITH_WRITE_DELEGATION", False), ("LOAD_TABLE_WITH_READ_DELEGATION", False)]
+
+    def test_the_run_and_the_refusals_pass(self):
+        self.assertEqual(self.problems(*[self.decision(a, allow) for a, allow in self.RUN]), [])
+
+    def test_each_missing_exchange_fails(self):
+        for i, (action, _) in enumerate(self.RUN):
+            with self.subTest(action=action):
+                rest = [self.decision(a, allow) for j, (a, allow) in enumerate(self.RUN)
+                        if j != i]
+                self.assertTrue(self.problems(*rest))
+
+    def test_anything_else_allowed_fails(self):
+        run = [self.decision(a, allow) for a, allow in self.RUN]
+        for action in ("CREATE_NAMESPACE", "LOAD_TABLE_WITH_READ_DELEGATION", "LIST_CATALOGS",
+                       "LOAD_VIEW"):
+            with self.subTest(action=action):
+                self.assertTrue(self.problems(*run, self.decision(action, True)))
+
+    def test_another_principals_decisions_count_for_nothing(self):
+        self.assertTrue(self.problems(*[self.decision(a, allow, "gate_maintainer")
+                                        for a, allow in self.RUN]))
 
 
 class Maintainer(unittest.TestCase):

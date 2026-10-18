@@ -22,6 +22,11 @@
 # - gate_seed, the seed's writer (ADR-051 §2), may only do what gates/seed.py does as it, and
 #   only inside the catalog gate_seed_catalog: create tables, append, add a column, create a view
 #   (gates/standins.py SEED_ACTIONS). Root makes the rest of the seed. No drop.
+# - datahub_ingest, Datahub's ingestion principal (ADR-076 §4), may only read, in any catalog: the
+#   four actions Datahub v1.7.0.1's Iceberg source causes (gates/standins.py INGEST_ACTIONS),
+#   each with a target inside a catalog. No write, no *_WITH_*_DELEGATION, no view, no
+#   LIST_CATALOGS, no management call. On the target clusters the gateway's policy decides, from
+#   docs/contracts/datahub-polaris-ingestion.md.
 # - Anything else is refused.
 package polaris.authz
 
@@ -73,6 +78,15 @@ allow if {
 	}
 }
 
+allow if {
+	input.actor.principal == "datahub_ingest"
+	input.action in {"LIST_NAMESPACES", "LOAD_NAMESPACE_METADATA", "LIST_TABLES", "LOAD_TABLE"}
+	count(input.resource.targets) > 0
+	every target in input.resource.targets {
+		in_a_catalog(target)
+	}
+}
+
 in_catalog(entity, name) if {
 	entity.type == "CATALOG"
 	entity.name == name
@@ -82,4 +96,11 @@ in_catalog(entity, name) if {
 	some parent in entity.parents
 	parent.type == "CATALOG"
 	parent.name == name
+}
+
+in_a_catalog(entity) if entity.type == "CATALOG"
+
+in_a_catalog(entity) if {
+	some parent in entity.parents
+	parent.type == "CATALOG"
 }

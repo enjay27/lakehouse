@@ -39,12 +39,13 @@ IDENTITY_ALPHABET = string.ascii_lowercase + string.digits
 ADDED_COMMENT = "# Added from .env.template by scripts/init_env.py"
 
 # Credentials this repository creates, so init-env generates them (ADR-006, ADR-026,
-# ADR-071 §6). A value already in .env is kept: DATAHUB_ENCRYPTION_KEY above all, since GMS
+# ADR-071 §6, ADR-076 §3). A value already in .env is kept: DATAHUB_ENCRYPTION_KEY above all, since GMS
 # encrypts the secrets users store with it.
 GENERATED = {"POLARIS_DB_PASSWORD", "POLARIS_ROOT_CLIENT_ID", "POLARIS_ROOT_CLIENT_SECRET",
              "POLARIS_TOKEN_SIGNING_KEY", "DATAHUB_DB_PASSWORD", "DATAHUB_SYSTEM_CLIENT_SECRET",
              "DATAHUB_TOKEN_SIGNING_KEY", "DATAHUB_TOKEN_SALT", "DATAHUB_ENCRYPTION_KEY",
-             "DATAHUB_FRONTEND_SECRET", "DATAHUB_ROOT_PASSWORD"}
+             "DATAHUB_FRONTEND_SECRET", "DATAHUB_ROOT_PASSWORD", "DATAHUB_POLARIS_CLIENT_ID",
+             "DATAHUB_POLARIS_CLIENT_SECRET"}
 
 # A Secret: its name, the .env variable naming its namespace (ADR-007), its type, the keys
 # filled from .env variables, keys with fixed values, and the format a key's value is written
@@ -94,6 +95,11 @@ SECRETS = [
            {"secret": "DATAHUB_FRONTEND_SECRET"}, {}),
     Secret("datahub-root-user", "NS_CATALOG_DATAHUB", "Opaque",
            {"user.props": "DATAHUB_ROOT_PASSWORD"}, {}, {"user.props": "datahub:{}"}),
+    # Datahub's own Polaris principal, datahub_ingest (ADR-076 §3): the install sets these on
+    # it as root, and the ingestion CronJob reads them.
+    Secret("datahub-polaris-principal", "NS_CATALOG_DATAHUB", "Opaque",
+           {"clientId": "DATAHUB_POLARIS_CLIENT_ID",
+            "clientSecret": "DATAHUB_POLARIS_CLIENT_SECRET"}, {}),
 ]
 
 
