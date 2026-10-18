@@ -1,0 +1,23 @@
+# datahub-kafka's pod, 9092: pods of this namespace labelled as Kafka's clients (Datahub, when its
+# chart enters; the smoke check's pod until then). Plaintext behind this rule (ADR-068 §3). The
+# controller listens on localhost only, so no rule covers it (ADR-068 §1, ADR-069).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: datahub-kafka-clients
+  labels:
+    {{- include "datahub-network-policies.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: datahub-kafka
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 9092
+      from:
+        - podSelector:
+            matchLabels:
+              lakehouse/datahub-kafka-client: "true"
