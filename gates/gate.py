@@ -1769,17 +1769,26 @@ def check_datahub(env, pins):
              {release.DATAHUB_GMS_CLIENT_LABEL: "true"}, secret),
             (ingress, f"check-datahub-login-{pid}", ["login", frontend], None, password)]
     for namespace, name, args, pod_labels, credential in pods:
-        done = subprocess.run(datahub_check_command(namespace, image, name, args, pod_labels),
-                              input=credential + "\n", capture_output=True, text=True,
-                              check=False)
-        found, ok = datahub_lines(done.stdout)
-        if done.returncode and not found:
-            said = (done.stderr.strip() or done.stdout.strip()).replace(secret, "<redacted>")
-            found = [f"pod {name} in {namespace} exited {done.returncode}: "
-                     f"{said.replace(password, '<redacted>')}"]
+        found, ok = datahub_pod(namespace, image, name, args, pod_labels, credential,
+                                (secret, password))
         problems += found
         notes += ok
     return problems, notes
+
+
+def datahub_pod(namespace, image, name, args, labels, credential, masked):
+    """check.py with `args` in a pod of its own, `credential` on its stdin. Returns (problems,
+    notes); a pod that failed without a line of its own is a problem, every value of `masked`
+    redacted."""
+    done = subprocess.run(datahub_check_command(namespace, image, name, args, labels),
+                          input=credential + "\n", capture_output=True, text=True, check=False)
+    found, ok = datahub_lines(done.stdout)
+    if done.returncode and not found:
+        said = done.stderr.strip() or done.stdout.strip()
+        for value in masked:
+            said = said.replace(value, "<redacted>")
+        found = [f"pod {name} in {namespace} exited {done.returncode}: {said}"]
+    return found, ok
 
 
 def check_datahub_pg(env):
