@@ -53,6 +53,16 @@
       "url": "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/817113f21a2643311cbc3e992bb44ffe1c416c54/v1.36.4-standalone-strict/networkpolicy-networking-v1.json",
       "sha256": "f6324cc464f62228b0418f438d167208e4f86c7e3677ba30f608e79a8b26ba79",
       "source": "kubeconform's schema for NetworkPolicy at the node image's Kubernetes version, from the repository's head commit read 2026-10-13; sha256 of the file downloaded (ADR-048)"
+    },
+    "statefulset": {
+      "url": "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/817113f21a2643311cbc3e992bb44ffe1c416c54/v1.36.4-standalone-strict/statefulset-apps-v1.json",
+      "sha256": "cfa6579916fc2a1be0deb6372a3c67c3747a212131d0cb7b342d645f65639987",
+      "source": "kubeconform's schema for StatefulSet at the node image's Kubernetes version, from the NetworkPolicy schema's commit, read 2026-10-18; sha256 of the file downloaded (ADR-068)"
+    },
+    "service": {
+      "url": "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/817113f21a2643311cbc3e992bb44ffe1c416c54/v1.36.4-standalone-strict/service-v1.json",
+      "sha256": "8bf019854daed511e7c174896a898173fa65d88ec5937c687a37303d4cc9351b",
+      "source": "kubeconform's schema for Service at the node image's Kubernetes version, from the NetworkPolicy schema's commit, read 2026-10-18; sha256 of the file downloaded (ADR-068)"
     }
   },
   "standin_images": {
