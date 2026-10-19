@@ -1,0 +1,114 @@
+{
+  "commit_base": "cd3804d",
+  "issue": 229,
+  "units": {
+    "jobs": "minutes",
+    "phases": "seconds"
+  },
+  "runs": [
+    {
+      "branch": "exp/baseline",
+      "commit": "cd3804d",
+      "run": 39192555349,
+      "jobs": {
+        "smoke": 20.7,
+        "smoke_install": 13.1,
+        "datahub-recovery": 29.7,
+        "datahub_only_install": 9.95,
+        "wall": 29.9
+      },
+      "phases": {
+        "opensearch_system_update": 255,
+        "opensearch_helm_wait": 141,
+        "opensearch_nonblocking": 80,
+        "restore_indices": 89,
+        "kafka_system_update": 80,
+        "kafka_helm_wait": 132,
+        "kafka_nonblocking": 71,
+        "gms_restart": 138,
+        "check_datahub_recovery": 1079
+      }
+    },
+    {
+      "branch": "exp/probes",
+      "commit": "59f5752",
+      "run": 39192654730,
+      "jobs": {
+        "smoke": 19.5,
+        "smoke_install": 12.2,
+        "datahub-recovery": 24.8,
+        "datahub_only_install": 9.7,
+        "wall": 24.9
+      },
+      "phases": {
+        "opensearch_system_update": 243,
+        "opensearch_helm_wait": 44,
+        "opensearch_nonblocking": 81,
+        "restore_indices": 82,
+        "kafka_system_update": 76,
+        "kafka_helm_wait": 37,
+        "kafka_nonblocking": 69,
+        "gms_restart": 37,
+        "check_datahub_recovery": 777
+      }
+    },
+    {
+      "branch": "exp/probes-r2",
+      "commit": "59f5752",
+      "run": 39207112253,
+      "jobs": {
+        "smoke": 19.9,
+        "smoke_install": 12.7,
+        "datahub-recovery": 22.5,
+        "datahub_only_install": 7.8,
+        "wall": 22.7
+      },
+      "phases": {
+        "opensearch_system_update": 247,
+        "opensearch_helm_wait": 46,
+        "opensearch_nonblocking": 88,
+        "restore_indices": 85,
+        "kafka_system_update": 81,
+        "kafka_helm_wait": 37,
+        "kafka_nonblocking": 72,
+        "gms_restart": 31,
+        "check_datahub_recovery": 777
+      }
+    },
+    {
+      "branch": "exp/probes-cpu",
+      "commit": "be35720",
+      "run": 39207205151,
+      "jobs": {
+        "smoke": 17.4,
+        "smoke_install": 10.1,
+        "datahub-recovery": 15.0,
+        "datahub_only_install": 6.1,
+        "wall": 17.4
+      },
+      "phases": {
+        "opensearch_system_update": 98,
+        "opensearch_helm_wait": 41,
+        "opensearch_nonblocking": 27,
+        "restore_indices": 32,
+        "kafka_system_update": 26,
+        "kafka_helm_wait": 37,
+        "kafka_nonblocking": 22,
+        "gms_restart": 37,
+        "check_datahub_recovery": 421,
+        "smoke_install_system_update": 70,
+        "smoke_install_nonblocking": 34
+      }
+    },
+    {
+      "branch": "exp/combo-serial",
+      "commit": "02108cc",
+      "run": 39203762337,
+      "note": "probes with recovery split; for the smoke install's Job phases only",
+      "phases": {
+        "smoke_install_system_update": 167,
+        "smoke_install_nonblocking": 101
+      }
+    }
+  ]
+}
