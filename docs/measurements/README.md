@@ -21,3 +21,4 @@ Numbers this repository has measured, each with its evidence (ADR-003). The firs
 | `failover-<date>.md` | Failover on the gate, setup by failure, once C3a reproduces the target | ADR-047 §7 |
 | `stress-capacity-<date>.md` | One Polaris's capacity on a Linux test server (Tier D) | ADR-053 §7 |
 | A stress run's summary | A run on the gate worth keeping as a baseline | ADR-054 §3 |
+| `smoke-time-<date>.md` | Smoke's phases, for a tuning value of upstream's charts | ADR-071 §2 |
