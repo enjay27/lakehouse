@@ -269,10 +269,10 @@ jobs:
           kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_POLARIS" logs -l app.kubernetes.io/name=polaris-log-batch --tail=40 --prefix || true
           kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_POLARIS" logs -l app.kubernetes.io/name=fluent-bit-standin --tail=40 --prefix || true
 
-  # check-datahub-recovery deletes volumes, so it runs on a cluster of its own, after
-  # check-datahub has shown Datahub working on it (ADR-071 §8, ADR-075).
-  datahub-recovery:
-    name: datahub-recovery
+  # check-datahub-recovery deletes volumes, so each store's loss runs on a cluster of its own,
+  # after check-datahub has shown Datahub working on it (ADR-071 §8, ADR-075).
+  datahub-recovery-opensearch:
+    name: datahub-recovery-opensearch
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     permissions:
@@ -315,10 +315,73 @@ jobs:
           set -euo pipefail
           python3 gates/gate.py check-datahub | tee -a "$GITHUB_STEP_SUMMARY"
 
-      - name: Datahub rebuilds its indices after OpenSearch's volume is lost, and its topics after Kafka's (ADR-071)
+      - name: Datahub rebuilds its indices after OpenSearch's volume is lost (ADR-071)
         run: |
           set -euo pipefail
-          python3 gates/gate.py check-datahub-recovery | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 gates/gate.py check-datahub-recovery --only opensearch | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: State of Datahub's namespace on failure
+        if: failure()
+        run: |
+          kubectl --context "$KUBE_CONTEXT" get nodes -o wide || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_DATAHUB" get cluster,backup,statefulset,pods,pvc -o wide || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_DATAHUB" get events --sort-by=.lastTimestamp || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_DATAHUB" get jobs,deployments,cronjobs -o wide || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_DATAHUB" logs -l cnpg.io/cluster=datahub-pg,cnpg.io/podRole=instance --all-containers --prefix --tail=60 || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_DATAHUB" logs -l app.kubernetes.io/name=datahub-kafka --prefix --tail=80 || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_DATAHUB" logs -l app.kubernetes.io/instance=datahub-opensearch --all-containers --prefix --tail=80 || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_DATAHUB" logs -l job-name=datahub-system-update --all-containers --prefix --tail=120 || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_DATAHUB" logs -l job-name=datahub-system-update-nonblk --all-containers --prefix --tail=80 || true
+          kubectl --context "$KUBE_CONTEXT" -n "$NS_CATALOG_DATAHUB" logs -l app.kubernetes.io/instance=datahub --all-containers --prefix --tail=120 || true
+
+  datahub-recovery-kafka:
+    name: datahub-recovery-kafka
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    env:
+      KUBE_CONTEXT: kind-lakehouse-gate
+      NS_CNPG_SYSTEM: cnpg-system
+      NS_CATALOG_POLARIS: catalog-polaris
+      NS_CATALOG_DATAHUB: catalog-datahub
+      NS_STANDINS: standins
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Tools at pinned versions
+        run: |
+          python3 gates/gate.py tools "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: kind cluster and the CNPG operator (gate only, ADR-029)
+        run: python3 gates/gate.py up
+
+      - name: The gate's Secrets (ADR-006)
+        run: python3 gates/gate.py secrets
+
+      - name: The stand-ins, SeaweedFS and OPA (gate only, ADR-031)
+        run: python3 gates/gate.py standins
+
+      # Datahub alone, fresh on every trigger: the two checks below read nothing of Polaris's,
+      # the console's or the log batch's (ADR-077 §1).
+      - name: Install Datahub alone from this commit, step 0 then Datahub's part of step 1 (ADR-077)
+        run: |
+          set -euo pipefail
+          python3 gates/gate.py install --datahub-only | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Datahub writes a dataset through its three stores and finds it by search; its root user signs in with init-env's password only (ADR-071, ADR-072)
+        run: |
+          set -euo pipefail
+          python3 gates/gate.py check-datahub | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Datahub rebuilds its topics after Kafka's volume is lost (ADR-071)
+        run: |
+          set -euo pipefail
+          python3 gates/gate.py check-datahub-recovery --only kafka | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: State of Datahub's namespace on failure
         if: failure()
@@ -336,18 +399,18 @@ jobs:
 
   main-status:
     # The nightly run on main opens or closes "main is red: Smoke" (ADR-055 §2): success only
-    # when both jobs succeeded, failure when either failed (ADR-075 §3).
-    needs: [smoke, datahub-recovery]
+    # when all three jobs succeeded, failure when either failed (ADR-075 §3).
+    needs: [smoke, datahub-recovery-opensearch, datahub-recovery-kafka]
     if: always() && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_run')
     permissions:
       issues: write
     uses: ./.github/workflows/main-status.yml
     with:
-      result: ${{ (needs.smoke.result == 'success' && needs.datahub-recovery.result == 'success') && 'success' || (contains(needs.*.result, 'failure') && 'failure' || 'cancelled') }}
+      result: ${{ (needs.smoke.result == 'success' && needs.datahub-recovery-opensearch.result == 'success' && needs.datahub-recovery-kafka.result == 'success') && 'success' || (contains(needs.*.result, 'failure') && 'failure' || 'cancelled') }}
 
   delete-gate-branch:
     # The run's gate branch goes when the run ends, pass, fail or cancelled (ADR-049).
-    needs: [smoke, datahub-recovery, main-status]
+    needs: [smoke, datahub-recovery-opensearch, datahub-recovery-kafka, main-status]
     if: always() && startsWith(github.ref, 'refs/heads/gate/')
     permissions:
       contents: write

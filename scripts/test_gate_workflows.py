@@ -301,7 +301,11 @@ class DatahubRecovery(unittest.TestCase):
     def setUp(self):
         self.jobs = read_workflow(os.path.join(WORKFLOWS, "smoke.yml"))["jobs"]
         self.smoke = self.jobs["smoke"]
-        self.job = self.jobs.get("datahub-recovery") or {"steps": []}
+        self.job = self.jobs.get("datahub-recovery-opensearch") or {"steps": []}
+        self.both = [self.jobs.get(f"datahub-recovery-{s}") or {"steps": []}
+                     for s in self.STORES]
+
+    STORES = ("opensearch", "kafka")
 
     @staticmethod
     def _install(steps):
@@ -309,7 +313,8 @@ class DatahubRecovery(unittest.TestCase):
                     len(steps))
 
     def test_it_runs_beside_smoke_on_a_runner_of_its_own_for_40_minutes(self):
-        self.assertIn("datahub-recovery", self.jobs)
+        self.assertNotIn("datahub-recovery", self.jobs)
+        self.assertIn("datahub-recovery-opensearch", self.jobs)
         for key in ("runs-on", "env", "permissions"):
             with self.subTest(key=key):
                 self.assertEqual(self.job.get(key), self.smoke.get(key))
@@ -318,7 +323,7 @@ class DatahubRecovery(unittest.TestCase):
         self.assertNotIn("needs", self.job)
 
     def test_both_jobs_run_on_every_trigger(self):
-        for name in ("smoke", "datahub-recovery"):
+        for name in ("smoke", "datahub-recovery-opensearch", "datahub-recovery-kafka"):
             with self.subTest(job=name):
                 self.assertIn(name, self.jobs)
                 self.assertNotIn("if", self.jobs[name])
@@ -328,7 +333,23 @@ class DatahubRecovery(unittest.TestCase):
              "python3 gates/gate.py secrets", "python3 gates/gate.py standins",
              "python3 gates/gate.py install --datahub-only |",
              "python3 gates/gate.py check-datahub |",
-             "python3 gates/gate.py check-datahub-recovery |", "kubectl ")
+             "python3 gates/gate.py check-datahub-recovery --only ", "kubectl ")
+
+    def test_the_two_jobs_differ_only_in_name_and_the_store_they_lose(self):
+        first, second = self.both
+        self.assertEqual(len(first["steps"]), len(second["steps"]))
+        for a, b in zip(first["steps"], second["steps"]):
+            if "check-datahub-recovery" in a.get("run", ""):
+                continue
+            with self.subTest(step=a.get("name") or a.get("uses")):
+                self.assertEqual(a, b)
+        for job, store in zip(self.both, self.STORES):
+            with self.subTest(store=store):
+                self.assertEqual(job["name"], f"datahub-recovery-{store}")
+                self.assertEqual({k: v for k, v in job.items() if k not in ("name", "steps")},
+                                 {k: v for k, v in first.items() if k not in ("name", "steps")})
+                self.assertIn(f"python3 gates/gate.py check-datahub-recovery --only {store} |",
+                              "\n".join(s.get("run", "") for s in job["steps"]))
 
     def test_its_steps_are_the_set_up_then_datahub_alone_then_its_checks(self):
         steps = self.job["steps"]
@@ -378,7 +399,8 @@ class DatahubRecovery(unittest.TestCase):
         self.assertEqual(len(after), 3)
         check, recovery, state = after
         self.assertIn("python3 gates/gate.py check-datahub |", check["run"])
-        self.assertIn("python3 gates/gate.py check-datahub-recovery |", recovery["run"])
+        self.assertIn("python3 gates/gate.py check-datahub-recovery --only opensearch |",
+                      recovery["run"])
         self.assertEqual(state.get("if"), "failure()")
         for line in state["run"].splitlines():
             if " -n " in line:
@@ -388,7 +410,7 @@ class DatahubRecovery(unittest.TestCase):
     def test_only_this_job_runs_the_recovery(self):
         for name, workflow in workflows().items():
             for job_name, job in (workflow.get("jobs") or {}).items():
-                if (name, job_name) == ("smoke.yml", "datahub-recovery"):
+                if name == "smoke.yml" and job_name.startswith("datahub-recovery-"):
                     continue
                 for step in job.get("steps") or []:
                     with self.subTest(workflow=name, job=job_name):
@@ -398,10 +420,16 @@ class DatahubRecovery(unittest.TestCase):
         self.assertTrue(any("python3 gates/gate.py check-datahub |" in s.get("run", "")
                             for s in self.smoke["steps"]))
 
-    def test_main_status_is_given_success_only_when_both_jobs_succeeded(self):
+    def test_main_status_is_given_success_only_when_all_three_jobs_succeeded(self):
+        self.assertEqual(self.jobs["main-status"]["needs"],
+                         ["smoke", "datahub-recovery-opensearch", "datahub-recovery-kafka"])
+        self.assertEqual(self.jobs["delete-gate-branch"]["needs"],
+                         ["smoke", "datahub-recovery-opensearch", "datahub-recovery-kafka",
+                          "main-status"])
         self.assertEqual(self.jobs["main-status"]["with"]["result"],
                          "${{ (needs.smoke.result == 'success' && "
-                         "needs.datahub-recovery.result == 'success') && 'success' || "
+                         "needs.datahub-recovery-opensearch.result == 'success' && "
+                         "needs.datahub-recovery-kafka.result == 'success') && 'success' || "
                          "(contains(needs.*.result, 'failure') && 'failure' || 'cancelled') }}")
 
 
@@ -431,7 +459,7 @@ class DatahubIngestion(unittest.TestCase):
                         self.index("python3 gates/gate.py check-traffic "))
 
     def test_the_recovery_job_does_not_run_it(self):
-        for step in self.jobs["datahub-recovery"]["steps"]:
+        for step in self.jobs["datahub-recovery-kafka"]["steps"] + self.jobs["datahub-recovery-opensearch"]["steps"]:
             self.assertNotIn("check-datahub-ingestion", step.get("run", ""))
 
 

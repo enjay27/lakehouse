@@ -3008,14 +3008,14 @@ class CheckDatahubRecovery(unittest.TestCase):
     ENV = {"NS_CATALOG_DATAHUB": "catalog-datahub", "KUBE_CONTEXT": "kind-lakehouse-gate"}
     PINS = {"standin_images": {"recorder": {"image": PYTHON_IMAGE}}}
 
-    def check(self, cluster, env=None):
+    def check(self, cluster, env=None, only=None):
         with mock.patch.object(gate, "output", side_effect=cluster.output), \
                 mock.patch.object(gate, "run") as run, \
                 mock.patch.object(gate, "wait_for", side_effect=cluster.wait_for), \
                 mock.patch.object(gate.subprocess, "run", side_effect=cluster.run), \
                 mock.patch.object(gate.release, "datahub", side_effect=cluster.datahub):
             problems, notes = gate.check_datahub_recovery(env or self.ENV, self.PINS,
-                                                          cluster.timeline)
+                                                          cluster.timeline, only)
         return problems, notes, run
 
     def marks(self, cluster):
@@ -3104,15 +3104,16 @@ class CheckDatahubRecovery(unittest.TestCase):
         self.assertEqual(len(lines), 1)
         self.assertTrue(lines[0].startswith("Recovery timeline: not measured ("), lines[0])
 
-    def main(self, outcome):
-        def check(env, pins, timeline):
+    def main(self, outcome, *args):
+        def check(env, pins, timeline, only=None):
+            self.only = only
             timeline.append(("2026-10-19T00:00:05Z", "check pods ready"))
             return outcome(timeline)
         with mock.patch.object(gate, "check_datahub_recovery", side_effect=check), \
                 mock.patch.object(gate.release, "load_env", return_value=self.ENV), \
                 contextlib.redirect_stdout(io.StringIO()) as out:
             try:
-                code = gate.main(["gate.py", "check-datahub-recovery"])
+                code = gate.main(["gate.py", "check-datahub-recovery", *args])
             except SystemExit as e:
                 code = f"exit {e.code}"
         return code, out.getvalue()
@@ -3245,7 +3246,42 @@ class CheckDatahubRecovery(unittest.TestCase):
         self.assert_stopped_after("no-topics", "install", "MetadataChangeLog_Versioned_v1")
 
     def test_it_is_a_command_of_the_gate(self):
-        self.assertIn("| check-datahub-recovery |", gate.__doc__.strip().splitlines()[-1])
+        self.assertIn("| check-datahub-recovery [--only opensearch|kafka] |",
+                      gate.__doc__.strip().splitlines()[-1])
+
+    def test_only_opensearch_loses_its_volume_alone_then_writes_again(self):
+        cluster = FakeRecovery(self)
+        problems, _, _ = self.check(cluster, only="opensearch")
+        self.assertEqual(problems, [])
+        marks = self.marks(cluster)
+        pid = os.getpid()
+        self.assertIn("index datasetindex_v2 answers 404", marks)
+        self.assertIn(f"job datahub-restore-indices-{pid} succeeded", marks)
+        self.assertFalse([m for m in marks if m.startswith("topics ") or "GMS's pod" in m])
+        self.assertEqual(marks.count("Datahub's install step ended"), 1)
+        self.assertEqual(marks[-8:-5], [f"write gate_recovery_b_{pid} started",
+                                        f"write gate_recovery_b_{pid} passed",
+                                        f"search gate_recovery_b_{pid} started"])
+
+    def test_only_kafka_loses_its_volume_alone_then_restarts_gms_and_writes_again(self):
+        cluster = FakeRecovery(self)
+        problems, _, _ = self.check(cluster, only="kafka")
+        self.assertEqual(problems, [])
+        marks = self.marks(cluster)
+        pid = os.getpid()
+        self.assertIn("GMS's pod p-0 ready", marks)
+        self.assertIn(f"read gate_recovery_a_{pid} passed", marks)
+        self.assertFalse([m for m in marks if m.startswith("index ") or "restore-indices" in m])
+        self.assertEqual(marks.count("Datahub's install step ended"), 1)
+        self.assertIn(f"write gate_recovery_b_{pid} passed", marks)
+
+    def test_the_command_passes_only_on_and_refuses_another_store(self):
+        self.main(lambda _: ([], []), "--only", "kafka")
+        self.assertEqual(self.only, "kafka")
+        self.main(lambda _: ([], []))
+        self.assertIsNone(self.only)
+        code, _ = self.main(lambda _: ([], []), "--only", "zookeeper")
+        self.assertTrue(str(code).startswith("exit "), code)
 
 
 ROOT_ID, ROOT_SECRET = "rootid0123456789", "RootSecretValue0123456789abcdefg"
