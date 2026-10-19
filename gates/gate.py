@@ -227,7 +227,7 @@
 Every kubectl and helm call names the gate's context, and a namespace where the object has
 one. Nothing here reaches any cluster but the kind cluster it creates (ADR-017).
 
-Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | install --datahub-only | seed | check-migration | rebuild-replica | check-polaris-pg | check-datahub-pg | check-datahub-kafka | check-datahub-opensearch | check-datahub | check-datahub-ingestion | check-datahub-recovery | check-polaris | console-image [--build|--load] | batch-image | check-logs | check-console | check-iceberg | check-restore | gate-policies | check-network | check-metrics
+Usage: gate.py tools BIN_DIR [NAME...] | up | secrets | standins | check-standins | check-traffic FILE... | install [--fresh] [--dry-run] | install --datahub-only | seed | check-migration | rebuild-replica | check-polaris-pg | check-datahub-pg | check-datahub-kafka | check-datahub-opensearch | check-datahub | check-datahub-ingestion | check-datahub-recovery [--only opensearch|kafka] | check-polaris | console-image [--build|--load] | batch-image | check-logs | check-console | check-iceberg | check-restore | gate-policies | check-network | check-metrics
 """
 
 import base64
@@ -1985,6 +1985,7 @@ RESTORE_INDICES_TEMPLATE = f"{release.DATAHUB_RELEASE}-datahub-restore-indices-j
 RESTORE_INDICES_TIMEOUT = 900
 GMS_POD_LABELS = ("app.kubernetes.io/name=datahub-gms,"
                   f"app.kubernetes.io/instance={release.DATAHUB_RELEASE}")
+RECOVERY_STORES = ("opensearch", "kafka")
 
 
 def claim_of(pod):
@@ -2065,8 +2066,9 @@ def recovery_timeline(marks, since):
         return [f"Recovery timeline: not measured ({e})"]
 
 
-def check_datahub_recovery(env, pins, timeline=None):
-    """ADR-071 §8: see the module's docstring. Returns (problems, notes); each phase goes on
+def check_datahub_recovery(env, pins, timeline=None, only=None):
+    """ADR-071 §8: see the module's docstring. `only` is "opensearch" or "kafka" to lose that
+    store's volume alone, None for both. Returns (problems, notes); each phase goes on
     `timeline` as (time, line) as it happens, so a check that stops has it so far (ADR-077
     §3)."""
     timeline = [] if timeline is None else timeline
@@ -2190,45 +2192,51 @@ def check_datahub_recovery(env, pins, timeline=None):
                             f"{when}")
         return not wrong
 
-    def recover():
-        written.append(first)
-        if not (step("write", first) and step("search", first, seconds)):
-            return
+    def recover_opensearch():
         # OpenSearch's volume lost (ADR-070): system-update recreates the indices, and a
         # restore replays datahub-pg into them.
         if not (index_is(200, "before its volume is lost")
                 and lost(f"{release.DATAHUB_OPENSEARCH}-0", OPENSEARCH_POD_LABELS,
                          OPENSEARCH_RESTART_TIMEOUT)
                 and index_is(404, "on the new volume")):
-            return
+            return False
         notes.append(f"Index {DATAHUB_DATASET_INDEX} gone with the volume.")
         if not (reinstall() and index_is(200, "after system-update")):
-            return
+            return False
         notes.append(f"Index {DATAHUB_DATASET_INDEX} recreated by system-update.")
-        if not (restore_indices() and step("search", first, seconds)):
-            return
+        return restore_indices() and step("search", first, seconds)
+
+    def recover_kafka():
         # Kafka's volume lost (ADR-025, ADR-068 §5): system-update recreates the topics and its
         # message, which a new GMS waits for.
         if not (topics_are(True, "before the broker's volume is lost")
                 and lost(f"{release.DATAHUB_KAFKA}-0", KAFKA_POD_LABELS, KAFKA_RESTART_TIMEOUT)
                 and topics_are(False, "on the new volume")):
-            return
+            return False
         notes.append(f"Topics {', '.join(DATAHUB_TOPICS)} gone with the volume.")
         # GMS's pod template carries DATAHUB_REVISION, so the install step's helm upgrade rolls
         # GMS after system-update has recreated the topics, and --wait waits for it.
         gms_pods = kubectl + ["get", "pods", "-l", GMS_POD_LABELS, "-o", "json"]
         old = {p["metadata"]["uid"] for p in json.loads(output(gms_pods))["items"]}
         if not (reinstall() and topics_are(True, "after system-update")):
-            return
+            return False
         notes.append(f"Topics {', '.join(DATAHUB_TOPICS)} recreated by system-update.")
         back = new_ready_pod(old)(json.loads(output(gms_pods)))
         if back is None:
             problems.append("GMS's pod was not replaced by the install step: no ready pod "
                             "with a new uid after it")
-            return
+            return False
         mark(f"GMS's pod {back} rolled by the reinstall and ready")
         notes.append(f"GMS's pod {back} rolled by the install step on the new topics and is ready.")
-        if not step("read", first):
+        return step("read", first)
+
+    def recover():
+        written.append(first)
+        if not (step("write", first) and step("search", first, seconds)):
+            return
+        if only in (None, "opensearch") and not recover_opensearch():
+            return
+        if only in (None, "kafka") and not recover_kafka():
             return
         written.append(second)
         if step("write", second):
@@ -3137,11 +3145,14 @@ def main(argv):
         for line in notes + problems:
             print(line, flush=True)
         return 1 if problems else 0
-    if argv[1:] == ["check-datahub-recovery"]:
+    if argv[1:2] == ["check-datahub-recovery"]:
+        only = argv[3] if argv[2:3] == ["--only"] and len(argv) == 4 else None
+        if len(argv) > 2 and only not in RECOVERY_STORES:
+            sys.exit("Usage: gate.py check-datahub-recovery [--only opensearch|kafka]")
         start, timeline = dt.datetime.now(dt.timezone.utc).isoformat(), []
         try:
             problems, notes = check_datahub_recovery(release.load_env(ROOT, os.environ), pins,
-                                                     timeline)
+                                                     timeline, only)
             for line in notes + problems:
                 print(line, flush=True)
         finally:
