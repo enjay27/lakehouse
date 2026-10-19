@@ -382,6 +382,25 @@ class Rendered(unittest.TestCase):
         for name in ("MCE_CONSUMER_ENABLED", "MAE_CONSUMER_ENABLED", "PE_CONSUMER_ENABLED"):
             self.assertEqual(variables[name], "true", name)
 
+    def test_readiness_is_probed_every_5s_in_upstreams_window_and_liveness_is_upstreams(self):
+        for c, window, liveness in ((self.gms, 300, (60, 30, 8)), (self.frontend, 180, (60, 30, 4))):
+            with self.subTest(container=c["name"]):
+                p = c["readinessProbe"]
+                self.assertEqual((p["initialDelaySeconds"], p["periodSeconds"]), (20, 5))
+                self.assertGreaterEqual(p["initialDelaySeconds"] + p["periodSeconds"] * p["failureThreshold"], window)
+                q = c["livenessProbe"]
+                self.assertEqual((q["initialDelaySeconds"], q["periodSeconds"], q["failureThreshold"]), liveness)
+
+    def test_the_system_update_and_restore_indices_jobs_may_use_2_cpus_and_requests_stay_upstreams(self):
+        # ADR-071 §2, #229: tuning values.
+        restore = self.pods[RESTORE_INDICES]["spec"]["containers"][0]
+        for name, c, request in ((SYSTEM_UPDATE, self.jobs[0], "300m"),
+                                 (SYSTEM_UPDATE_NONBLOCKING, self.jobs[1], "300m"),
+                                 (RESTORE_INDICES, restore, "300m")):
+            with self.subTest(job=name):
+                self.assertEqual(c["resources"]["limits"]["cpu"], "2")
+                self.assertEqual(c["resources"]["requests"]["cpu"], request)
+
     def test_managed_ingestion_is_off(self):
         self.assertEqual(env(self.gms)["UI_INGESTION_ENABLED"], "false")
 
