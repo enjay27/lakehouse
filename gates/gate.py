@@ -2195,29 +2195,25 @@ def check_datahub_recovery(env, pins, timeline=None):
         written.append(first)
         if not (step("write", first) and step("search", first, seconds)):
             return
-        # OpenSearch's volume lost (ADR-070): system-update recreates the indices, and a
-        # restore replays datahub-pg into them.
+        # Both stores' volumes lost together (ADR-070, ADR-068 §5): one system-update recreates
+        # the indices and the topics, and a restore replays datahub-pg into the indices.
         if not (index_is(200, "before its volume is lost")
+                and topics_are(True, "before the broker's volume is lost")
                 and lost(f"{release.DATAHUB_OPENSEARCH}-0", OPENSEARCH_POD_LABELS,
                          OPENSEARCH_RESTART_TIMEOUT)
-                and index_is(404, "on the new volume")):
-            return
-        notes.append(f"Index {DATAHUB_DATASET_INDEX} gone with the volume.")
-        if not (reinstall() and index_is(200, "after system-update")):
-            return
-        notes.append(f"Index {DATAHUB_DATASET_INDEX} recreated by system-update.")
-        if not (restore_indices() and step("search", first, seconds)):
-            return
-        # Kafka's volume lost (ADR-025, ADR-068 §5): system-update recreates the topics and its
-        # message, which a new GMS waits for.
-        if not (topics_are(True, "before the broker's volume is lost")
                 and lost(f"{release.DATAHUB_KAFKA}-0", KAFKA_POD_LABELS, KAFKA_RESTART_TIMEOUT)
+                and index_is(404, "on the new volume")
                 and topics_are(False, "on the new volume")):
             return
-        notes.append(f"Topics {', '.join(DATAHUB_TOPICS)} gone with the volume.")
-        if not (reinstall() and topics_are(True, "after system-update")):
+        notes.append(f"Index {DATAHUB_DATASET_INDEX} and topics {', '.join(DATAHUB_TOPICS)} "
+                     "gone with the volumes.")
+        if not (reinstall() and index_is(200, "after system-update")
+                and topics_are(True, "after system-update")):
             return
-        notes.append(f"Topics {', '.join(DATAHUB_TOPICS)} recreated by system-update.")
+        notes.append(f"Index {DATAHUB_DATASET_INDEX} and topics {', '.join(DATAHUB_TOPICS)} "
+                     "recreated by system-update.")
+        if not (restore_indices() and step("search", first, seconds)):
+            return
         gms_pods = kubectl + ["get", "pods", "-l", GMS_POD_LABELS, "-o", "json"]
         old = {p["metadata"]["uid"] for p in json.loads(output(gms_pods))["items"]}
         mark("GMS's pod being deleted")

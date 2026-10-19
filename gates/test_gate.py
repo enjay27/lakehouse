@@ -3002,8 +3002,8 @@ class FakeRecovery:
 
 
 class CheckDatahubRecovery(unittest.TestCase):
-    """ADR-071 §8: Datahub's indices rebuilt after OpenSearch's volume is lost, its topics after
-    Kafka's; a dataset written before both still read and found, another written after."""
+    """ADR-071 §8: Datahub's indices and topics rebuilt after OpenSearch's and Kafka's volumes
+    are lost together; a dataset written before both still read and found, another written after."""
 
     ENV = {"NS_CATALOG_DATAHUB": "catalog-datahub", "KUBE_CONTEXT": "kind-lakehouse-gate"}
     PINS = {"standin_images": {"recorder": {"image": PYTHON_IMAGE}}}
@@ -3047,27 +3047,26 @@ class CheckDatahubRecovery(unittest.TestCase):
             "check pods created", "check pods ready",
             *step("write", first), *step("search", first),
             "index datasetindex_v2 answers 200",
+            f"{topics}: 2 of 2 present",
             *lost(OPENSEARCH_CLAIM, "datahub-opensearch-0"),
+            *lost(KAFKA_CLAIM, "datahub-kafka-0"),
             "index datasetindex_v2 answers 404",
+            f"{topics}: 0 of 2 present",
             *install(2),
             "index datasetindex_v2 answers 200",
+            f"{topics}: 2 of 2 present",
             f"{restore} created", f"{restore} started", f"{restore} complete",
             f"{restore} succeeded",
             *step("search", first),
-            f"{topics}: 2 of 2 present",
-            *lost(KAFKA_CLAIM, "datahub-kafka-0"),
-            f"{topics}: 0 of 2 present",
-            *install(3),
-            f"{topics}: 2 of 2 present",
             "GMS's pod being deleted", "GMS's pod deleted", "GMS's pod p-0 ready",
             *step("read", first), *step("write", second), *step("search", second),
             "clean-up started", *step("delete", first, second), "clean-up ended"])
         # Helm's and the Jobs' times are theirs, not the check's.
         times = dict((text, at) for at, text in cluster.timeline)
-        self.assertEqual(times["helm datahub revision 3 deployed"],
-                         "2026-10-19T00:03:00.123456789+00:00")
+        self.assertEqual(times["helm datahub revision 2 deployed"],
+                         "2026-10-19T00:02:00.123456789+00:00")
         self.assertEqual(times["job datahub-system-update-nonblk complete"],
-                         "2026-10-19T00:03:21Z")
+                         "2026-10-19T00:02:21Z")
         self.assertEqual(times[f"{restore} complete"], "2026-10-19T00:02:20Z")
 
     def test_a_timeline_that_cannot_be_read_is_said_and_never_fails_the_check(self):
@@ -3169,10 +3168,10 @@ class CheckDatahubRecovery(unittest.TestCase):
         first, second = self.names()
         self.assertEqual(cluster.events, [
             f"write {first}", f"search {first}",
-            f"delete claim {OPENSEARCH_CLAIM}", "delete pod/datahub-opensearch-0", "install",
+            f"delete claim {OPENSEARCH_CLAIM}", "delete pod/datahub-opensearch-0",
+            f"delete claim {KAFKA_CLAIM}", "delete pod/datahub-kafka-0", "install",
             "restore-indices", f"clean up job datahub-restore-indices-{os.getpid()}",
             f"search {first}",
-            f"delete claim {KAFKA_CLAIM}", "delete pod/datahub-kafka-0", "install",
             "restart gms", f"read {first}", f"write {second}", f"search {second}",
             f"delete {first} {second}",
             f"clean up datahub-kafka-recovery-{os.getpid()} "
@@ -3224,7 +3223,7 @@ class CheckDatahubRecovery(unittest.TestCase):
         self.assert_stopped_after("old-claim", "delete pod/datahub-opensearch-0", "old claim")
 
     def test_an_index_kept_after_the_loss_is_a_problem(self):
-        self.assert_stopped_after("index-kept", "delete pod/datahub-opensearch-0", "404")
+        self.assert_stopped_after("index-kept", "delete pod/datahub-kafka-0", "404")
 
     def test_a_failed_install_is_a_problem(self):
         problem = self.assert_stopped_after("install", "install", "helm upgrade datahub")
