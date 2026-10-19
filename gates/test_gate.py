@@ -2882,7 +2882,7 @@ class FakeRecovery:
         self.claims = {OPENSEARCH_CLAIM: "os-1", KAFKA_CLAIM: "kafka-1"}
         self.datasets, self.indexed, self.pods = set(), set(), []
         # What the timeline reads back: the release's Helm revision (always 1), its Jobs' times.
-        self.revision, self.timeline = 1, []
+        self.revision, self.timeline, self.revisions = 1, [], []
 
     def read(self, argv):
         """Helm's history and the Jobs, read for the timeline only (ADR-077 §3)."""
@@ -2916,6 +2916,7 @@ class FakeRecovery:
             return ("---\n# Source: datahub/templates/datahub-upgrade/x.yml\n"
                     "apiVersion: batch/v1\nkind: Job\nmetadata:\n"
                     "  name: datahub-system-update\n  labels:\n    name: other\n"
+                    "env:\n  - name: DATAHUB_REVISION\n    value: \"1\"\n"
                     "---\napiVersion: batch/v1\nkind: Job\nmetadata:\n"
                     "  name: datahub-system-update-nonblk\n")
         if argv[0] == "helm":
@@ -2964,6 +2965,8 @@ class FakeRecovery:
             # lost volumes held.
             self.test.assertIn("name: datahub-system-update\n", stdin)
             self.test.assertNotIn("nonblk", stdin)
+            self.revisions.append(re.search(r'DATAHUB_REVISION\n    value: "(\d+)"',
+                                            stdin).group(1))
             self.events.append("install")
             if self.broken != "install":
                 if self.index == 404 and self.broken != "no-index":
@@ -3111,6 +3114,8 @@ class CheckDatahubRecovery(unittest.TestCase):
         self.assertEqual(problems, [])
         self.assertEqual(cluster.events.count("render"), 2)
         self.assertEqual(cluster.events.count("install"), 2)
+        # Each reinstall runs system-update at the next revision, the release staying at 1.
+        self.assertEqual(cluster.revisions, ["2", "3"])
         self.assertNotIn("job datahub-system-update-nonblk started", self.marks(cluster))
 
     def test_the_timelines_lines_from_a_recorded_set_of_times(self):

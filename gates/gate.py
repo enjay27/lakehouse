@@ -145,7 +145,7 @@
                   datahub-opensearch-0's claim and pod are deleted, a new pod is ready on a new
                   claim without datasetindex_v2, Datahub's install step runs again (only the
                   blocking system-update Job, rendered with helm template from the release's
-                  own values and applied, no Helm revision), recreating the index, a Job from the restore-indices template
+                  own values and applied with the next revision number, no Helm revision), recreating the index, a Job from the restore-indices template
                   completes and the dataset is found again; then datahub-kafka-0's claim and pod
                   are deleted and Datahub's topics are gone, the install step runs again and
                   they are back, GMS's pod is deleted and a new one is ready, the dataset reads
@@ -2110,6 +2110,7 @@ def check_datahub_recovery(env, pins, timeline=None):
     first, second = f"gate_recovery_a_{pid}", f"gate_recovery_b_{pid}"
     seconds = str(DATAHUB_SEARCH_SECONDS)
     problems, notes, written, pods = [], [], [], iter(range(1, 100))
+    revisions = []
 
     def step(*args):
         """check.py's step `args[0]` against GMS, from a pod of GMS's clients."""
@@ -2142,9 +2143,10 @@ def check_datahub_recovery(env, pins, timeline=None):
 
     def reinstall():
         """Datahub's install step again, without a Helm revision: only the blocking system-update
-        Job, rendered from the chart with the release's own values and applied. The release stays
-        at revision 1, which is the DATAHUB_REVISION GMS runs with, so nothing rolls and the
-        non-blocking Job is not run. The Job's times go on the timeline."""
+        Job, rendered from the chart with the release's own values and applied, with the next
+        revision number in DATAHUB_REVISION. The release stays at revision 1, which is the one GMS
+        runs with, so nothing rolls and the non-blocking Job is not run. The Job's times go on
+        the timeline."""
         helm = ["helm", "--kube-context", CONTEXT, "-n", ns]
         history = json.loads(output(helm + ["history", release.DATAHUB_RELEASE, "--max", "1",
                                             "-o", "json"]))
@@ -2165,8 +2167,18 @@ def check_datahub_recovery(env, pins, timeline=None):
             problems.append(f"The rendered system-update template holds {len(blocking)} Jobs "
                             f"named {job}, not 1")
             return False
+        # Helm's revision is what tells system-update to run its steps again (it records the
+        # revision it ran for): each reinstall stands for the next revision, as a helm upgrade
+        # would have made it, though the release itself stays at revision 1.
+        revisions.append(len(revisions) + 2)
+        manifest, swapped = re.subn(r'(- name: DATAHUB_REVISION\n\s+value: )"1"',
+                                    rf'\g<1>"{revisions[-1]}"', blocking[0])
+        if swapped != 1:
+            problems.append(f"The rendered {job} holds {swapped} DATAHUB_REVISION values of "
+                            '"1", not 1')
+            return False
         output(kubectl + ["delete", "job", job, "--ignore-not-found", "--wait=true"])
-        output(kubectl + ["apply", "-f", "-"], blocking[0])
+        output(kubectl + ["apply", "-f", "-"], manifest)
         outcome = wait_for(kubectl + ["get", "job", job, "-o", "json"], job_finished,
                            f"Job {job}", timeout=DATAHUB_SYSTEM_UPDATE_TIMEOUT)
         mark("Datahub's install step ended")
