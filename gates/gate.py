@@ -694,22 +694,33 @@ def install_plan(previous, previous_dir, fresh, dry_run=False):
 
 # ADR-077 §1: the datahub-recovery job's install, release.py's own functions in ADR-045's order:
 # step 0, then Datahub's part of step 1. release.py gains no mode; only the gate composes it.
-DATAHUB_ONLY_STEPS = ("check_preconditions", "datahub_network_policies", "datahub_postgres",
-                      "datahub_kafka", "datahub_opensearch", "datahub")
+# The three stores do not depend on each other: they install at the same time, between the
+# policies and Datahub itself.
+DATAHUB_ONLY_GROUPS = (("check_preconditions",), ("datahub_network_policies",),
+                       ("datahub_postgres", "datahub_kafka", "datahub_opensearch"),
+                       ("datahub",))
 
 
 def datahub_only(env, supported):
-    """Step 0 and Datahub's part of step 1 of this commit's release.py, the first step with
-    problems stopping the rest. Returns (problems, notes, timed): each step's (start, end,
-    label), for the timeline."""
-    notes, timed = [], []
-    for name in DATAHUB_ONLY_STEPS:
+    """Step 0 and Datahub's part of step 1 of this commit's release.py, the groups in order,
+    the steps of a group at the same time, the first group with problems stopping the rest.
+    Returns (problems, notes, timed): each step's (start, end, label), for the timeline."""
+    def timed_step(name):
         step = getattr(release, name)
         began = dt.datetime.now(dt.timezone.utc).isoformat()
         problems, more = (step(env, release.call, supported) if name == "check_preconditions"
                           else step(env, release.call))
-        timed.append((began, dt.datetime.now(dt.timezone.utc).isoformat(), f"release.py {name}"))
-        notes += more
+        return problems, more, (began, dt.datetime.now(dt.timezone.utc).isoformat(),
+                                f"release.py {name}")
+    notes, timed = [], []
+    for group in DATAHUB_ONLY_GROUPS:
+        with concurrent.futures.ThreadPoolExecutor(len(group)) as pool:
+            results = [f.result() for f in [pool.submit(timed_step, name) for name in group]]
+        problems = []
+        for found, more, span in results:
+            problems += found
+            notes += more
+            timed.append(span)
         if problems:
             return problems, notes, timed
     return [], notes, timed
