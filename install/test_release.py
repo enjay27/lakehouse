@@ -991,6 +991,25 @@ class Settle(unittest.TestCase):
         self.assertIn("Setting up primary", problem)
 
 
+class Concurrency(unittest.TestCase):
+    def test_together_runs_every_step_at_once_and_keeps_their_order(self):
+        gate = threading.Barrier(2, timeout=5)  # both steps must be running to pass it
+
+        def step(name):
+            def call():
+                gate.wait()
+                return [f"{name} failed"], [f"{name} done"]
+            return call
+        problems, notes = release._together([step("a"), step("b")])
+        self.assertEqual(problems, ["a failed", "b failed"])
+        self.assertEqual(notes, ["a done", "b done"])
+
+    def test_a_chain_stops_at_its_first_problem(self):
+        problems, notes = release._chain([lambda: ([], ["a"]), lambda: (["x"], ["b"]),
+                                          lambda: ([], ["c"])])
+        self.assertEqual((problems, notes), (["x"], ["a", "b"]))
+
+
 class Steps(unittest.TestCase):
     def test_step_0_problems_stop_before_step_1(self):
         calls = []
@@ -1040,6 +1059,7 @@ class Steps(unittest.TestCase):
         # ADR-045 step 1, ADR-066 §4, ADR-068 §4, ADR-070 §4: then Datahub, its policies,
         # datahub-pg, its Kafka, then its OpenSearch.
         self.assertIn("Datahub's network policies", notes[8])
+        # The three stores run together; their notes come in this fixed order.
         self.assertIn("datahub-pg", notes[9])
         self.assertIn("datahub-kafka", notes[10])
         self.assertIn("datahub-opensearch", notes[11])
@@ -1054,23 +1074,32 @@ class Steps(unittest.TestCase):
         self.assertEqual([h[h.index("--install") + 1] for h in helms],
                          [release.POLARIS_NETPOL_RELEASE, release.POLARIS_PG_RELEASE])
         helms = [c for c in dh.calls if c[0] == "helm"]
-        self.assertEqual([h[h.index("--install") + 1] for h in helms],
-                         [release.DATAHUB_NETPOL_RELEASE, release.DATAHUB_PG_RELEASE,
-                          release.DATAHUB_KAFKA_RELEASE, release.DATAHUB_OPENSEARCH_RELEASE,
-                          release.DATAHUB_RELEASE])
+        # Policies, then datahub-pg, Kafka and OpenSearch together (any order), then Datahub.
+        installed = [h[h.index("--install") + 1] for h in helms]
+        self.assertEqual(installed[:1], [release.DATAHUB_NETPOL_RELEASE])
+        self.assertEqual(installed[-1:], [release.DATAHUB_RELEASE])
+        self.assertEqual(sorted(installed[1:-1]),
+                         sorted([release.DATAHUB_PG_RELEASE, release.DATAHUB_KAFKA_RELEASE,
+                                 release.DATAHUB_OPENSEARCH_RELEASE]))
 
     def test_failed_network_policies_stop_before_polaris_pg(self):
         step0, pg = FakeKubectl(), FakeCalls(helm=(1, "values don't meet the schema"))
 
+        dh = datahub_calls()
+
         def run(argv, stdin=None):
             if "crd" in argv or "cnpg-system" in argv:
                 return step0(argv)
+            if "catalog-datahub" in argv:
+                return dh(argv)
             return pg(argv)
         problems, _ = release.install(BOOTSTRAP_ENV, run, ["1.30"], dry_run=False)
         self.assertIn("schema", "\n".join(problems))
+        # Datahub's chain runs beside Polaris's (its own fake answers); Polaris's stops at once.
         helms = [c for c in pg.calls if c[0] == "helm"]
-        self.assertEqual(len(helms), 1)
-        self.assertIn(release.POLARIS_NETPOL_CHART, helms[0])
+        self.assertEqual([h[h.index("--install") + 1] for h in helms if h[h.index("--install") + 1] in (
+            release.POLARIS_NETPOL_RELEASE, release.POLARIS_PG_RELEASE)],
+            [release.POLARIS_NETPOL_RELEASE])
 
     def test_a_failed_batch_stops_the_install_before_the_console(self):
         step0, pg, endpoints = FakeKubectl(), FakeCalls(), FakeRun()
@@ -1165,12 +1194,14 @@ class Steps(unittest.TestCase):
         self.assertIn("StatefulSet datahub-kafka in catalog-datahub is not ready",
                       "\n".join(problems))
         self.assertEqual(batch.calls, [])
-        self.assertIn("datahub-pg", notes[-1])
+        self.assertTrue(any("datahub-pg" in n for n in notes))
 
     def test_a_missing_storage_class_stops_before_polaris(self):
         step0, pg, endpoints = FakeKubectl(), FakeCalls(), FakeRun()
         boot, pol = FakeBootstrap(), FakePolaris()
         claim = FakeClaim(storage_class=(1, "NotFound"))
+
+        dh = datahub_calls()
 
         def run(argv, stdin=None):
             if "crd" in argv or "cnpg-system" in argv:
@@ -1183,6 +1214,8 @@ class Steps(unittest.TestCase):
                 return FakePrincipal()(argv, stdin)
             if "polaris-root" in argv or "run" in argv:
                 return boot(argv, stdin)
+            if "catalog-datahub" in argv:
+                return dh(argv)
             if "polaris-s3" in argv or "rollout" in argv or release.POLARIS_CHART in argv:
                 return pol(argv, stdin)
             return pg(argv)
@@ -1228,6 +1261,8 @@ class Steps(unittest.TestCase):
         boot, pol = FakeBootstrap(answer=(1, "connection refused")), FakePolaris()
         claim = FakeClaim()
 
+        dh = datahub_calls()
+
         def run(argv, stdin=None):
             if "crd" in argv or "cnpg-system" in argv:
                 return step0(argv)
@@ -1239,6 +1274,8 @@ class Steps(unittest.TestCase):
                 return FakePrincipal()(argv, stdin)
             if "polaris-root" in argv or "run" in argv:
                 return boot(argv, stdin)
+            if "catalog-datahub" in argv:
+                return dh(argv)
             if "polaris-s3" in argv or "rollout" in argv or release.POLARIS_CHART in argv:
                 return pol(argv, stdin)
             return pg(argv)
@@ -1252,8 +1289,11 @@ class Steps(unittest.TestCase):
         def run(argv, stdin=None):
             if "crd" in argv or "cnpg-system" in argv:
                 return step0(argv)
+            if "catalog-datahub" in argv:
+                return dh(argv)
             return (1, "http://s3.example:8333 did not answer") if "run" in argv \
                 else step1(argv)
+        dh = datahub_calls()
         problems, _ = release.install(ENDPOINT_ENV, run, ["1.30"], dry_run=False)
         self.assertIn("did not answer", "\n".join(problems))
 

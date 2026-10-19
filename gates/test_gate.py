@@ -390,7 +390,10 @@ class DatahubOnly(unittest.TestCase):
         with stack:
             problems, notes, timed = gate.datahub_only(self.ENV, self.SUPPORTED)
         self.assertEqual(problems, [])
-        self.assertEqual(called, list(self.DATAHUB))
+        # Step 0, the policies, the three stores together, Datahub: the stores in any order.
+        self.assertEqual(called[:2], list(self.DATAHUB[:2]))
+        self.assertEqual(sorted(called[2:5]), sorted(self.DATAHUB[2:5]))
+        self.assertEqual(called[5:], ["datahub"])
         self.assertEqual(notes, [f"{name} done" for name in self.DATAHUB])
         # Each step timed under its own name, for the install's timeline.
         self.assertEqual([label for _, _, label in timed],
@@ -404,9 +407,14 @@ class DatahubOnly(unittest.TestCase):
                 stack, called = self.steps(broken)
                 with stack:
                     problems, notes, timed = gate.datahub_only(self.ENV, self.SUPPORTED)
-                upto = list(self.DATAHUB[:self.DATAHUB.index(broken) + 1])
+                # The stores run together: one broken lets the other two finish.
+                group = [n for n in self.DATAHUB[2:5]]
+                end = self.DATAHUB.index(broken) + 1
+                if broken in group:
+                    end = 5
+                upto = list(self.DATAHUB[:end])
                 self.assertEqual(problems, [f"{broken} failed"])
-                self.assertEqual(called, upto)
+                self.assertEqual(sorted(called), sorted(upto))
                 self.assertEqual(notes, [f"{name} done" for name in upto])
                 self.assertEqual(len(timed), len(upto))
 
@@ -431,7 +439,8 @@ class DatahubOnly(unittest.TestCase):
     def test_the_command_prints_its_notes_then_the_pulls_and_the_timeline(self):
         code, out, called, run, tags, pulls, timeline, record = self.main()
         self.assertEqual(code, 0)
-        self.assertEqual(called, list(self.DATAHUB))
+        self.assertEqual(sorted(called), sorted(self.DATAHUB))
+        self.assertEqual(called[-1], "datahub")
         # Fresh, from this commit: no last release, seed, gate-policies or other command.
         run.assert_not_called()
         tags.assert_not_called()
@@ -448,7 +457,7 @@ class DatahubOnly(unittest.TestCase):
     def test_a_problem_fails_the_command_after_its_pulls_and_timeline(self):
         code, out, called, *_ = self.main(broken="datahub_kafka")
         self.assertEqual(code, 1)
-        self.assertEqual(called[-1], "datahub_kafka")
+        self.assertNotIn("datahub", called[5:])
         self.assertLess(out.index("datahub_kafka failed"), out.index("Install timeline: t"))
 
     def test_it_takes_no_other_option(self):

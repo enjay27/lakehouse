@@ -74,6 +74,7 @@ Usage: python3 install/release.py [--dry-run] | batch-image
        Exits 0 when every step passed, 1 with the problems, 2 on an unknown option.
 """
 
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -1073,28 +1074,56 @@ def console(env, run, dry_run=False):
     return [], [f"Step 2: deployment/{CONSOLE} in {namespace} rolled out."]
 
 
-def install(env, run, supported, dry_run):
-    """Every step in order; the first step with problems stops the rest. The console's
-    problems are notes: it never fails a release (ADR-028); the batch's stop it (ADR-037)."""
+def _chain(steps):
+    """Steps one after another; the first with problems stops the rest."""
     notes = []
-    for step in (lambda: check_preconditions(env, run, supported),
-                 lambda: network_policies(env, run, dry_run),
-                 lambda: polaris_postgres(env, run, dry_run),
-                 lambda: endpoints_answer(env, run),
-                 lambda: bootstrap(env, run, dry_run=dry_run),
-                 lambda: logs_claim(env, run, dry_run),
-                 lambda: polaris(env, run, dry_run),
-                 lambda: datahub_network_policies(env, run, dry_run),
-                 lambda: datahub_postgres(env, run, dry_run),
-                 lambda: datahub_kafka(env, run, dry_run),
-                 lambda: datahub_opensearch(env, run, dry_run),
-                 lambda: datahub(env, run, dry_run),
-                 lambda: datahub_principal(env, run, dry_run=dry_run),
-                 lambda: log_batch(env, run, dry_run)):
+    for step in steps:
         problems, more = step()
         notes += more
         if problems:
             return problems, notes
+    return [], notes
+
+
+def _together(steps):
+    """Steps at the same time, all of them run; problems and notes in the steps' order."""
+    with concurrent.futures.ThreadPoolExecutor(len(steps)) as pool:
+        results = [f.result() for f in [pool.submit(step) for step in steps]]
+    return [p for problems, _ in results for p in problems], \
+        [n for _, more in results for n in more]
+
+
+def install(env, run, supported, dry_run):
+    """Step 0, then Polaris's and Datahub's chains of step 1 at the same time, each stopping
+    at its first problem (Datahub's three stores together); then the Polaris principal, the
+    batch and the console. The console's problems are notes: it never fails a release
+    (ADR-028); the batch's stop it (ADR-037)."""
+    problems, notes = check_preconditions(env, run, supported)
+    if problems:
+        return problems, notes
+    polaris_chain = (lambda: network_policies(env, run, dry_run),
+                     lambda: polaris_postgres(env, run, dry_run),
+                     lambda: endpoints_answer(env, run),
+                     lambda: bootstrap(env, run, dry_run=dry_run),
+                     lambda: logs_claim(env, run, dry_run),
+                     lambda: polaris(env, run, dry_run))
+    datahub_chain = (lambda: datahub_network_policies(env, run, dry_run),
+                     lambda: datahub_postgres(env, run, dry_run),
+                     lambda: _together([lambda: datahub_kafka(env, run, dry_run),
+                                        lambda: datahub_opensearch(env, run, dry_run)]),
+                     lambda: datahub(env, run, dry_run))
+    with concurrent.futures.ThreadPoolExecutor(2) as pool:
+        both = [f.result() for f in [pool.submit(_chain, polaris_chain),
+                                     pool.submit(_chain, datahub_chain)]]
+    notes += [n for _, more in both for n in more]
+    problems = [p for found, _ in both for p in found]
+    if problems:
+        return problems, notes
+    problems, more = _chain((lambda: datahub_principal(env, run, dry_run=dry_run),
+                             lambda: log_batch(env, run, dry_run)))
+    notes += more
+    if problems:
+        return problems, notes
     problems, more = console(env, run, dry_run)
     notes += more + [f"Step 2: the console (ADR-028, not blocking): {p}" for p in problems]
     return [], notes
