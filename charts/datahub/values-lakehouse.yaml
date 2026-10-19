@@ -148,6 +148,9 @@ datahubUpgrade:
   enabled: true
   image:
     tag: "v1.7.0.1@sha256:c3db54d8fb94bc761be611c014c5ede3fd02daac1f15c8c177d69eceee79a24c"
+  extraEnvs:
+    - name: JDK_JAVA_OPTIONS
+      value: "-XX:TieredStopAtLevel=1 -XX:+UseSerialGC"
   restoreIndices:
     # Upstream caps the short-lived JVM at 500m; the requests stay upstream's.
     resources:
@@ -174,6 +177,9 @@ datahubSystemUpdate:
     # System-update creates the indices (ADR-070).
     - name: ELASTICSEARCH_NUM_REPLICAS_PER_INDEX
       value: "0"
+    # Short-lived JVMs: the C1 compiler alone and the serial collector start sooner.
+    - name: JDK_JAVA_OPTIONS
+      value: "-XX:TieredStopAtLevel=1 -XX:+UseSerialGC"
 
 global:
   # Every Datahub pod is a client of its three stores and of GMS (ADR-071 §4, §5): the hook Jobs

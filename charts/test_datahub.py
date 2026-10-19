@@ -435,6 +435,16 @@ class Rendered(unittest.TestCase):
                 limits = self.pods[name]["spec"]["containers"][0]["resources"]["limits"]
                 self.assertEqual(limits["cpu"], "2")
 
+    def test_the_short_lived_jobs_start_their_jvm_with_c1_and_the_serial_collector(self):
+        for name in (SYSTEM_UPDATE, SYSTEM_UPDATE_NONBLOCKING, RESTORE_INDICES):
+            with self.subTest(pod=name):
+                variables = env(self.pods[name]["spec"]["containers"][0])
+                self.assertEqual(variables["JDK_JAVA_OPTIONS"],
+                                 "-XX:TieredStopAtLevel=1 -XX:+UseSerialGC")
+        for name in (GMS, FRONTEND):
+            with self.subTest(pod=name):
+                self.assertNotIn("JDK_JAVA_OPTIONS", env(self.pods[name]["spec"]["containers"][0]))
+
     def test_every_container_runs_by_tag_and_digest(self):
         # ADR-071 §3.
         expected = {GMS: "gms", FRONTEND: "frontend", SYSTEM_UPDATE: "upgrade",
