@@ -429,6 +429,13 @@ class Rendered(unittest.TestCase):
                     self.assertEqual(sc["runAsUser"], DATAHUB_USER)
                     self.assertFalse(sc["allowPrivilegeEscalation"])
 
+    def test_the_system_update_and_restore_indices_jobs_get_two_cpus(self):
+        # ADR-071 §2, #229: upstream's 500m cap lifted on the slowest phases, requests unchanged.
+        for name in (SYSTEM_UPDATE, SYSTEM_UPDATE_NONBLOCKING, RESTORE_INDICES):
+            with self.subTest(pod=name):
+                limits = self.pods[name]["spec"]["containers"][0]["resources"]["limits"]
+                self.assertEqual(limits["cpu"], "2")
+
     def test_every_container_runs_by_tag_and_digest(self):
         # ADR-071 §3.
         expected = {GMS: "gms", FRONTEND: "frontend", SYSTEM_UPDATE: "upgrade",

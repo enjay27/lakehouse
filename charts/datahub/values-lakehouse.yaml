@@ -146,11 +146,21 @@ datahub-ingestion-cron:
 # (ADR-071 §2).
 datahubUpgrade:
   enabled: true
+  restoreIndices:
+    resources:
+      limits:
+        # Upstream caps the Job at 500m; the slowest recovery phase gets two CPUs (ADR-071 §2, #229).
+        cpu: "2"
   image:
     tag: "v1.7.0.1@sha256:c3db54d8fb94bc761be611c014c5ede3fd02daac1f15c8c177d69eceee79a24c"
 
 # The blocking pre-install Job and the non-blocking post-install one, upstream's ZDU defaults.
 datahubSystemUpdate:
+  resources:
+    limits:
+      # Upstream caps both Jobs at 500m; they are the slowest install and recovery phases, so two
+      # CPUs each (ADR-071 §2, #229). Requests and memory stay upstream's.
+      cpu: "2"
   image:
     tag: "v1.7.0.1@sha256:c3db54d8fb94bc761be611c014c5ede3fd02daac1f15c8c177d69eceee79a24c"
   sql:
