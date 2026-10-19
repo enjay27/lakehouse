@@ -143,8 +143,9 @@
                   on the gate's own context only, since it deletes volumes (ADR-071 §8,
                   ADR-004): check.py's steps write a dataset and find it by search; then
                   datahub-opensearch-0's claim and pod are deleted, a new pod is ready on a new
-                  claim without datasetindex_v2, Datahub's install step runs again, its
-                  system-update recreating the index, a Job from the restore-indices template
+                  claim without datasetindex_v2, Datahub's install step runs again (only the
+                  blocking system-update Job, rendered with helm template from the release's
+                  own values and applied, no Helm revision), recreating the index, a Job from the restore-indices template
                   completes and the dataset is found again; then datahub-kafka-0's claim and pod
                   are deleted and Datahub's topics are gone, the install step runs again and
                   they are back, GMS's pod is deleted and a new one is ready, the dataset reads
@@ -152,8 +153,8 @@
                   hard-deleted and the check pods deleted whatever happened. When it ends,
                   passed, failed or stopped, it prints its timeline (ADR-077 §3): the seconds
                   after it started, and since the line before, of each phase's start and end
-                  by its own clock, and each install step's Helm revision, system-update's
-                  Jobs and the restore-indices Job by their own times, read right after each
+                  by its own clock, and system-update's Job and the restore-indices Job by
+                  their own times, read right after each
                   step; a read or a timeline that fails is said, never a problem.
   check-polaris   compares the running Polaris (its Deployment, pods and ConfigMap) with the
                   values its helm release was installed with and with `.env`, checks its
@@ -1983,6 +1984,10 @@ DATAHUB_DATASET_INDEX = "datasetindex_v2"
 DATAHUB_TOPICS = ("DataHubUpgradeHistory_v1", "MetadataChangeLog_Versioned_v1")
 RESTORE_INDICES_TEMPLATE = f"{release.DATAHUB_RELEASE}-datahub-restore-indices-job-template"
 RESTORE_INDICES_TIMEOUT = 900
+# check-datahub-recovery's reinstall renders this one template of the datahub chart and waits as
+# long as the install does (install/release.py's DATAHUB_TIMEOUT).
+SYSTEM_UPDATE_TEMPLATE = "templates/datahub-upgrade/datahub-system-update-job.yml"
+DATAHUB_SYSTEM_UPDATE_TIMEOUT = 1200
 GMS_POD_LABELS = ("app.kubernetes.io/name=datahub-gms,"
                   f"app.kubernetes.io/instance={release.DATAHUB_RELEASE}")
 GMS_RESTART_TIMEOUT = 900
@@ -2136,20 +2141,44 @@ def check_datahub_recovery(env, pins, timeline=None):
         return True
 
     def reinstall():
-        """Datahub's install step again (ADR-071 §7): system-update runs as a pre-upgrade hook.
-        Its revision and system-update's Jobs go on the timeline, read before the next
-        revision deletes them."""
+        """Datahub's install step again, without a Helm revision: only the blocking system-update
+        Job, rendered from the chart with the release's own values and applied. The release stays
+        at revision 1, which is the DATAHUB_REVISION GMS runs with, so nothing rolls and the
+        non-blocking Job is not run. The Job's times go on the timeline."""
+        helm = ["helm", "--kube-context", CONTEXT, "-n", ns]
+        history = json.loads(output(helm + ["history", release.DATAHUB_RELEASE, "--max", "1",
+                                            "-o", "json"]))
+        if [r["revision"] for r in history] != [1]:
+            problems.append(f"Helm release {release.DATAHUB_RELEASE} is at revision "
+                            f"{[r['revision'] for r in history]}, not 1: a rendered Job would "
+                            "not match GMS's DATAHUB_REVISION")
+            return False
+        job = f"{release.DATAHUB_RELEASE}-system-update"
         mark("Datahub's install step started")
-        found, more = release.datahub(env, release.call)
+        rendered = output(helm + ["template", release.DATAHUB_RELEASE, release.DATAHUB_CHART,
+                                  "-f", "-", "--show-only", SYSTEM_UPDATE_TEMPLATE],
+                          output(helm + ["get", "values", release.DATAHUB_RELEASE, "--all",
+                                         "-o", "json"]))
+        blocking = [d for d in re.split(r"^---\s*$", rendered, flags=re.MULTILINE)
+                    if re.search(rf"^  name: {re.escape(job)}\s*$", d, re.MULTILINE)]
+        if len(blocking) != 1:
+            problems.append(f"The rendered system-update template holds {len(blocking)} Jobs "
+                            f"named {job}, not 1")
+            return False
+        output(kubectl + ["delete", "job", job, "--ignore-not-found", "--wait=true"])
+        output(kubectl + ["apply", "-f", "-"], blocking[0])
+        outcome = wait_for(kubectl + ["get", "job", job, "-o", "json"], job_finished,
+                           f"Job {job}", timeout=DATAHUB_SYSTEM_UPDATE_TIMEOUT)
         mark("Datahub's install step ended")
-        read_marks(["helm", "--kube-context", CONTEXT, "-n", ns, "history",
-                    release.DATAHUB_RELEASE, "--max", "1", "-o", "json"], revision_marks,
-                   "Datahub's Helm revision")
-        read_marks(kubectl + ["get", "jobs", "-o", "json"],
-                   lambda jobs: job_marks(jobs, DATAHUB_JOBS), "Datahub's system-update Jobs")
-        problems.extend(found)
-        notes.extend(more)
-        return not found
+        read_marks(kubectl + ["get", "job", job, "-o", "json"],
+                   lambda one: job_marks({"items": [one]}, (job,)), f"job {job}")
+        if outcome != "succeeded":
+            log = subprocess.run(kubectl + ["logs", f"job/{job}", "--tail=20"],
+                                 capture_output=True, text=True, check=False)
+            problems.append(f"Job {job} {outcome}: {(log.stdout or log.stderr).strip()}")
+            return False
+        notes.append(f"Job {job} rendered from the chart and applied; no Helm revision.")
+        return True
 
     def restore_indices():
         job = f"datahub-restore-indices-{pid}"

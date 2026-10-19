@@ -2871,8 +2871,8 @@ def stateful_pod(name, claim):
 
 class FakeRecovery:
     """The gate's cluster as check_datahub_recovery sees it, through gate.output,
-    gate.wait_for, gate.subprocess.run (check.py's pods, the logs and the clean-up) and
-    release.datahub. Datasets are in datahub-pg, and in the index only once the change log or a
+    gate.wait_for and gate.subprocess.run (check.py's pods, the logs and the clean-up); the
+    reinstall is helm template and kubectl apply of one rendered Job. Datasets are in datahub-pg, and in the index only once the change log or a
     restore put them there. `broken` names one thing to spoil; `events` is what happened, in
     order."""
 
@@ -2881,19 +2881,13 @@ class FakeRecovery:
         self.index, self.topics = 200, set(DATAHUB_TOPICS) | {"__consumer_offsets"}
         self.claims = {OPENSEARCH_CLAIM: "os-1", KAFKA_CLAIM: "kafka-1"}
         self.datasets, self.indexed, self.pods = set(), set(), []
-        # What the timeline reads back: Datahub's Helm revision, its Jobs' times.
+        # What the timeline reads back: the release's Helm revision (always 1), its Jobs' times.
         self.revision, self.timeline = 1, []
 
     def read(self, argv):
         """Helm's history and the Jobs, read for the timeline only (ADR-077 §3)."""
         if self.broken == "unreadable":
             return subprocess.CompletedProcess(argv, 1, "", "connection refused")
-        if argv[0] == "helm":
-            self.test.assertEqual(argv[argv.index("history") + 1:],
-                                  ["datahub", "--max", "1", "-o", "json"])
-            return subprocess.CompletedProcess(argv, 0, json.dumps([{
-                "revision": self.revision, "status": "deployed",
-                "updated": f"2026-10-19T00:0{self.revision}:00.123456789+00:00"}]), "")
         kind = argv[argv.index("get") + 1]
         names = gate.DATAHUB_JOBS if kind == "jobs" else [argv[argv.index("get") + 2]]
         items = [{"metadata": {"name": name}, "status": {
@@ -2907,8 +2901,28 @@ class FakeRecovery:
             argv, 0, json.dumps({"items": items} if kind == "jobs" else items[0]), "")
 
     def output(self, argv, stdin=None):
+        if argv[0] == "helm" and "history" in argv:
+            self.test.assertEqual(argv[argv.index("history") + 1:],
+                                  ["datahub", "--max", "1", "-o", "json"])
+            return json.dumps([{"revision": 2 if self.broken == "revision" else 1,
+                                "status": "deployed", "updated": "2026-10-19T00:00:00Z"}])
+        if argv[0] == "helm" and "template" in argv:
+            self.test.assertEqual(argv[argv.index("template") + 1:argv.index("template") + 3],
+                                  ["datahub", gate.release.DATAHUB_CHART])
+            self.test.assertEqual(argv[argv.index("--show-only") + 1],
+                                  "templates/datahub-upgrade/datahub-system-update-job.yml")
+            self.test.assertEqual(stdin, '{"global": {"release": "values"}}')
+            self.events.append("render")
+            return ("---\n# Source: datahub/templates/datahub-upgrade/x.yml\n"
+                    "apiVersion: batch/v1\nkind: Job\nmetadata:\n"
+                    "  name: datahub-system-update\n  labels:\n    name: other\n"
+                    "---\napiVersion: batch/v1\nkind: Job\nmetadata:\n"
+                    "  name: datahub-system-update-nonblk\n")
         if argv[0] == "helm":
+            self.test.assertEqual(argv[argv.index("values") + 2:], ["--all", "-o", "json"])
             release = argv[argv.index("values") + 1]
+            if release == "datahub":
+                return '{"global": {"release": "values"}}'
             return json.dumps({"image": KAFKA_IMAGE} if release == "datahub-kafka"
                               else OPENSEARCH_VALUES)
         verb = argv[argv.index("-n") + 2]
@@ -2943,7 +2957,19 @@ class FakeRecovery:
             self.test.assertIn(gate.GMS_POD_LABELS, argv)
             self.events.append("restart gms")
         elif verb == "delete":
-            self.events.append(f"delete {argv[argv.index('delete') + 1]}")
+            what = argv[argv.index('delete') + 1:]
+            self.events.append(f"delete {' '.join(what[:2]) if what[0] == 'job' else what[0]}")
+        elif verb == "apply":
+            # Only the blocking Job reaches the cluster; system-update then recreates what the
+            # lost volumes held.
+            self.test.assertIn("name: datahub-system-update\n", stdin)
+            self.test.assertNotIn("nonblk", stdin)
+            self.events.append("install")
+            if self.broken != "install":
+                if self.index == 404 and self.broken != "no-index":
+                    self.index = 200
+                if not self.topics and self.broken != "no-topics":
+                    self.topics = set(DATAHUB_TOPICS)
         elif verb == "create":
             self.test.assertIn(
                 "--from=cronjob/datahub-datahub-restore-indices-job-template", argv)
@@ -2953,22 +2979,13 @@ class FakeRecovery:
         return ""
 
     def wait_for(self, argv, done, what, timeout=None):
+        if "datahub-system-update" in argv:
+            self.test.assertEqual(timeout, gate.DATAHUB_SYSTEM_UPDATE_TIMEOUT)
+            return "failed" if self.broken == "install" else "succeeded"
         if "job" in argv:
             self.test.assertEqual(timeout, gate.RESTORE_INDICES_TIMEOUT)
             return "failed" if self.broken == "restore-fails" else "succeeded"
         return "p-0"
-
-    def datahub(self, env, run):
-        self.test.assertIs(run, gate.release.call)
-        self.events.append("install")
-        if self.broken == "install":
-            return ["helm upgrade datahub in catalog-datahub failed: timed out"], []
-        if self.index == 404 and self.broken != "no-index":
-            self.index = 200
-        if not self.topics and self.broken != "no-topics":
-            self.topics = set(DATAHUB_TOPICS)
-        self.revision += 1
-        return [], ["Step 1: Datahub in catalog-datahub is installed (ADR-071)."]
 
     def run(self, argv, input=None, **kwargs):
         if "history" in argv or "get" in argv:
@@ -3012,8 +3029,7 @@ class CheckDatahubRecovery(unittest.TestCase):
         with mock.patch.object(gate, "output", side_effect=cluster.output), \
                 mock.patch.object(gate, "run") as run, \
                 mock.patch.object(gate, "wait_for", side_effect=cluster.wait_for), \
-                mock.patch.object(gate.subprocess, "run", side_effect=cluster.run), \
-                mock.patch.object(gate.release, "datahub", side_effect=cluster.datahub):
+                mock.patch.object(gate.subprocess, "run", side_effect=cluster.run):
             problems, notes = gate.check_datahub_recovery(env or self.ENV, self.PINS,
                                                           cluster.timeline)
         return problems, notes, run
@@ -3029,12 +3045,9 @@ class CheckDatahubRecovery(unittest.TestCase):
         first, second, pid = *self.names(), os.getpid()
         topics = "topics DataHubUpgradeHistory_v1, MetadataChangeLog_Versioned_v1"
 
-        def install(revision):
+        def install():
             return ["Datahub's install step started", "Datahub's install step ended",
-                    f"helm datahub revision {revision} deployed",
-                    "job datahub-system-update started", "job datahub-system-update complete",
-                    "job datahub-system-update-nonblk started",
-                    "job datahub-system-update-nonblk complete"]
+                    "job datahub-system-update started", "job datahub-system-update complete"]
 
         def lost(claim, pod):
             return [f"claim {claim} and pod {pod} being deleted",
@@ -3049,7 +3062,7 @@ class CheckDatahubRecovery(unittest.TestCase):
             "index datasetindex_v2 answers 200",
             *lost(OPENSEARCH_CLAIM, "datahub-opensearch-0"),
             "index datasetindex_v2 answers 404",
-            *install(2),
+            *install(),
             "index datasetindex_v2 answers 200",
             f"{restore} created", f"{restore} started", f"{restore} complete",
             f"{restore} succeeded",
@@ -3057,26 +3070,22 @@ class CheckDatahubRecovery(unittest.TestCase):
             f"{topics}: 2 of 2 present",
             *lost(KAFKA_CLAIM, "datahub-kafka-0"),
             f"{topics}: 0 of 2 present",
-            *install(3),
+            *install(),
             f"{topics}: 2 of 2 present",
             "GMS's pod being deleted", "GMS's pod deleted", "GMS's pod p-0 ready",
             *step("read", first), *step("write", second), *step("search", second),
             "clean-up started", *step("delete", first, second), "clean-up ended"])
         # Helm's and the Jobs' times are theirs, not the check's.
         times = dict((text, at) for at, text in cluster.timeline)
-        self.assertEqual(times["helm datahub revision 3 deployed"],
-                         "2026-10-19T00:03:00.123456789+00:00")
-        self.assertEqual(times["job datahub-system-update-nonblk complete"],
-                         "2026-10-19T00:03:21Z")
-        self.assertEqual(times[f"{restore} complete"], "2026-10-19T00:02:20Z")
+        self.assertEqual(times["job datahub-system-update complete"], "2026-10-19T00:01:20Z")
+        self.assertEqual(times[f"{restore} complete"], "2026-10-19T00:01:20Z")
 
     def test_a_timeline_that_cannot_be_read_is_said_and_never_fails_the_check(self):
         cluster = FakeRecovery(self, broken="unreadable")
         problems, _, _ = self.check(cluster)
         self.assertEqual(problems, [])
         marks = self.marks(cluster)
-        for what in ("Datahub's Helm revision", "Datahub's system-update Jobs",
-                     f"job datahub-restore-indices-{os.getpid()}"):
+        for what in ("job datahub-system-update", f"job datahub-restore-indices-{os.getpid()}"):
             self.assertIn(f"{what} not read (connection refused)", marks)
 
     def test_a_check_that_stops_still_has_its_timeline_so_far(self):
@@ -3088,7 +3097,21 @@ class CheckDatahubRecovery(unittest.TestCase):
                                       f"delete {self.names()[0]} started",
                                       f"delete {self.names()[0]} passed", "clean-up ended"])
         self.assertIn("Datahub's install step ended", marks)
-        self.assertNotIn("helm datahub revision 2 deployed", marks)
+
+    def test_a_release_past_revision_1_is_refused_before_any_Job_is_applied(self):
+        cluster = FakeRecovery(self, broken="revision")
+        problems, _, _ = self.check(cluster)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("is at revision [2], not 1", problems[0])
+        self.assertNotIn("install", cluster.events)
+
+    def test_the_reinstall_applies_the_blocking_Job_alone_and_creates_no_revision(self):
+        cluster = FakeRecovery(self)
+        problems, _, _ = self.check(cluster)
+        self.assertEqual(problems, [])
+        self.assertEqual(cluster.events.count("render"), 2)
+        self.assertEqual(cluster.events.count("install"), 2)
+        self.assertNotIn("job datahub-system-update-nonblk started", self.marks(cluster))
 
     def test_the_timelines_lines_from_a_recorded_set_of_times(self):
         marks = [("2026-10-19T00:00:40Z", "b"), ("2026-10-19T00:00:05+00:00", "a"),
@@ -3169,10 +3192,12 @@ class CheckDatahubRecovery(unittest.TestCase):
         first, second = self.names()
         self.assertEqual(cluster.events, [
             f"write {first}", f"search {first}",
-            f"delete claim {OPENSEARCH_CLAIM}", "delete pod/datahub-opensearch-0", "install",
+            f"delete claim {OPENSEARCH_CLAIM}", "delete pod/datahub-opensearch-0", "render",
+            "delete job datahub-system-update", "install",
             "restore-indices", f"clean up job datahub-restore-indices-{os.getpid()}",
             f"search {first}",
-            f"delete claim {KAFKA_CLAIM}", "delete pod/datahub-kafka-0", "install",
+            f"delete claim {KAFKA_CLAIM}", "delete pod/datahub-kafka-0", "render",
+            "delete job datahub-system-update", "install",
             "restart gms", f"read {first}", f"write {second}", f"search {second}",
             f"delete {first} {second}",
             f"clean up datahub-kafka-recovery-{os.getpid()} "
@@ -3227,8 +3252,9 @@ class CheckDatahubRecovery(unittest.TestCase):
         self.assert_stopped_after("index-kept", "delete pod/datahub-opensearch-0", "404")
 
     def test_a_failed_install_is_a_problem(self):
-        problem = self.assert_stopped_after("install", "install", "helm upgrade datahub")
-        self.assertIn("timed out", problem)
+        problem = self.assert_stopped_after("install", "install",
+                                            "Job datahub-system-update failed")
+        self.assertIn("no route", problem)
 
     def test_an_index_system_update_did_not_recreate_is_a_problem(self):
         self.assert_stopped_after("no-index", "install", "datasetindex_v2")
