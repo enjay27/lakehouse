@@ -148,11 +148,20 @@ datahubUpgrade:
   enabled: true
   image:
     tag: "v1.7.0.1@sha256:c3db54d8fb94bc761be611c014c5ede3fd02daac1f15c8c177d69eceee79a24c"
+  restoreIndices:
+    # Upstream caps the short-lived JVM at 500m; the requests stay upstream's.
+    resources:
+      limits:
+        cpu: "2"
 
 # The blocking pre-install Job and the non-blocking post-install one, upstream's ZDU defaults.
 datahubSystemUpdate:
   image:
     tag: "v1.7.0.1@sha256:c3db54d8fb94bc761be611c014c5ede3fd02daac1f15c8c177d69eceee79a24c"
+  # Upstream caps the short-lived JVMs at 500m; the requests stay upstream's.
+  resources:
+    limits:
+      cpu: "2"
   sql:
     setup:
       # datahub-pg's chart creates the database and its owner (ADR-066 §2). Upstream renders
