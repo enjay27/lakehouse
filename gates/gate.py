@@ -147,8 +147,8 @@
                   system-update recreating the index, a Job from the restore-indices template
                   completes and the dataset is found again; then datahub-kafka-0's claim and pod
                   are deleted and Datahub's topics are gone, the install step runs again and
-                  they are back, GMS's pod is deleted and a new one is ready, the dataset reads
-                  back by its URN and a second one is written and found. Both datasets are
+                  they are back, the install step rolls GMS's pod and a new one is ready, the
+                  dataset reads back by its URN and a second one is written and found. Both datasets are
                   hard-deleted and the check pods deleted whatever happened. When it ends,
                   passed, failed or stopped, it prints its timeline (ADR-077 §3): the seconds
                   after it started, and since the line before, of each phase's start and end
@@ -1985,7 +1985,6 @@ RESTORE_INDICES_TEMPLATE = f"{release.DATAHUB_RELEASE}-datahub-restore-indices-j
 RESTORE_INDICES_TIMEOUT = 900
 GMS_POD_LABELS = ("app.kubernetes.io/name=datahub-gms,"
                   f"app.kubernetes.io/instance={release.DATAHUB_RELEASE}")
-GMS_RESTART_TIMEOUT = 900
 
 
 def claim_of(pod):
@@ -2215,18 +2214,20 @@ def check_datahub_recovery(env, pins, timeline=None):
                 and topics_are(False, "on the new volume")):
             return
         notes.append(f"Topics {', '.join(DATAHUB_TOPICS)} gone with the volume.")
+        # GMS's pod template carries DATAHUB_REVISION, so the install step's helm upgrade rolls
+        # GMS after system-update has recreated the topics, and --wait waits for it.
+        gms_pods = kubectl + ["get", "pods", "-l", GMS_POD_LABELS, "-o", "json"]
+        old = {p["metadata"]["uid"] for p in json.loads(output(gms_pods))["items"]}
         if not (reinstall() and topics_are(True, "after system-update")):
             return
         notes.append(f"Topics {', '.join(DATAHUB_TOPICS)} recreated by system-update.")
-        gms_pods = kubectl + ["get", "pods", "-l", GMS_POD_LABELS, "-o", "json"]
-        old = {p["metadata"]["uid"] for p in json.loads(output(gms_pods))["items"]}
-        mark("GMS's pod being deleted")
-        output(kubectl + ["delete", "pod", "-l", GMS_POD_LABELS, "--wait=true"])
-        mark("GMS's pod deleted")
-        back = wait_for(gms_pods, new_ready_pod(old), "GMS back ready",
-                        timeout=GMS_RESTART_TIMEOUT)
-        mark(f"GMS's pod {back} ready")
-        notes.append(f"GMS's pod deleted; {back} started on the new topics and is ready.")
+        back = new_ready_pod(old)(json.loads(output(gms_pods)))
+        if back is None:
+            problems.append("GMS's pod was not replaced by the install step: no ready pod "
+                            "with a new uid after it")
+            return
+        mark(f"GMS's pod {back} rolled by the reinstall and ready")
+        notes.append(f"GMS's pod {back} rolled by the install step on the new topics and is ready.")
         if not step("read", first):
             return
         written.append(second)

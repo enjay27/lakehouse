@@ -2929,7 +2929,10 @@ class FakeRecovery:
                 return json.dumps(stateful_pod(name, claim))
             if kind == "pvc":
                 return json.dumps({"metadata": {"name": name, "uid": self.claims[name]}})
-            return json.dumps({"items": [{"metadata": {"name": "p-0", "uid": "old"}}]})
+            # GMS's pod: replaced by the install step that follows Kafka's loss.
+            uid = "new" if self.revision > 2 and self.broken != "gms-kept" else "old"
+            return json.dumps({"items": [{"metadata": {"name": "p-0", "uid": uid}, "status": {
+                "conditions": [{"type": "Ready", "status": "True"}]}}]})
         if verb == "delete" and argv[argv.index("delete") + 1] == "pvc":
             claim = argv[argv.index("pvc") + 1]
             self.events.append(f"delete claim {claim}")
@@ -2939,9 +2942,6 @@ class FakeRecovery:
                 self.index, self.indexed = 404, set()
             if claim == KAFKA_CLAIM and self.broken != "topics-kept":
                 self.topics = set()
-        elif verb == "delete" and "-l" in argv:
-            self.test.assertIn(gate.GMS_POD_LABELS, argv)
-            self.events.append("restart gms")
         elif verb == "delete":
             self.events.append(f"delete {argv[argv.index('delete') + 1]}")
         elif verb == "create":
@@ -3059,7 +3059,7 @@ class CheckDatahubRecovery(unittest.TestCase):
             f"{topics}: 0 of 2 present",
             *install(3),
             f"{topics}: 2 of 2 present",
-            "GMS's pod being deleted", "GMS's pod deleted", "GMS's pod p-0 ready",
+            "GMS's pod p-0 rolled by the reinstall and ready",
             *step("read", first), *step("write", second), *step("search", second),
             "clean-up started", *step("delete", first, second), "clean-up ended"])
         # Helm's and the Jobs' times are theirs, not the check's.
@@ -3162,6 +3162,13 @@ class CheckDatahubRecovery(unittest.TestCase):
         self.assertEqual(gate.GMS_POD_LABELS,
                          "app.kubernetes.io/name=datahub-gms,app.kubernetes.io/instance=datahub")
 
+    def test_a_gms_the_reinstall_did_not_replace_is_a_problem(self):
+        cluster = FakeRecovery(self, broken="gms-kept")
+        problems, _, _ = self.check(cluster)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("GMS's pod was not replaced", problems[0])
+        self.assertNotIn(f"read {self.names()[0]}", cluster.events)
+
     def test_both_volumes_lost_and_rebuilt_in_order(self):
         cluster = FakeRecovery(self)
         problems, notes, run = self.check(cluster)
@@ -3173,7 +3180,7 @@ class CheckDatahubRecovery(unittest.TestCase):
             "restore-indices", f"clean up job datahub-restore-indices-{os.getpid()}",
             f"search {first}",
             f"delete claim {KAFKA_CLAIM}", "delete pod/datahub-kafka-0", "install",
-            "restart gms", f"read {first}", f"write {second}", f"search {second}",
+            f"read {first}", f"write {second}", f"search {second}",
             f"delete {first} {second}",
             f"clean up datahub-kafka-recovery-{os.getpid()} "
             f"datahub-opensearch-recovery-{os.getpid()}"])
