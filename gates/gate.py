@@ -2142,11 +2142,10 @@ def check_datahub_recovery(env, pins, timeline=None):
         return True
 
     def reinstall():
-        """Datahub's install step again, without a Helm revision: only the blocking system-update
-        Job, rendered from the chart with the release's own values and applied, with the next
-        revision number in DATAHUB_REVISION. The release stays at revision 1, which is the one GMS
-        runs with, so nothing rolls and the non-blocking Job is not run. The Job's times go on
-        the timeline."""
+        """Datahub's install step again, without a Helm revision: system-update's blocking
+        and non-blocking Jobs, rendered from the chart with the release's own values and applied
+        one after the other, with the next revision number in DATAHUB_REVISION. The release stays
+        at revision 1, so nothing rolls. The Jobs' times go on the timeline."""
         helm = ["helm", "--kube-context", CONTEXT, "-n", ns]
         history = json.loads(output(helm + ["history", release.DATAHUB_RELEASE, "--max", "1",
                                             "-o", "json"]))
@@ -2155,41 +2154,45 @@ def check_datahub_recovery(env, pins, timeline=None):
                             f"{[r['revision'] for r in history]}, not 1: a rendered Job would "
                             "not match GMS's DATAHUB_REVISION")
             return False
-        job = f"{release.DATAHUB_RELEASE}-system-update"
         mark("Datahub's install step started")
         rendered = output(helm + ["template", release.DATAHUB_RELEASE, release.DATAHUB_CHART,
                                   "-f", "-", "--show-only", SYSTEM_UPDATE_TEMPLATE],
                           output(helm + ["get", "values", release.DATAHUB_RELEASE, "--all",
                                          "-o", "json"]))
-        blocking = [d for d in re.split(r"^---\s*$", rendered, flags=re.MULTILINE)
-                    if re.search(rf"^  name: {re.escape(job)}\s*$", d, re.MULTILINE)]
-        if len(blocking) != 1:
-            problems.append(f"The rendered system-update template holds {len(blocking)} Jobs "
-                            f"named {job}, not 1")
-            return False
+        docs = re.split(r"^---\s*$", rendered, flags=re.MULTILINE)
         # Helm's revision is what tells system-update to run its steps again (it records the
         # revision it ran for): each reinstall stands for the next revision, as a helm upgrade
         # would have made it, though the release itself stays at revision 1.
         revisions.append(len(revisions) + 2)
-        manifest, swapped = re.subn(r'(- name: DATAHUB_REVISION\n\s+value: )"1"',
-                                    rf'\g<1>"{revisions[-1]}"', blocking[0])
-        if swapped != 1:
-            problems.append(f"The rendered {job} holds {swapped} DATAHUB_REVISION values of "
-                            '"1", not 1')
-            return False
-        output(kubectl + ["delete", "job", job, "--ignore-not-found", "--wait=true"])
-        output(kubectl + ["apply", "-f", "-"], manifest)
-        outcome = wait_for(kubectl + ["get", "job", job, "-o", "json"], job_finished,
-                           f"Job {job}", timeout=DATAHUB_SYSTEM_UPDATE_TIMEOUT)
+        # The blocking Job first; the non-blocking one creates the topics GMS waits on (without
+        # it GMS never became ready), so it follows, as the post-upgrade hook did.
+        for job in DATAHUB_JOBS:
+            one = [d for d in docs if re.search(rf"^  name: {re.escape(job)}\s*$", d, re.MULTILINE)]
+            if len(one) != 1:
+                problems.append(f"The rendered system-update template holds {len(one)} Jobs "
+                                f"named {job}, not 1")
+                return False
+            manifest, swapped = re.subn(r'(- name: DATAHUB_REVISION\n\s+value: )"1"',
+                                        rf'\g<1>"{revisions[-1]}"', one[0])
+            if swapped != 1:
+                problems.append(f"The rendered {job} holds {swapped} DATAHUB_REVISION values "
+                                'of "1", not 1')
+                return False
+            output(kubectl + ["delete", "job", job, "--ignore-not-found", "--wait=true"])
+            output(kubectl + ["apply", "-f", "-"], manifest)
+            outcome = wait_for(kubectl + ["get", "job", job, "-o", "json"], job_finished,
+                               f"Job {job}", timeout=DATAHUB_SYSTEM_UPDATE_TIMEOUT)
+            read_marks(kubectl + ["get", "job", job, "-o", "json"],
+                       lambda one: job_marks({"items": [one]}, (job,)), f"job {job}")
+            if outcome != "succeeded":
+                log = subprocess.run(kubectl + ["logs", f"job/{job}", "--tail=20"],
+                                     capture_output=True, text=True, check=False)
+                problems.append(f"Job {job} {outcome}: {(log.stdout or log.stderr).strip()}")
+                mark("Datahub's install step ended")
+                return False
         mark("Datahub's install step ended")
-        read_marks(kubectl + ["get", "job", job, "-o", "json"],
-                   lambda one: job_marks({"items": [one]}, (job,)), f"job {job}")
-        if outcome != "succeeded":
-            log = subprocess.run(kubectl + ["logs", f"job/{job}", "--tail=20"],
-                                 capture_output=True, text=True, check=False)
-            problems.append(f"Job {job} {outcome}: {(log.stdout or log.stderr).strip()}")
-            return False
-        notes.append(f"Job {job} rendered from the chart and applied; no Helm revision.")
+        notes.append(f"Jobs {', '.join(DATAHUB_JOBS)} rendered from the chart and applied; no "
+                     "Helm revision.")
         return True
 
     def restore_indices():

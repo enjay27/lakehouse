@@ -2918,7 +2918,8 @@ class FakeRecovery:
                     "  name: datahub-system-update\n  labels:\n    name: other\n"
                     "env:\n  - name: DATAHUB_REVISION\n    value: \"1\"\n"
                     "---\napiVersion: batch/v1\nkind: Job\nmetadata:\n"
-                    "  name: datahub-system-update-nonblk\n")
+                    "  name: datahub-system-update-nonblk\n"
+                    "env:\n  - name: DATAHUB_REVISION\n    value: \"1\"\n")
         if argv[0] == "helm":
             self.test.assertEqual(argv[argv.index("values") + 2:], ["--all", "-o", "json"])
             release = argv[argv.index("values") + 1]
@@ -2963,12 +2964,12 @@ class FakeRecovery:
         elif verb == "apply":
             # Only the blocking Job reaches the cluster; system-update then recreates what the
             # lost volumes held.
-            self.test.assertIn("name: datahub-system-update\n", stdin)
-            self.test.assertNotIn("nonblk", stdin)
+            name = re.search(r"^  name: (datahub-system-update\S*)$", stdin, re.M).group(1)
+            self.test.assertEqual(name.endswith("nonblk"), "nonblk" in stdin.split("---")[0])
             self.revisions.append(re.search(r'DATAHUB_REVISION\n    value: "(\d+)"',
                                             stdin).group(1))
-            self.events.append("install")
-            if self.broken != "install":
+            self.events.append("install nonblk" if name.endswith("nonblk") else "install")
+            if self.broken != "install" and not name.endswith("nonblk"):
                 if self.index == 404 and self.broken != "no-index":
                     self.index = 200
                 if not self.topics and self.broken != "no-topics":
@@ -2982,7 +2983,7 @@ class FakeRecovery:
         return ""
 
     def wait_for(self, argv, done, what, timeout=None):
-        if "datahub-system-update" in argv:
+        if "datahub-system-update" in argv or "datahub-system-update-nonblk" in argv:
             self.test.assertEqual(timeout, gate.DATAHUB_SYSTEM_UPDATE_TIMEOUT)
             return "failed" if self.broken == "install" else "succeeded"
         if "job" in argv:
@@ -3049,8 +3050,13 @@ class CheckDatahubRecovery(unittest.TestCase):
         topics = "topics DataHubUpgradeHistory_v1, MetadataChangeLog_Versioned_v1"
 
         def install():
-            return ["Datahub's install step started", "Datahub's install step ended",
-                    "job datahub-system-update started", "job datahub-system-update complete"]
+            # Each Job's times are read as it ends, so before the step's own end mark; the
+            # timeline sorts the marks by time.
+            return ["Datahub's install step started",
+                    "job datahub-system-update started", "job datahub-system-update complete",
+                    "job datahub-system-update-nonblk started",
+                    "job datahub-system-update-nonblk complete",
+                    "Datahub's install step ended"]
 
         def lost(claim, pod):
             return [f"claim {claim} and pod {pod} being deleted",
@@ -3108,15 +3114,15 @@ class CheckDatahubRecovery(unittest.TestCase):
         self.assertIn("is at revision [2], not 1", problems[0])
         self.assertNotIn("install", cluster.events)
 
-    def test_the_reinstall_applies_the_blocking_Job_alone_and_creates_no_revision(self):
+    def test_the_reinstall_applies_both_Jobs_in_order_and_creates_no_revision(self):
         cluster = FakeRecovery(self)
         problems, _, _ = self.check(cluster)
         self.assertEqual(problems, [])
         self.assertEqual(cluster.events.count("render"), 2)
         self.assertEqual(cluster.events.count("install"), 2)
-        # Each reinstall runs system-update at the next revision, the release staying at 1.
-        self.assertEqual(cluster.revisions, ["2", "3"])
-        self.assertNotIn("job datahub-system-update-nonblk started", self.marks(cluster))
+        self.assertEqual(cluster.events.count("install nonblk"), 2)
+        # Each reinstall runs both Jobs at the next revision, the release staying at 1.
+        self.assertEqual(cluster.revisions, ["2", "2", "3", "3"])
 
     def test_the_timelines_lines_from_a_recorded_set_of_times(self):
         marks = [("2026-10-19T00:00:40Z", "b"), ("2026-10-19T00:00:05+00:00", "a"),
@@ -3199,10 +3205,12 @@ class CheckDatahubRecovery(unittest.TestCase):
             f"write {first}", f"search {first}",
             f"delete claim {OPENSEARCH_CLAIM}", "delete pod/datahub-opensearch-0", "render",
             "delete job datahub-system-update", "install",
+            "delete job datahub-system-update-nonblk", "install nonblk",
             "restore-indices", f"clean up job datahub-restore-indices-{os.getpid()}",
             f"search {first}",
             f"delete claim {KAFKA_CLAIM}", "delete pod/datahub-kafka-0", "render",
             "delete job datahub-system-update", "install",
+            "delete job datahub-system-update-nonblk", "install nonblk",
             "restart gms", f"read {first}", f"write {second}", f"search {second}",
             f"delete {first} {second}",
             f"clean up datahub-kafka-recovery-{os.getpid()} "
@@ -3262,7 +3270,7 @@ class CheckDatahubRecovery(unittest.TestCase):
         self.assertIn("no route", problem)
 
     def test_an_index_system_update_did_not_recreate_is_a_problem(self):
-        self.assert_stopped_after("no-index", "install", "datasetindex_v2")
+        self.assert_stopped_after("no-index", "install nonblk", "datasetindex_v2")
 
     def test_a_failed_restore_is_a_problem_with_its_log(self):
         problem = self.assert_stopped_after("restore-fails", "restore-indices", "failed")
@@ -3273,7 +3281,7 @@ class CheckDatahubRecovery(unittest.TestCase):
                                   "DataHubUpgradeHistory_v1")
 
     def test_topics_system_update_did_not_recreate_are_a_problem(self):
-        self.assert_stopped_after("no-topics", "install", "MetadataChangeLog_Versioned_v1")
+        self.assert_stopped_after("no-topics", "install nonblk", "MetadataChangeLog_Versioned_v1")
 
     def test_it_is_a_command_of_the_gate(self):
         self.assertIn("| check-datahub-recovery |", gate.__doc__.strip().splitlines()[-1])
