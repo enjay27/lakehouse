@@ -149,6 +149,12 @@ datahubUpgrade:
   enabled: true
   image:
     tag: "v1.7.0.1@sha256:c3db54d8fb94bc761be611c014c5ede3fd02daac1f15c8c177d69eceee79a24c"
+  # Tuning (ADR-071 §2, #229): upstream's 500m CPU limit slows the restore-indices Job; requests
+  # and memory stay upstream's.
+  restoreIndices:
+    resources:
+      limits:
+        cpu: "2"
 
 # The blocking pre-install Job and the non-blocking post-install one, upstream's ZDU defaults.
 datahubSystemUpdate:
@@ -162,6 +168,11 @@ datahubSystemUpdate:
       # creates nothing.
       createDatabase: false
       createUser: false
+  # Tuning (ADR-071 §2, #229): upstream's 500m CPU limit slows both system-update Jobs, the
+  # slowest phases of an install and a recovery; requests and memory stay upstream's.
+  resources:
+    limits:
+      cpu: "2"
   extraEnvs:
     # System-update creates the indices (ADR-070).
     - name: ELASTICSEARCH_NUM_REPLICAS_PER_INDEX
