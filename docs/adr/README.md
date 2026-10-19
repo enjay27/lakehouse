@@ -127,6 +127,7 @@ flowchart LR
 | [076](076-datahub-ingests-each-polaris-catalog-daily-from-upstreams-ingestion-cronjob-as-its-own-principal-the-policy-lets-only-read.md) | Datahub ingests each Polaris catalog daily from upstream's ingestion CronJob, as its own principal the policy lets only read | Accepted |
 | [077](077-the-datahub-recovery-job-installs-datahub-alone-from-this-commit-and-check-datahub-recovery-prints-its-timeline.md) | The datahub-recovery job installs Datahub alone, from this commit, and check-datahub-recovery prints its timeline | Accepted |
 | [078](078-datahubs-login-goes-through-the-sso-provider-over-oidc-and-the-gate-proves-it-against-dex-behind-a-recorder.md) | Datahub's login goes through the SSO provider over OIDC, and the gate proves it against Dex behind a recorder | Proposed |
+| [079](079-ingress-is-denied-by-default-and-allowed-per-caller-every-rule-restated-with-its-port-and-datahubs-oidc-stand-in-admitted.md) | Ingress is denied by default and allowed per caller, every rule restated with its port, and Datahub's OIDC stand-in admitted | Proposed |
 
 ## Not ADRs
 

@@ -2,7 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-10-19
-- **Related:** ADR-000, ADR-002, ADR-006, ADR-017, ADR-025, ADR-031, ADR-034, ADR-045, ADR-048, ADR-050, ADR-059, ADR-067, ADR-071, ADR-072, ADR-076
+- **Related:** ADR-000, ADR-002, ADR-006, ADR-017, ADR-025, ADR-031, ADR-034, ADR-045, ADR-048, ADR-050, ADR-059, ADR-067, ADR-071, ADR-072, ADR-076, ADR-079
 
 ## Context
 
@@ -102,13 +102,15 @@ Kade chose Dex: the target's own provider is what users meet, so the gate proves
 
 | Target | Port | Allowed from |
 |---|---|---|
-| The recorder | its OIDC port | Datahub's namespace (the frontend's discovery, token and key requests); the gate's check pods |
-| Dex | 5556 | the recorders; the gate's check pods |
+| The recorder | its OIDC port | Datahub's namespace (the frontend's discovery, token and key requests); the ingress controller's namespace (the gate's browser, §5) |
+| Dex | 5556 | the recorder; the gate's check pods |
 
-These are new rows in ADR-048 §3's `NS_STANDINS` table. ADR-048 is already amended by ADR-067,
-so under ADR-000 rule 6 they enter through an ADR that supersedes ADR-048 whole and restates
-ADR-067's rows. This ADR is not Accepted before that one. `check-network` gains the cases: from an
-unlabelled pod in `NS_CATALOG_DATAHUB`, the OIDC port connects and Dex is refused.
+- **The browser comes from the ingress controller's namespace,** not as a check pod. The gate's
+  check pods are check-labelled pods in Polaris's namespace, and ADR-071 §8's login check
+  already runs from the ingress namespace.
+- **These rows are ADR-079's** (`NS_STANDINS`, §3), and their `check-network` cases are ADR-079
+  §6's. ADR-048 is already amended by ADR-067, so ADR-079 supersedes it whole (ADR-000 rule 6).
+  This ADR is not Accepted before ADR-079.
 
 ### 5. What the smoke gate proves: `check-datahub-sso`
 
@@ -186,7 +188,7 @@ sequenceDiagram
 - **Groups are not proven:** the connector sends none. Group extraction stays upstream's default.
 - **Dex's `mockPassword` connector is a test connector.** If a later Dex drops it, the gate moves to
   `staticPasswords` with a bcrypt tool, under a new ADR.
-- **Code follows in PRs after Acceptance, and after the ADR superseding ADR-048:**
+- **Code follows in PRs after Acceptance, and after ADR-079's:**
   - the recorder's redaction, with its test first;
   - Dex in `gates/standins.py` and `gates/pins.json`, and the network rows;
   - the install's checks and values, `init_env.py`, `.env.template`;
