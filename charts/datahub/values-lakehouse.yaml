@@ -14,6 +14,14 @@ datahub-gms:
     tag: "v1.7.0.1@sha256:74e15e982b94d0e147de41d05133ef3df48f74a1004a9c997805e0aa7e010173"
   service:
     type: ClusterIP
+  # Tuning (ADR-071 §2, #229): ready is noticed sooner, first probe at 20 s, then every 5 s.
+  # Upstream's window (60 s + 8 x 30 s = 300 s) is kept: 20 s + 56 x 5 s. Liveness stays
+  # upstream's.
+  readinessProbe:
+    initialDelaySeconds: 20
+    periodSeconds: 5
+    failureThreshold: 56
+    timeoutSeconds: 1
   extraEnvs:
     # One node holds every index: no replica, so the indices go green (ADR-070).
     - name: ELASTICSEARCH_NUM_REPLICAS_PER_INDEX
@@ -33,6 +41,12 @@ datahub-frontend:
     tag: "v1.7.0.1@sha256:99513cc1c45e4cc053ceb0f9aeb04a3263a8a747907bb0e85cac2eb03461310d"
   service:
     type: ClusterIP
+  # As GMS's: upstream's window (60 s + 4 x 30 s = 180 s) is kept: 20 s + 32 x 5 s.
+  readinessProbe:
+    initialDelaySeconds: 20
+    periodSeconds: 5
+    failureThreshold: 32
+    timeoutSeconds: 1
   existingGmsSecret:
     name: datahub-frontend-secret
     key: secret
