@@ -1,0 +1,290 @@
+# Candidate (ADR-080). An agent pushes candidate/<12-character sha> at a commit on main, adding
+# no commit; Kade runs this workflow on that branch. It
+#   - refuses unless the branch names HEAD, HEAD is on origin/main, no other candidate branch is
+#     left over, the branch has not moved, every check run on HEAD passed and static succeeded
+#     (install/release_tag.py check-candidate, checks-passed), and no platform-* tag is on HEAD,
+#   - picks the final tag platform-YYYY.MM.DD from the UTC date (.2, .3 once that date is
+#     released) and the next candidate number, which ignores candidate tags as releases,
+#   - runs the gates on that very commit: dry-run and smoke, upgrade and fresh, called as
+#     release-gate.yml called them (ADR-033). They are called, not copied; a gate workflow
+#     deletes its gate branch only when the ref is one (ADR-049), so none is touched here,
+#   - builds the log batch's image once (ADR-042, now ADR-080 section 4): content-hash tag,
+#     never overwritten, read back without credentials,
+#   - tags the same main commit <final>-rc.N (this repository has no version file, so no stamp
+#     commit), makes a GitHub prerelease whose notes name the image with its digest, makes the
+#     branch rc/<rc tag> at that commit, for Promote (promote.yml) to run from (the GitHub app
+#     lists branches only), and deletes the same version's lower rc branches.
+# Whatever happens, the last job deletes the candidate/<sha> branch; a failed candidate is fixed
+# on main and starts again with a new branch. Only the called gates' delete jobs, the image job
+# (packages) and the tag and cleanup jobs can write; the tag and cleanup jobs run none of the
+# repository's code.
+# A called workflow's jobs get at most what the calling job grants. The gates' own jobs ask for
+# contents: read; only their delete job asks for write, and it skips any ref but a gate branch
+# (ADR-049). smoke.yml's main-status job asks for issues: write and skips any ref but main
+# (ADR-055), but GitHub refuses to start a called workflow whose jobs ask for more than the
+# caller grants. Check run names `dry-run / dry-run`, `smoke upgrade / smoke` and `smoke fresh /
+# smoke` are left out of the commit's check read (install/release_tag.py), as are this
+# workflow's own jobs: the tag job needs the gates themselves.
+name: Candidate
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: check the candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      checks: read  # the check runs on HEAD
+    outputs:
+      final: ${{ steps.names.outputs.final }}
+      rc: ${{ steps.names.outputs.rc }}
+      superseded: ${{ steps.names.outputs.superseded }}
+    steps:
+      - name: Only a candidate branch is a candidate
+        run: |
+          case "$GITHUB_REF" in
+            refs/heads/candidate/*) ;;
+            *) echo "::error::a candidate is made from a candidate/* branch only (ADR-080); this run is on $GITHUB_REF"; exit 1 ;;
+          esac
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: The branch names a commit on main, has not moved, and its checks passed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python3 install/release_tag.py check-candidate "$GITHUB_REF_NAME"
+          head=$(gh api "repos/$REPO/git/ref/heads/$GITHUB_REF_NAME" --jq .object.sha)
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "::error::$GITHUB_REF_NAME moved from $GITHUB_SHA to $head"
+            exit 1
+          fi
+          gh api --paginate "repos/$REPO/commits/$GITHUB_SHA/check-runs?per_page=100" \
+            --jq '.check_runs[]' | jq -s '{check_runs: .}' \
+            | python3 install/release_tag.py checks-passed "$GITHUB_RUN_ID"
+
+      - name: Name the final tag and the candidate tag
+        id: names
+        run: |
+          set -euo pipefail
+          if [ -n "$(git tag --points-at "$GITHUB_SHA" --list 'platform-*')" ]; then
+            echo "::error::$GITHUB_SHA is already tagged: $(git tag --points-at "$GITHUB_SHA" --list 'platform-*')"
+            exit 1
+          fi
+          # shellcheck disable=SC2046  # tag and branch names have no spaces
+          final=$(python3 install/release_tag.py next "$(date -u +%F)" $(git tag --list 'platform-*'))
+          # shellcheck disable=SC2046
+          rc=$(python3 install/release_tag.py rc "$final" $(git tag --list 'platform-*'))
+          # shellcheck disable=SC2046
+          superseded=$(python3 install/release_tag.py superseded "$rc" \
+            $(git ls-remote --heads origin 'rc/*' | sed 's|.*refs/heads/||'))
+          {
+            echo "final=$final"
+            echo "rc=$rc"
+            echo "superseded=$superseded"
+          } >> "$GITHUB_OUTPUT"
+          echo "Candidate $rc of $final at $GITHUB_SHA." >> "$GITHUB_STEP_SUMMARY"
+
+  dry-run:
+    name: dry-run
+    needs: check
+    uses: ./.github/workflows/dry-run.yml
+    permissions:
+      contents: write
+
+  smoke-upgrade:
+    name: smoke upgrade
+    needs: check
+    uses: ./.github/workflows/smoke.yml
+    with:
+      fresh: false
+    permissions:
+      contents: write
+      issues: write
+
+  smoke-fresh:
+    name: smoke fresh
+    needs: check
+    uses: ./.github/workflows/smoke.yml
+    with:
+      fresh: true
+    permissions:
+      contents: write
+      issues: write
+
+  notes:
+    name: notes of the candidate
+    needs: [check, dry-run, smoke-upgrade, smoke-fresh]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      checks: read  # the gates' check runs, linked in the notes
+    outputs:
+      notes: ${{ steps.notes.outputs.notes }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Write the notes from the gates' check runs and the commits since the last release
+        id: notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RC: ${{ needs.check.outputs.rc }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$REPO/commits/$GITHUB_SHA/check-runs?per_page=100" \
+            --jq '.check_runs[] | {name, status, conclusion, html_url}' | jq -s . > "$RUNNER_TEMP/checks.json"
+          # shellcheck disable=SC2046  # tag names have no spaces
+          previous=$(python3 install/release_tag.py previous $(git tag --merged "$GITHUB_SHA" --list 'platform-*'))
+          if [ -n "$previous" ]; then
+            git log --no-merges --format='%h %s' "$previous..$GITHUB_SHA" > "$RUNNER_TEMP/log.txt"
+          else
+            : > "$RUNNER_TEMP/log.txt"
+          fi
+          python3 install/release_tag.py notes "$RC" "$GITHUB_SHA" "${previous:--}" "$GITHUB_REF_NAME" \
+            "$RUNNER_TEMP/checks.json" "$RUNNER_TEMP/log.txt" > "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md" >> "$GITHUB_STEP_SUMMARY"
+          echo "notes=$(base64 -w0 "$RUNNER_TEMP/notes.md")" >> "$GITHUB_OUTPUT"
+
+  image:
+    name: the log batch's image on GHCR
+    needs: [check, dry-run, smoke-upgrade, smoke-fresh]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write  # push the log batch's image (ADR-080 section 4)
+    outputs:
+      image: ${{ steps.push.outputs.image }}
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Push the image unless its tag exists, then read it without credentials
+        id: push
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          image=$(python3 install/release.py batch-image)
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          docker login ghcr.io --username "$ACTOR" --password-stdin <<<"$GH_TOKEN"
+          # A tag is never overwritten: build and push only when GHCR says it is not there
+          # (not found, or no package yet, which GHCR refuses); any other error stops.
+          if out=$(docker buildx imagetools inspect "$image" 2>&1); then
+            echo "$image is on GHCR already: not built, not pushed." >> "$GITHUB_STEP_SUMMARY"
+          elif grep -qiE 'not found|denied|forbidden|403' <<<"$out"; then
+            docker build --platform linux/amd64 \
+              --label "org.opencontainers.image.source=https://github.com/$REPO" \
+              --file images/polaris-log-batch/Dockerfile --tag "$image" images/polaris-log-batch
+            docker push "$image"
+            echo "Pushed $image." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::error::GHCR did not say whether $image exists: $out"
+            exit 1
+          fi
+          docker logout ghcr.io
+          anonymous=$(mktemp -d)
+          if ! digest=$(DOCKER_CONFIG=$anonymous docker buildx imagetools inspect "$image" \
+                          --format '{{json .Manifest.Digest}}' 2>&1); then
+            echo "::error::$image cannot be pulled without credentials ($digest): make the package public in its settings, then run the candidate again (ADR-080)"
+            exit 1
+          fi
+          digest=$(jq -r . <<<"$digest")
+          if ! [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::unexpected digest for $image: $digest"
+            exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Anyone can pull $image@$digest." >> "$GITHUB_STEP_SUMMARY"
+
+  tag:
+    name: rc tag and prerelease
+    needs: [check, notes, image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write  # the rc tag, the prerelease and the rc branches
+    steps:
+      - name: Create the rc tag and the prerelease on the candidate commit, and the rc/ branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          FINAL: ${{ needs.check.outputs.final }}
+          RC: ${{ needs.check.outputs.rc }}
+          SUPERSEDED: ${{ needs.check.outputs.superseded }}
+          NOTES: ${{ needs.notes.outputs.notes }}
+          IMAGE: ${{ needs.image.outputs.image }}
+          DIGEST: ${{ needs.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          head=$(gh api "repos/$REPO/git/ref/heads/$GITHUB_REF_NAME" --jq .object.sha)
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "::error::$GITHUB_REF_NAME moved from $GITHUB_SHA to $head"
+            exit 1
+          fi
+          base64 -d <<<"$NOTES" > "$RUNNER_TEMP/notes.md"
+          # The notes name the image the image job pushed or found; its digest replaces the
+          # placeholder (install/release_tag.py DIGEST_PLACEHOLDER).
+          if [ "$(grep -cF "\`$IMAGE@BATCH_IMAGE_DIGEST\`" "$RUNNER_TEMP/notes.md")" != 1 ]; then
+            echo "::error::the notes do not name $IMAGE once with its digest placeholder"
+            exit 1
+          fi
+          sed -i "s|@BATCH_IMAGE_DIGEST\`|@$DIGEST\`|" "$RUNNER_TEMP/notes.md"
+          gh release create "$RC" --repo "$REPO" --target "$GITHUB_SHA" --prerelease --title "$RC" \
+            --notes-file "$RUNNER_TEMP/notes.md"
+          gh api "repos/$REPO/git/refs" -f ref="refs/heads/rc/$RC" -f sha="$GITHUB_SHA" > /dev/null
+          for b in $SUPERSEDED; do
+            gh api -X DELETE "repos/$REPO/git/refs/heads/$b" > /dev/null || echo "::warning::could not delete $b"
+          done
+          {
+            echo "Candidate $RC of $FINAL at $GITHUB_SHA (on main)."
+            if [ -n "$SUPERSEDED" ]; then echo "Deleted the superseded $SUPERSEDED."; fi
+            echo "Try it, then Actions > Promote > Run workflow > branch rc/$RC."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  cleanup:
+    name: delete the candidate branch
+    needs: [check, dry-run, smoke-upgrade, smoke-fresh, notes, image, tag]
+    if: always() && startsWith(github.ref, 'refs/heads/candidate/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write  # deleting the branch
+    steps:
+      - name: Delete the branch, whatever the result
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          if gh api -X DELETE "repos/$REPO/git/refs/heads/$GITHUB_REF_NAME" > /dev/null; then
+            echo "Deleted $GITHUB_REF_NAME." >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$(gh api "repos/$REPO/git/matching-refs/heads/$GITHUB_REF_NAME" \
+                      --jq 'map(select(.ref == "refs/heads/" + env.GITHUB_REF_NAME)) | length')" = 0 ]; then
+            echo "$GITHUB_REF_NAME was already deleted." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::error::could not delete $GITHUB_REF_NAME; Kade deletes it"
+            exit 1
+          fi

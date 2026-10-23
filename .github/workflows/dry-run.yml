@@ -6,7 +6,7 @@
 # services (gates/gate.py standins, ADR-031), the latest release the commit
 # contains (gates/gate.py released_tags), installed from a checkout of its tag, and a
 # server-side dry-run of this commit's release over it (ADR-051); with no tag, this commit's
-# alone. The release gate calls it on every PR into rc (ADR-033). Not a PR check
+# alone. Candidate calls it on the candidate commit (ADR-080). Not a PR check
 # into main, so auto-merge.yml does not list it.
 name: Dry-run
 

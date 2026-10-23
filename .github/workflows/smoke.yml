@@ -27,8 +27,8 @@
 # trigger (step 0 and Datahub's part of step 1, ADR-077), then check-datahub, then
 # check-datahub-recovery: OpenSearch's volume lost, then Kafka's, and Datahub rebuilds its
 # indices and topics (ADR-071 §8), printing its phase timeline (ADR-077 §3). Both jobs run on
-# every trigger, and a run passes only when both do (ADR-075). The release gate
-# calls it twice on every PR into rc, upgrade and fresh (ADR-033). Not a PR check into main,
+# every trigger, and a run passes only when both do (ADR-075). Candidate
+# calls it twice on the candidate commit, upgrade and fresh (ADR-080). Not a PR check into main,
 # so auto-merge.yml does not list it.
 name: Smoke
 

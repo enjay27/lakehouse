@@ -1,27 +1,45 @@
-"""Release tags (ADR-033, ADR-051): their names, the gate a release reads, and the notes.
+"""Release tags (ADR-080, ADR-051): their names, the checks a candidate reads, and the notes.
 
 A release is the tag `platform-YYYY.MM.DD`, `.N` appended (from 2) for a later release the
-same day. The release workflow tags an `rc` commit only when every check of the release gate
-succeeded on the head of the PR merged as that commit; the gates upgrade from the latest
-release the commit they test contains (gates/gate.py).
+same day. A candidate of it is `platform-YYYY.MM.DD-rc.N` on the same `main` commit, with the
+branch `rc/<rc tag>` for Promote to run from; a candidate tag is never a release, so a date with
+only candidates is still free. The gates upgrade from the latest release the commit they test
+contains (gates/gate.py).
 
 Usage:
   python3 install/release_tag.py previous [TAG...]
       prints the latest release among TAGS, or nothing.
   python3 install/release_tag.py next YYYY-MM-DD [TAG...]
       prints the name of the next release on that date.
-  python3 install/release_tag.py verify CHECK_RUNS_JSON
-      CHECK_RUNS_JSON is the head commit's check runs (a list of {name, status, conclusion});
-      exits 0 when every release-gate check succeeded, else 1 with the problems.
-  python3 install/release_tag.py notes TAG COMMIT PREVIOUS|- PR_URL CHECK_RUNS_JSON LOG_FILE
-      prints the release notes; LOG_FILE holds one commit per line since PREVIOUS. The log
-      batch's image is named with DIGEST_PLACEHOLDER for its digest, which the release
-      workflow's tag job replaces with the digest its image job pushed or found (ADR-042).
+  python3 install/release_tag.py rc FINAL [TAG...]
+      prints the next candidate tag of the release FINAL.
+  python3 install/release_tag.py check-candidate BRANCH
+      exits 1 unless BRANCH is candidate/<12 characters of HEAD>, HEAD is on origin/main and
+      origin has no other candidate/* branch.
+  python3 install/release_tag.py checks-passed RUN_ID
+      reads a commit's check runs (the API's JSON) on stdin; exits 1 with the problems unless
+      all finished, none failed and static succeeded, leaving out run RUN_ID's own jobs and
+      the candidate workflows' jobs.
+  python3 install/release_tag.py check-promote RC_TAG [TAG...]
+      prints the final tag; exits 1 unless RC_TAG is the highest candidate of a release that
+      does not exist yet and is above the latest release.
+  python3 install/release_tag.py rc-branch BRANCH
+      prints the rc tag of a branch rc/<rc tag>.
+  python3 install/release_tag.py superseded RC_TAG [BRANCH...]
+      prints the rc/ branches among BRANCHES of RC_TAG's release below it.
+  python3 install/release_tag.py released FINAL [BRANCH...]
+      prints the rc/ branches among BRANCHES of FINAL's release and every older one.
+  python3 install/release_tag.py notes TAG COMMIT PREVIOUS|- BRANCH CHECK_RUNS_JSON LOG_FILE
+      prints the candidate's release notes; LOG_FILE holds one commit per line since PREVIOUS.
+      The log batch's image is named with DIGEST_PLACEHOLDER for its digest, which the
+      candidate workflow's tag job replaces with the digest its image job pushed or found
+      (ADR-042, ADR-080).
 """
 
 import json
 import os
 import re
+import subprocess
 import sys
 
 import release
@@ -31,10 +49,30 @@ ROOT = os.path.dirname(HERE)
 # Stands for the log batch image's digest in the notes, until the tag job writes it (ADR-042).
 DIGEST_PLACEHOLDER = "BATCH_IMAGE_DIGEST"
 TAG_RE = re.compile(r"^platform-(\d{4})\.(\d{2})\.(\d{2})(?:\.(\d+))?$")
+RC_RE = re.compile(r"^(platform-\d{4}\.\d{2}\.\d{2}(?:\.\d+)?)-rc\.(\d+)$")
+RC_BRANCH_RE = re.compile(r"^rc/(platform-\d{4}\.\d{2}\.\d{2}(?:\.\d+)?-rc\.\d+)$")
+CANDIDATE_BRANCH_RE = re.compile(r"^candidate/([0-9a-f]{12})$")
 DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
-# The check names the `rc` ruleset requires (ADR-033): release-gate.yml's jobs and static.yml.
-REQUIRED_CHECKS = ("the head is main", "static", "dry-run / dry-run",
-                   "smoke upgrade / smoke", "smoke fresh / smoke")
+# The checks the notes link, from the commit a candidate was made at (ADR-080): static from
+# main's own run, the others the gates candidate.yml calls.
+GATE_CHECKS = ("static", "dry-run / dry-run", "smoke upgrade / smoke", "smoke fresh / smoke")
+# Check runs that are not the commit's CI: the jobs of candidate.yml, candidate-guard.yml and
+# auto-candidate.yml (AC4b), from this run or an earlier candidate on the commit.
+CANDIDATE_JOBS = frozenset([
+    "check the candidate",
+    "the log batch's image on GHCR",
+    "notes of the candidate",
+    "rc tag and prerelease",
+    "delete the candidate branch",
+    "candidate branch unchanged",
+    "decide on a candidate",
+    "push the candidate branch",
+])
+# The jobs candidate.yml calls from its own jobs (workflow `dry-run`, `smoke upgrade`, `smoke
+# fresh`): a check run is "<job> / <called job>". Candidate reads their result itself.
+CANDIDATE_GATE_PREFIXES = ("dry-run / ", "smoke upgrade / ", "smoke fresh / ")
+FAILED = frozenset(["failure", "timed_out", "cancelled", "action_required", "stale",
+                    "startup_failure"])
 
 
 def _key(tag):
@@ -60,23 +98,104 @@ def next_tag(date, tags):
     return f"{base}.{max(taken) + 1}" if taken else base
 
 
-def verify(check_runs):
-    """Problems with the release-gate checks; a name passes if any of its runs succeeded."""
-    by_name = {}
-    for run in check_runs:
-        by_name.setdefault(run["name"], []).append(run)
-    problems = []
-    for name in REQUIRED_CHECKS:
-        runs = by_name.get(name, [])
-        if not runs:
-            problems.append(f"{name}: not reported")
-        elif not any(r.get("conclusion") == "success" for r in runs):
-            last = runs[-1]
-            problems.append(f"{name}: {last.get('conclusion') or last.get('status')}")
-    return problems
+def _candidates(final, tags):
+    return [int(m.group(2)) for m in map(RC_RE.match, tags) if m and m.group(1) == final]
 
 
-def notes(tag, commit, previous, pr, checks, log, pins, supported, batch_image):
+def rc_tag(final, tags):
+    """The next candidate tag of the release `final`: `<final>-rc.N`."""
+    if not _key(final):
+        raise ValueError(f"{final or '(none)'} is not a release tag")
+    return f"{final}-rc.{max([0] + _candidates(final, tags)) + 1}"
+
+
+def check_candidate(branch, head, on_main, others):
+    """Refuses unless the branch names HEAD, HEAD is on origin/main and no other candidate
+    branch is left over."""
+    m = CANDIDATE_BRANCH_RE.match(branch)
+    if not m:
+        raise ValueError(f"{branch} is not candidate/<12-character sha>")
+    if not head.startswith(m.group(1)):
+        raise ValueError(f"{branch} names {m.group(1)}, not HEAD {head}")
+    if not on_main:
+        raise ValueError(f"{head} is not on origin/main")
+    if others:
+        raise ValueError(f"{', '.join(others)} is left over; Kade deletes it first")
+
+
+def checks_passed(runs, run_id):
+    """Refuses unless every check run on the candidate commit finished and none failed, and
+    `static` succeeded. Left out: this run's own jobs, the candidate workflows' jobs from any
+    run (CANDIDATE_JOBS) and the gates Candidate calls (CANDIDATE_GATE_PREFIXES)."""
+    own = f"/actions/runs/{run_id}/"
+    others = [r for r in runs
+              if own not in str(r.get("details_url") or "")
+              and r["name"] not in CANDIDATE_JOBS
+              and not r["name"].startswith(CANDIDATE_GATE_PREFIXES)]
+    if not others:
+        raise ValueError("no check run on this commit besides this run")
+    bad = [f"{r['name']}: {r['conclusion'] if r.get('status') == 'completed' else r.get('status')}"
+           for r in others
+           if r.get("status") != "completed" or r.get("conclusion") in FAILED]
+    if not any(r["name"] == "static" and r.get("conclusion") == "success" for r in others):
+        bad.append("static: not reported")
+    if bad:
+        raise ValueError(f"checks not passed: {'; '.join(bad)}")
+
+
+def check_promote(rc, tags):
+    """The final tag of candidate `rc`, refused unless `rc` is the highest candidate of a
+    release that does not exist yet and is above the latest release."""
+    m = RC_RE.match(rc or "")
+    if not m:
+        raise ValueError(f"{rc or '(none)'} is not a candidate tag platform-YYYY.MM.DD-rc.N")
+    final, n = m.group(1), int(m.group(2))
+    highest = max(_candidates(final, tags) + [n])
+    if highest > n:
+        raise ValueError(f"{final}-rc.{highest} is newer than {rc}")
+    if final in tags:
+        raise ValueError(f"{final} is already released")
+    latest = previous(tags)
+    if latest and _key(final) <= _key(latest):
+        raise ValueError(f"{final} is not above the latest release {latest}")
+    return final
+
+
+def rc_of_branch(branch):
+    """The rc tag of a branch `rc/<rc tag>`, which Candidate makes at the tag's commit for
+    Promote to run from (the GitHub app lists branches, not tags)."""
+    m = RC_BRANCH_RE.match(branch or "")
+    if not m:
+        raise ValueError(f"{branch or '(none)'} is not rc/<rc tag>")
+    return m.group(1)
+
+
+def _rc_branches(branches):
+    out = []
+    for b in branches:
+        m = RC_BRANCH_RE.match(b)
+        if m:
+            tag = RC_RE.match(m.group(1))
+            out.append((b, tag.group(1), int(tag.group(2))))
+    return out
+
+
+def superseded(rc, branches):
+    """The rc/ branches of `rc`'s release with a lower candidate number."""
+    m = RC_RE.match(rc or "")
+    if not m:
+        raise ValueError(f"{rc or '(none)'} is not a candidate tag")
+    return [b for b, final, n in _rc_branches(branches) if final == m.group(1) and n < int(m.group(2))]
+
+
+def released(final, branches):
+    """The rc/ branches of release `final` and every older one."""
+    if not _key(final):
+        raise ValueError(f"{final or '(none)'} is not a release tag")
+    return [b for b, f, _ in _rc_branches(branches) if _key(f) <= _key(final)]
+
+
+def notes(tag, commit, previous, branch, checks, log, pins, supported, batch_image):
     image = pins["node_image"]["image"]
     kubernetes = image.split(":", 1)[1].split("@", 1)[0]
     chart = pins["cnpg_chart"]
@@ -87,12 +206,13 @@ def notes(tag, commit, previous, pr, checks, log, pins, supported, batch_image):
     lines = [
         f"# {tag}",
         "",
-        f"Commit `{commit}` on `rc`, from {pr}.",
+        f"Candidate of {RC_RE.match(tag).group(1) if RC_RE.match(tag) else tag} at commit "
+        f"`{commit}` on `main`, from `{branch}`.",
         "",
-        "## Release gate (ADR-033)",
+        "## Gates on the commit (ADR-080)",
         "",
     ]
-    lines += [f"- [{name}]({by_name[name]['html_url']})" for name in REQUIRED_CHECKS
+    lines += [f"- [{name}]({by_name[name]['html_url']})" for name in GATE_CHECKS
               if name in by_name]
     lines += [
         "",
@@ -121,25 +241,62 @@ def _load(path):
         return json.load(f)
 
 
+def _git(*args):
+    return subprocess.run(["git", *args], capture_output=True, text=True, check=False)
+
+
+def _check_candidate_here(branch):
+    head = _git("rev-parse", "HEAD").stdout.strip()
+    on_main = _git("merge-base", "--is-ancestor", head, "origin/main").returncode == 0
+    listed = _git("ls-remote", "--heads", "origin", "candidate/*").stdout.splitlines()
+    others = [line.split("refs/heads/", 1)[1] for line in listed if "refs/heads/" in line]
+    check_candidate(branch, head, on_main, [b for b in others if b != branch])
+
+
 def main(argv):
-    if len(argv) >= 2 and argv[1] == "previous":
-        tag = previous(argv[2:])
+    try:
+        return _main(argv)
+    except ValueError as e:
+        print(e)
+        return 1
+
+
+def _main(argv):
+    cmd, rest = (argv[1] if len(argv) > 1 else ""), argv[2:]
+    if cmd == "previous":
+        tag = previous(rest)
         if tag:
             print(tag)
         return 0
-    if len(argv) >= 3 and argv[1] == "next":
-        print(next_tag(argv[2], argv[3:]))
+    if cmd == "next" and rest:
+        print(next_tag(rest[0], rest[1:]))
         return 0
-    if len(argv) == 3 and argv[1] == "verify":
-        problems = verify(_load(argv[2]))
-        for problem in problems:
-            print(problem)
-        return 1 if problems else 0
-    if len(argv) == 8 and argv[1] == "notes":
-        tag, commit, prev, pr, checks_path, log_path = argv[2:8]
+    if cmd == "rc" and rest:
+        print(rc_tag(rest[0], rest[1:]))
+        return 0
+    if cmd == "check-candidate" and len(rest) == 1:
+        _check_candidate_here(rest[0])
+        return 0
+    if cmd == "checks-passed" and len(rest) == 1:
+        checks_passed(json.load(sys.stdin).get("check_runs") or [], rest[0])
+        return 0
+    if cmd == "check-promote" and rest:
+        print(check_promote(rest[0], rest[1:]))
+        return 0
+    if cmd == "rc-branch" and len(rest) == 1:
+        print(rc_of_branch(rest[0]))
+        return 0
+    if cmd == "superseded" and rest:
+        print(" ".join(superseded(rest[0], rest[1:])))
+        return 0
+    if cmd == "released" and rest:
+        print(" ".join(released(rest[0], rest[1:])))
+        return 0
+    if cmd == "notes" and len(rest) == 6:
+        tag, commit, prev, branch, checks_path, log_path = rest
         with open(log_path, encoding="utf-8") as f:
             log = f.read().splitlines()
-        print(notes(tag, commit, None if prev == "-" else prev, pr, _load(checks_path), log,
+        print(notes(tag, commit, None if prev == "-" else prev, branch, _load(checks_path), log,
                     _load(os.path.join(ROOT, "gates", "pins.json")),
                     _load(os.path.join(HERE, "supported.json")), release.batch_image()),
               end="")
