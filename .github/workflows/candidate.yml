@@ -14,8 +14,9 @@
 #     commit), makes a GitHub prerelease whose notes name the image with its digest, makes the
 #     branch rc/<rc tag> at that commit, for Promote (promote.yml) to run from (the GitHub app
 #     lists branches only), and deletes the same version's lower rc branches.
-# Whatever happens, the last job deletes the candidate/<sha> branch; a failed candidate is fixed
-# on main and starts again with a new branch. Only the called gates' delete jobs, the image job
+# A successful run deletes the candidate/<sha> branch; a failed or refused one keeps it, so
+# Candidate can run again on it (a kind gate can flake). auto-candidate deletes it when main gets
+# a newer candidate, or Kade does. Only the called gates' delete jobs, the image job
 # (packages) and the tag and cleanup jobs can write; the tag and cleanup jobs run none of the
 # repository's code.
 # A called workflow's jobs get at most what the calling job grants. The gates' own jobs ask for
@@ -268,13 +269,13 @@ jobs:
   cleanup:
     name: delete the candidate branch
     needs: [check, dry-run, smoke-upgrade, smoke-fresh, notes, image, tag]
-    if: always() && startsWith(github.ref, 'refs/heads/candidate/')
+    if: needs.tag.result == 'success' && startsWith(github.ref, 'refs/heads/candidate/')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: write  # deleting the branch
     steps:
-      - name: Delete the branch, whatever the result
+      - name: Delete the branch of a candidate that was tagged
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
