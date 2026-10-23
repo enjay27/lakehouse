@@ -216,9 +216,11 @@ class Candidate(unittest.TestCase):
         for part in ("git/commits", "git/trees", "git/blobs"):
             self.assertNotIn(part, script)
 
-    def test_the_last_job_deletes_the_branch_whatever_happened(self):
+    def test_the_last_job_deletes_the_branch_only_after_the_tag_job_succeeded(self):
         cleanup = self.jobs["cleanup"]
-        self.assertEqual(cleanup["if"], "always() && startsWith(github.ref, 'refs/heads/candidate/')")
+        self.assertNotIn("always()", cleanup["if"], "a failed or refused run keeps its branch")
+        self.assertIn("needs.tag.result == 'success'", cleanup["if"])
+        self.assertIn("startsWith(github.ref, 'refs/heads/candidate/')", cleanup["if"])
         self.assertEqual(cleanup["permissions"], {"contents": "write"})
         others = sorted(k for k in self.jobs if k != "cleanup")
         self.assertEqual(sorted(cleanup["needs"]), others, "it needs every other job")
