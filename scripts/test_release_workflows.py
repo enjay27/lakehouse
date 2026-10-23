@@ -151,5 +151,47 @@ class Candidate(unittest.TestCase):
         self.assertIn("git/refs/heads/$GITHUB_REF_NAME", run_text(cleanup))
 
 
+class Promote(unittest.TestCase):
+    def setUp(self):
+        self.workflow = read_workflow(os.path.join(WORKFLOWS, "promote.yml"))
+        self.jobs = self.workflow["jobs"]
+
+    def test_kade_starts_it_by_hand_under_the_release_lock(self):
+        self.assertEqual(list(self.workflow["on"]), ["workflow_dispatch"])
+        self.assertEqual(self.workflow["permissions"], {})
+        self.assertEqual(self.workflow["concurrency"],
+                         {"group": "release", "cancel-in-progress": "false"})
+
+    def test_it_runs_on_an_rc_branch_only(self):
+        self.assertIn("refs/heads/rc/platform-*-rc.*)", run_text(self.jobs["check"]))
+
+    def test_only_the_tag_job_writes_and_it_runs_none_of_the_repositorys_code(self):
+        self.assertEqual({k for k, j in self.jobs.items()
+                          if "write" in (j.get("permissions") or {}).values()}, {"tag"})
+        self.assertEqual(self.jobs["tag"]["permissions"], {"contents": "write"})
+        self.assertEqual(self.jobs["tag"]["needs"], "check")
+        self.assertNotIn("actions/checkout", uses_text(self.jobs["tag"]))
+        self.assertNotIn("python3", run_text(self.jobs["tag"]))
+
+    def test_it_builds_nothing_and_reads_no_packages(self):
+        text = run_text(self.jobs["check"]) + run_text(self.jobs["tag"])
+        for part in ("docker", "packages", "buildx"):
+            self.assertNotIn(part, text)
+        self.assertFalse(any("packages" in (j.get("permissions") or {})
+                             for j in self.jobs.values()))
+
+    def test_the_check_refuses_unless_the_branch_is_at_its_tag_and_the_prerelease_exists(self):
+        script = run_text(self.jobs["check"])
+        for part in ("release_tag.py rc-branch", "release_tag.py check-promote",
+                     'refs/tags/$rc^{commit}', "isPrerelease", "release_tag.py released"):
+            self.assertIn(part, script)
+
+    def test_the_tag_job_reads_the_branch_again_then_tags_the_same_commit_with_the_rcs_notes(self):
+        script = run_text(self.jobs["tag"])
+        self.assertLess(script.index("moved from"), script.index("gh release create"))
+        for part in ('--target "$COMMIT"', "--latest", "$RELEASED", "base64 -d"):
+            self.assertIn(part, script)
+
+
 if __name__ == "__main__":
     unittest.main()
