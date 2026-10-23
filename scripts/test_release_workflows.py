@@ -45,6 +45,80 @@ class CandidateGuard(unittest.TestCase):
             self.assertIn(part, script)
 
 
+AUTO_CANDIDATE = "auto-candidate.yml"
+
+
+class AutoCandidate(unittest.TestCase):
+    def setUp(self):
+        self.workflow = read_workflow(os.path.join(WORKFLOWS, AUTO_CANDIDATE))
+        self.jobs = self.workflow["jobs"]
+
+    def job_named(self, name):
+        (key,) = [k for k, j in self.jobs.items() if j.get("name") == name]
+        return self.jobs[key]
+
+    def test_it_follows_statics_completed_runs_on_main_and_has_its_own_lock(self):
+        self.assertEqual(list(self.workflow["on"]), ["workflow_run"])
+        trigger = self.workflow["on"]["workflow_run"]
+        self.assertEqual(trigger["workflows"], ["Static"])
+        self.assertEqual(trigger["types"], ["completed"])
+        self.assertEqual(trigger["branches"], ["main"])
+        self.assertEqual(self.workflow["permissions"], {})
+        # Never `release`: a queued run there would cancel Candidate's.
+        self.assertEqual(self.workflow["concurrency"],
+                         {"group": "auto-candidate", "cancel-in-progress": "false"})
+
+    def test_the_job_names_are_the_ones_the_check_read_leaves_out(self):
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(WORKFLOWS), "..", "install"))
+        from release_tag import CANDIDATE_JOBS
+        self.assertEqual({j["name"] for j in self.jobs.values()} - CANDIDATE_JOBS, set())
+
+    def test_the_trigger_names_the_workflow_the_script_waits_for(self):
+        script = run_text(self.job_named("decide on a candidate"))
+        self.assertIn('release_tag.py ci-done "Static"', script)
+
+    def test_only_a_passed_run_from_a_push_or_auto_merge_decides(self):
+        condition = self.job_named("decide on a candidate")["if"]
+        for part in ("workflow_run.conclusion == 'success'", "workflow_run.event == 'push'",
+                     "workflow_run.event == 'workflow_run'"):
+            self.assertIn(part, condition)
+        self.assertNotIn("schedule", condition)
+
+    def test_deciding_reads_the_commit_with_its_tags_and_cannot_write(self):
+        job = self.job_named("decide on a candidate")
+        self.assertEqual(job["permissions"], {"contents": "read", "actions": "read"})
+        (checkout,) = [s for s in job["steps"] if "actions/checkout" in str(s.get("uses"))]
+        self.assertEqual(checkout["uses"], "actions/checkout@v7")
+        self.assertEqual(checkout["with"]["ref"], "${{ github.event.workflow_run.head_sha }}")
+        self.assertEqual(checkout["with"]["fetch-depth"], "0")
+        self.assertEqual(checkout["with"]["persist-credentials"], "false")
+        script = run_text(job)
+        self.assertLess(script.index("release_tag.py should-candidate"),
+                        script.index("release_tag.py ci-done"))
+        self.assertIn("$GITHUB_STEP_SUMMARY", script)
+
+    def test_only_the_push_job_can_write_and_it_checks_nothing_out(self):
+        writers = [j["name"] for j in self.jobs.values()
+                   if "write" in (j.get("permissions") or {}).values()]
+        self.assertEqual(writers, ["push the candidate branch"])
+        push = self.job_named("push the candidate branch")
+        self.assertEqual(push["permissions"], {"contents": "write", "actions": "read"})
+        self.assertNotIn("actions/checkout", uses_text(push))
+        self.assertNotIn("python3", run_text(push))
+        self.assertIn("decide", push["needs"])
+        self.assertIn("== 'true'", push["if"])
+
+    def test_the_push_job_leaves_a_moved_main_and_a_running_candidate_alone(self):
+        script = run_text(self.job_named("push the candidate branch"))
+        for part in ("git/ref/heads/main", "exit 0", "workflows/candidate.yml/runs",
+                     "::error::", "git/matching-refs/heads/candidate/", "-X DELETE",
+                     "-X POST", "Run workflow"):
+            self.assertIn(part, script)
+        self.assertLess(script.index("workflows/candidate.yml/runs"), script.index("-X DELETE"))
+        self.assertLess(script.index("-X DELETE"), script.index("-X POST"))
+
+
 CANDIDATE = "candidate.yml"
 GATE_CALLS = {"dry-run": "./.github/workflows/dry-run.yml",
               "smoke-upgrade": "./.github/workflows/smoke.yml",

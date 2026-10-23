@@ -283,6 +283,81 @@ class Notes(unittest.TestCase):
         self.assertIn("First release: nothing to upgrade from.", self.notes(previous=None))
 
 
+class ShouldCandidate(unittest.TestCase):
+    FINAL = "platform-2026.10.10"
+
+    def test_a_shipped_file_changed_since_the_latest_release_is_a_candidate(self):
+        for path in ("charts/polaris/values-lakehouse.yaml", "images/polaris-log-batch/Dockerfile",
+                     "install/release.py"):
+            with self.subTest(path=path):
+                self.assertEqual(rt.should_candidate([], self.FINAL, ["docs/x.md", path]),
+                                 (True, ""))
+
+    def test_nothing_shipped_changed_is_not(self):
+        ok, why = rt.should_candidate([], self.FINAL, ["docs/adr/README.md", "gates/gate.py",
+                                                       "scripts/x.py", ".github/workflows/a.yml",
+                                                       "installer/x", "charts"])
+        self.assertFalse(ok)
+        self.assertIn(self.FINAL, why)
+
+    def test_no_final_tag_counts_every_file(self):
+        self.assertEqual(rt.should_candidate([], None, ["install/release.py"]), (True, ""))
+        ok, why = rt.should_candidate([], None, ["docs/x.md"])
+        self.assertFalse(ok)
+        self.assertIn("no release", why)
+
+    def test_a_platform_tag_on_head_final_or_candidate_is_not(self):
+        for tag in ("platform-2026.10.10", "platform-2026.10.23-rc.1"):
+            with self.subTest(tag=tag):
+                ok, why = rt.should_candidate([tag], self.FINAL, ["install/release.py"])
+                self.assertFalse(ok)
+                self.assertIn(tag, why)
+
+    def test_other_tags_on_head_do_not_stop_it(self):
+        self.assertEqual(rt.should_candidate(["v1", "platform-x"], self.FINAL,
+                                             ["charts/a"]), (True, ""))
+
+
+class CiDone(unittest.TestCase):
+    def wf(self, name="Static", event="push", status="completed", conclusion="success"):
+        return {"name": name, "event": event, "status": status, "conclusion": conclusion}
+
+    def test_a_finished_passing_run_is_ready(self):
+        self.assertEqual(rt.ci_done([self.wf()], ["Static"]), "ready")
+
+    def test_skipped_and_neutral_runs_are_ready(self):
+        self.assertEqual(rt.ci_done([self.wf(conclusion="skipped"), self.wf(conclusion="neutral")],
+                                    ["Static"]), "ready")
+
+    def test_an_unfinished_run_is_waiting(self):
+        runs = [self.wf(), self.wf(status="in_progress", conclusion=None)]
+        self.assertEqual(rt.ci_done(runs, ["Static"]), "waiting")
+
+    def test_another_workflows_unfinished_run_is_ignored(self):
+        runs = [self.wf(), self.wf("Auto-merge", "workflow_run", "in_progress", None)]
+        self.assertEqual(rt.ci_done(runs, ["Static"]), "ready")
+
+    def test_a_failed_run_is_red_even_beside_an_unfinished_one(self):
+        for conclusion in ("failure", "cancelled", "timed_out"):
+            with self.subTest(conclusion=conclusion):
+                runs = [self.wf(conclusion=conclusion), self.wf(status="queued", conclusion=None)]
+                self.assertEqual(rt.ci_done(runs, ["Static"]), "red")
+
+    def test_no_run_is_waiting(self):
+        self.assertEqual(rt.ci_done([], ["Static"]), "waiting")
+        self.assertEqual(rt.ci_done([self.wf("Gate check")], ["Static"]), "waiting")
+
+    def test_a_workflow_run_event_counts_as_does_a_dispatch(self):
+        self.assertEqual(rt.ci_done([self.wf(event="workflow_run", conclusion="failure")],
+                                    ["Static"]), "red")
+        self.assertEqual(rt.ci_done([self.wf(event="workflow_dispatch")], ["Static"]), "ready")
+
+    def test_pull_request_and_schedule_runs_do_not_count(self):
+        runs = [self.wf(event="pull_request", conclusion="failure"),
+                self.wf(event="schedule", status="in_progress", conclusion=None)]
+        self.assertEqual(rt.ci_done(runs, ["Static"]), "waiting")
+
+
 class Main(unittest.TestCase):
     def run_main(self, argv):
         out = io.StringIO()
@@ -346,6 +421,23 @@ class Main(unittest.TestCase):
         self.assertIn("node image `kindest/node:v1.36.4@sha256:", out)
         self.assertIn("First release", out)
         self.assertIn(f"`{release.batch_image()}@{rt.DIGEST_PLACEHOLDER}`", out)
+
+    def test_ci_done_reads_the_api_json_on_stdin(self):
+        body = json.dumps({"workflow_runs": [{"name": "Static", "event": "workflow_run",
+                                              "status": "completed", "conclusion": "success"}]})
+        stdin = sys.stdin
+        try:
+            sys.stdin = io.StringIO(body)
+            self.assertEqual(self.run_main(["ci-done", "Static"]), (0, "ready\n"))
+            sys.stdin = io.StringIO(body)
+            self.assertEqual(self.run_main(["ci-done", "Other"]), (0, "waiting\n"))
+        finally:
+            sys.stdin = stdin
+
+    def test_should_candidate_prints_a_verdict(self):
+        code, out = self.run_main(["should-candidate"])
+        self.assertEqual(code, 0)
+        self.assertIn(out, ("true\n", "false\n"))
 
     def test_unknown_arguments_exit_2(self):
         self.assertEqual(self.run_main(["release"])[0], 2)

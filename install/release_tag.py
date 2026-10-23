@@ -20,6 +20,15 @@ Usage:
       reads a commit's check runs (the API's JSON) on stdin; exits 1 with the problems unless
       all finished, none failed and static succeeded, leaving out run RUN_ID's own jobs and
       the candidate workflows' jobs.
+  python3 install/release_tag.py should-candidate
+      prints true when HEAD carries no platform-* tag (final or candidate) and a file under
+      charts/, images/ or install/ changed since the latest release (every file when there is
+      none); else false, the reason on stderr. Those paths are what install/release.py
+      installs (auto-candidate.yml, ADR-080).
+  python3 install/release_tag.py ci-done NAME...
+      reads a commit's workflow runs (the API's JSON) on stdin; prints red when a run of a
+      workflow NAME finished other than success, skipped or neutral, else waiting when one is
+      unfinished or none exists, else ready.
   python3 install/release_tag.py check-promote RC_TAG [TAG...]
       prints the final tag; exits 1 unless RC_TAG is the highest candidate of a release that
       does not exist yet and is above the latest release.
@@ -71,6 +80,12 @@ CANDIDATE_JOBS = frozenset([
 # The jobs candidate.yml calls from its own jobs (workflow `dry-run`, `smoke upgrade`, `smoke
 # fresh`): a check run is "<job> / <called job>". Candidate reads their result itself.
 CANDIDATE_GATE_PREFIXES = ("dry-run / ", "smoke upgrade / ", "smoke fresh / ")
+# What a release ships (install/release.py installs it): a change under these decides a candidate.
+SHIPPED_DIRS = ("charts/", "images/", "install/")
+# The events whose runs of a workflow are main's CI: a push, a dispatch and, for Static after
+# Auto-merge (auto-merge pushes with GITHUB_TOKEN, which starts no push run, ADR-055),
+# a workflow_run.
+CI_EVENTS = frozenset(["push", "workflow_dispatch", "workflow_run"])
 FAILED = frozenset(["failure", "timed_out", "cancelled", "action_required", "stale",
                     "startup_failure"])
 
@@ -141,6 +156,30 @@ def checks_passed(runs, run_id):
         bad.append("static: not reported")
     if bad:
         raise ValueError(f"checks not passed: {'; '.join(bad)}")
+
+
+def should_candidate(head_tags, final, changed):
+    """(True, "") when HEAD has no platform-* tag and a shipped file changed since the release
+    `final` (`changed` is every file at HEAD when `final` is None); else (False, reason)."""
+    tagged = [t for t in head_tags if _key(t) or RC_RE.match(t)]
+    if tagged:
+        return False, f"HEAD already carries {', '.join(tagged)}"
+    if any(f.startswith(SHIPPED_DIRS) for f in changed):
+        return True, ""
+    since = f"since {final}" if final else "(no release yet)"
+    return False, f"no file under {', '.join(SHIPPED_DIRS)} changed {since}"
+
+
+def ci_done(runs, names):
+    """The state of main's CI from a commit's workflow runs: only runs of the workflows
+    `names` by CI_EVENTS count. Others (Auto-merge, Main status) run after them and may
+    still be going when the last one finishes."""
+    ours = [r for r in runs if r.get("name") in names and r.get("event") in CI_EVENTS]
+    if any(r.get("status") == "completed" and r.get("conclusion") in FAILED for r in ours):
+        return "red"
+    if not ours or any(r.get("status") != "completed" for r in ours):
+        return "waiting"
+    return "ready"
 
 
 def check_promote(rc, tags):
@@ -253,6 +292,16 @@ def _check_candidate_here(branch):
     check_candidate(branch, head, on_main, [b for b in others if b != branch])
 
 
+def _should_candidate_here():
+    head_tags = _git("tag", "--points-at", "HEAD").stdout.split()
+    final = previous(_git("tag", "--list", "platform-*").stdout.split())
+    if final:
+        changed = _git("diff", "--name-only", final, "HEAD").stdout.splitlines()
+    else:
+        changed = _git("ls-files").stdout.splitlines()
+    return should_candidate(head_tags, final, changed)
+
+
 def main(argv):
     try:
         return _main(argv)
@@ -279,6 +328,15 @@ def _main(argv):
         return 0
     if cmd == "checks-passed" and len(rest) == 1:
         checks_passed(json.load(sys.stdin).get("check_runs") or [], rest[0])
+        return 0
+    if cmd == "should-candidate" and not rest:
+        ok, why = _should_candidate_here()
+        if why:
+            print(why, file=sys.stderr)
+        print("true" if ok else "false")
+        return 0
+    if cmd == "ci-done" and rest:
+        print(ci_done(json.load(sys.stdin).get("workflow_runs") or [], rest))
         return 0
     if cmd == "check-promote" and rest:
         print(check_promote(rest[0], rest[1:]))
