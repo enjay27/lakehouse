@@ -193,5 +193,20 @@ class Promote(unittest.TestCase):
             self.assertIn(part, script)
 
 
+class RetiredFlow(unittest.TestCase):
+    def test_the_rc_gate_and_release_workflows_are_gone(self):
+        names = set(workflows())
+        self.assertFalse(names & {"release.yml", "release-gate.yml"})
+        self.assertLessEqual({"candidate.yml", "promote.yml", GUARD}, names)
+
+    def test_no_workflow_runs_on_a_pull_request_into_rc(self):
+        for name, workflow in workflows().items():
+            on = workflow.get("on") or {}
+            pr = on.get("pull_request") if isinstance(on, dict) else None
+            with self.subTest(workflow=name):
+                self.assertNotIn("rc", (pr or {}).get("branches") or [])
+                self.assertNotIn("rc", (pr or {}).get("branches-ignore") or [])
+
+
 if __name__ == "__main__":
     unittest.main()

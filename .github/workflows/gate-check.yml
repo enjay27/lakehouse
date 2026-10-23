@@ -1,8 +1,8 @@
 # gate-check (ADR-039): a PR that changes platform files passes only when a passing dry-run on
 # gate/dry-run/<task> and a passing smoke on gate/smoke/<task> cover its head (ADR-038); one that
 # changes batch or fixture spec files also needs a passing log-batch on gate/log-batch/<task>
-# (ADR-040 §5). Runs on every PR except those into rc, whose release gate runs dry-run and smoke
-# itself (ADR-033). auto-merge.yml lists this workflow by its name, "Gate check", and requires
+# (ADR-040 §5). Runs on every PR; the exception for PRs into rc ended with ADR-080.
+# auto-merge.yml lists this workflow by its name, "Gate check", and requires
 # its check `gate-check` by name (ADR-022).
 # The rule, scripts/gate_check.py, is checked out from main, never from the PR, so a PR cannot
 # change the rule that judges it; until main has the script (the PR that adds it) the PR's
@@ -11,7 +11,6 @@ name: Gate check
 
 on:
   pull_request:
-    branches-ignore: [rc]
 
 permissions: {}
 
