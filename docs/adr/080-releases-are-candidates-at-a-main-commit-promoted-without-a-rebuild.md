@@ -99,8 +99,9 @@ All run on the candidate branch, in this order:
   the repository's code and is the only one besides the image and cleanup jobs that can write;
   `rc/<rc tag>` is made at the same commit, and the same version's lower `rc/` branches are
   deleted.
-- **The last job, `if: always()`, deletes `candidate/<sha>`,** whatever happened. A failed
-  candidate is fixed on `main` and starts again with a new branch.
+- **The last job deletes `candidate/<sha>` only when the tag job succeeded.** A failed or
+  refused Candidate keeps its branch, so Kade can run it again; a newer candidate or Kade
+  deletes it.
 - **`candidate-guard.yml`** keeps the branch as it was made: on creation it checks the name
   and that the commit is on `main`; on any later push it deletes the branch and fails; any
   push to `rc/*` is someone else's (Candidate makes them with `GITHUB_TOKEN`, which starts no
@@ -139,7 +140,7 @@ flowchart LR
     C -->|yes| G["dry-run, smoke upgrade,<br/>smoke fresh on the commit"]
     G --> I["log batch image on GHCR<br/>(built once, read back anonymously)"]
     I --> T["tag final-rc.N + prerelease<br/>+ branch rc/final-rc.N"]
-    T -->|"always"| D["delete candidate/sha12"]
+    T -->|"succeeded"| D["delete candidate/sha12"]
     T -->|"Kade: Promote on rc/final-rc.N"| P{"highest rc,<br/>final tag new?"}
     P -->|yes| R["tag final on the same commit<br/>+ release, same notes, no rebuild"]
     P -->|no| Y["refused"]
