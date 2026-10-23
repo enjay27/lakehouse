@@ -127,7 +127,7 @@ class CheckCandidate(unittest.TestCase):
 
 
 class ChecksPassed(unittest.TestCase):
-    def run_of(self, name, conclusion="success", status="completed", run="99"):
+    def run_of(self, name, conclusion="success", status="completed", run="3"):
         return {"name": name, "status": status, "conclusion": conclusion,
                 "details_url": f"https://github.com/o/r/actions/runs/{run}/job/5"}
 
@@ -322,7 +322,8 @@ class Main(unittest.TestCase):
         self.assertEqual(self.run_main(["superseded", "platform-2026.10.23-rc.1"]), (0, "\n"))
 
     def test_checks_passed_reads_the_api_json_on_stdin_and_names_the_problems(self):
-        body = json.dumps({"check_runs": [check("static", url=None)]})
+        own = dict(check("static"), details_url="https://github.com/o/r/actions/runs/99/job/1")
+        body = json.dumps({"check_runs": [own]})
         stdin = sys.stdin
         try:
             sys.stdin = io.StringIO(body)
