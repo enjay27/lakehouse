@@ -88,7 +88,7 @@ source does not matter for operation. What follows is the list they cover.
 ### P1: the gates and the foundation
 
 - The kind gate with dry-run and smoke workflows (ADR-017, ADR-050), gate-check (ADR-039),
-  and the release flow `main` → `rc` → tag (ADR-033, ADR-051). The first release has nothing
+  and the release flow, a candidate at a `main` commit promoted to a tag (ADR-080, ADR-051). The first release has nothing
   to upgrade from.
 - The CloudNativePG operator on the gate and test clusters only, at the pinned version; on
   the target clusters it is the operator team's, and a release only checks it is present
@@ -103,10 +103,11 @@ source does not matter for operation. What follows is the list they cover.
   [38060408746](https://github.com/enjay27/lakehouse/actions/runs/38060408746) (1 min 52 s,
   the `Cluster` Ready in 37 s).
 - Branch cleanup (ADR-032, PR #24): its first run deleted the merged branch on 2026-10-10.
-- The release flow (ADR-033, accepted on 2026-10-10; Kade created `rc` and its ruleset and
-  the `platform-*` tag ruleset): the gates upgrade from the latest release the commit
-  contains; `release-gate.yml` gates a PR from `main` into `rc`; `release.yml` tags the `rc`
-  commit after reading that gate. Gates on commit `608bc73` (2026-10-10, no tag yet, so a
+- The release flow (first through `rc`, accepted on 2026-10-10, replaced by ADR-080 on
+  2026-10-23; Kade created the `platform-*` tag ruleset): the gates upgrade from the latest
+  release the commit contains; since ADR-080 `candidate.yml` gates a `main` commit and tags it
+  `-rc.N`, and `promote.yml` tags the same commit without a rebuild. Through `rc`, `release-gate.yml`
+  gated a PR from `main` into `rc` and `release.yml` tagged the `rc` commit after reading that gate. Gates on commit `608bc73` (2026-10-10, no tag yet, so a
   fresh install): dry-run [38067420439](https://github.com/enjay27/lakehouse/actions/runs/38067420439),
   smoke [38067420520](https://github.com/enjay27/lakehouse/actions/runs/38067420520). The image
   cache waits for the first chart's images.
@@ -208,8 +209,8 @@ source does not matter for operation. What follows is the list they cover.
   output from the claim, read-only: every line and row holds contract v2, every summary's
   books balance, each refused request is kept once from its pod, no read is kept but the rows
   count them, both pods' files are read, and the second run changes nothing.
-  The release workflow pushes the batch's image to GHCR under its content-hash tag, and a
-  cluster pulls it from `IMAGE_REGISTRY` or GHCR (ADR-042, #55); `platform-2026.10.12`,
+  The release flow pushes the batch's image to GHCR under its content-hash tag, and a
+  cluster pulls it from `IMAGE_REGISTRY` or GHCR (ADR-080, #55); `platform-2026.10.12`,
   the first release with Polaris, pushed it (#78).
 - Backups (2026-10-12, ADR-043, #83). polaris-pg archives its WAL and takes a daily base
   backup through the Barman Cloud Plugin into `POLARIS_BACKUP_BUCKET`, with its own key in
@@ -379,8 +380,8 @@ Started on 2026-10-18 (Kade).
 
 ### P7: first release, then upgrades
 
-- The first release with Polaris and Datahub, `main` → `rc` → `platform-YYYY.MM.DD`
-  (ADR-033), with release notes and runbooks for installing and upgrading.
+- The first release with Polaris and Datahub, a candidate at a `main` commit, then `platform-YYYY.MM.DD`
+  (ADR-080), with release notes and runbooks for installing and upgrading.
 - The Polaris 1.7.0 upgrade as its own PR (ADR-009), gated from the last release (ADR-051).
 
 ## Pinned versions

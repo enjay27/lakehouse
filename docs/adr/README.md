@@ -81,7 +81,7 @@ flowchart LR
 | [030](030-auto-merge-leaves-prs-that-change-the-merge-rules-or-the-checks-to-kade.md) | Auto-merge leaves PRs that change the merge rules or the checks to Kade | Amended by ADR-059 |
 | [031](031-other-teams-services-are-interfaces-stand-ins-only-on-the-gate-seaweedfs-for-s3.md) | Other teams' services are interfaces in `.env`; stand-ins only on the gate, SeaweedFS for S3 | Amended by ADR-034 |
 | [032](032-a-cleanup-workflow-deletes-merged-claude-branches-and-their-gate-branches.md) | A cleanup workflow deletes merged `claude/*` branches and their `gate/*` branches | Amended by ADR-049 |
-| [033](033-release-candidates-are-gated-on-a-pr-from-main-into-rc-the-release-workflow-tags-rc.md) | Release candidates are gated on a PR from `main` into `rc`; the release workflow tags `rc` | Accepted |
+| [033](033-release-candidates-are-gated-on-a-pr-from-main-into-rc-the-release-workflow-tags-rc.md) | Release candidates are gated on a PR from `main` into `rc`; the release workflow tags `rc` | Superseded by ADR-080 |
 | [034](034-recording-proxies-on-the-gate-prove-each-connection-and-its-exchanges.md) | Recording proxies on the gate prove each of Polaris's connections and its exchanges | Amended by ADR-035 |
 | [035](035-the-postgresql-recorder-ends-the-clients-tls-and-talks-plain-to-postgresql.md) | The PostgreSQL recorder ends the client's TLS and talks plain TCP to PostgreSQL | Accepted |
 | [036](036-polaris-and-the-log-batch-share-one-readwritemany-claim-and-the-batch-publishes-each-utc-hour-once.md) | Polaris and the log batch share one ReadWriteMany claim; the batch publishes each UTC hour once | Amended by ADR-037 |
@@ -90,7 +90,7 @@ flowchart LR
 | [039](039-a-platform-pr-merges-only-when-passing-dry-run-and-smoke-gates-cover-its-head.md) | A platform PR merges only when passing dry-run and smoke gates cover its head | Amended by ADR-040 |
 | [040](040-log-batch-fixtures-come-from-a-real-utc-roll-and-a-log-batch-gate-ships-them-into-an-opensearch-stand-in.md) | Log batch fixtures come from a real UTC roll; a Log Batch Gate ships them into an OpenSearch stand-in | Amended by ADR-041 |
 | [041](041-the-log-batch-gate-creates-fixtures-only-when-no-unexpired-artifact-holds-their-spec-hash.md) | The Log Batch Gate creates fixtures only when no unexpired artifact holds their spec hash | Accepted |
-| [042](042-the-release-workflow-pushes-the-log-batchs-image-to-ghcr-and-clusters-pull-it-from-a-registry-named-in-env.md) | The release workflow pushes the log batch's image to GHCR; clusters pull it from a registry named in `.env` | Amended by ADR-074 |
+| [042](042-the-release-workflow-pushes-the-log-batchs-image-to-ghcr-and-clusters-pull-it-from-a-registry-named-in-env.md) | The release workflow pushes the log batch's image to GHCR; clusters pull it from a registry named in `.env` | Superseded by ADR-080 |
 | [043](043-every-postgresql-backs-up-to-s3-through-the-barman-cloud-plugin-which-the-operator-team-installs.md) | Every PostgreSQL backs up to S3 through the Barman Cloud Plugin, which the operator team installs | Amended by ADR-060 |
 | [044](044-ingress-is-denied-by-default-allowed-per-caller-and-proven-on-the-gate.md) | Ingress is denied by default and allowed per caller; Polaris's policies are a chart, proven on the gate | Superseded by ADR-048 |
 | [045](045-the-cnpg-operator-and-its-backup-plugin-are-the-operator-teams-and-a-release-installs-in-a-fixed-order.md) | The CNPG operator and its backup plugin are the operator team's; a release installs in a fixed order | Amended by ADR-077 |
@@ -128,6 +128,7 @@ flowchart LR
 | [077](077-the-datahub-recovery-job-installs-datahub-alone-from-this-commit-and-check-datahub-recovery-prints-its-timeline.md) | The datahub-recovery job installs Datahub alone, from this commit, and check-datahub-recovery prints its timeline | Accepted |
 | [078](078-datahubs-login-goes-through-the-sso-provider-over-oidc-and-the-gate-proves-it-against-dex-behind-a-recorder.md) | Datahub's login goes through the SSO provider over OIDC, and the gate proves it against Dex behind a recorder | Proposed |
 | [079](079-ingress-is-denied-by-default-and-allowed-per-caller-every-rule-restated-with-its-port-and-datahubs-oidc-stand-in-admitted.md) | Ingress is denied by default and allowed per caller, every rule restated with its port, and Datahub's OIDC stand-in admitted | Proposed |
+| [080](080-releases-are-candidates-at-a-main-commit-promoted-without-a-rebuild.md) | Releases are candidates at a `main` commit, promoted without a rebuild | Proposed |
 
 ## Not ADRs
 
