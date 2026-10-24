@@ -38,12 +38,12 @@ class CandidateGuard(unittest.TestCase):
     def test_a_deletion_is_ignored(self):
         self.assertEqual(self.job["if"], "${{ !github.event.deleted }}")
 
-    def test_it_refuses_a_push_to_rc_a_second_push_a_bad_name_and_a_commit_off_main(self):
+    def test_it_deletes_any_pushed_rc_branch_and_knows_no_candidate_branch(self):
         script = run_text(self.job)
-        for part in ('== rc/*', 'CREATED" != true', "candidate/[0-9a-f]", "AFTER:0:12",
-                     "compare/main...$AFTER", "identical|behind", "git/refs/heads/$GITHUB_REF_NAME"):
+        for part in ("== rc/*", "made only by the Candidate workflow", "git/refs/heads/$GITHUB_REF_NAME"):
             self.assertIn(part, script)
-
+        self.assertNotIn("candidate/", script)
+        self.assertNotIn("compare/main", script)
 
 CANDIDATE = "candidate.yml"
 GATE_CALLS = {"dry-run": "./.github/workflows/dry-run.yml",
