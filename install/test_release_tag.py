@@ -98,34 +98,6 @@ class RcTag(unittest.TestCase):
                 rt.rc_tag(final, [])
 
 
-class CheckCandidate(unittest.TestCase):
-    HEAD = "0123456789abcdef" + "0" * 24
-
-    def check(self, branch="candidate/0123456789ab", on_main=True, others=()):
-        rt.check_candidate(branch, self.HEAD, on_main, list(others))
-
-    def test_the_branch_naming_head_on_main_alone_passes(self):
-        self.check()
-
-    def test_the_name_must_be_candidate_and_twelve_hex_digits(self):
-        for branch in ("main", "candidate/0123456789a", "candidate/0123456789abc",
-                       "candidate/0123456789AB", "candidate/zzzzzzzzzzzz", "rc/0123456789ab"):
-            with self.subTest(branch=branch), self.assertRaisesRegex(ValueError, "candidate/<12"):
-                self.check(branch)
-
-    def test_the_name_must_be_the_start_of_head(self):
-        with self.assertRaisesRegex(ValueError, "names 111111111111, not HEAD"):
-            self.check("candidate/111111111111")
-
-    def test_head_must_be_on_main(self):
-        with self.assertRaisesRegex(ValueError, "not on origin/main"):
-            self.check(on_main=False)
-
-    def test_another_candidate_branch_stops_it(self):
-        with self.assertRaisesRegex(ValueError, "candidate/aaaaaaaaaaaa is left over"):
-            self.check(others=["candidate/aaaaaaaaaaaa"])
-
-
 class ChecksPassed(unittest.TestCase):
     def run_of(self, name, conclusion="success", status="completed", run="3"):
         return {"name": name, "status": status, "conclusion": conclusion,
@@ -242,7 +214,7 @@ class RcBranches(unittest.TestCase):
 class Notes(unittest.TestCase):
     def notes(self, previous="platform-2026.10.09"):
         return rt.notes(tag="platform-2026.10.10-rc.1", commit="c" * 40, previous=previous,
-                        branch="candidate/cccccccccccc", checks=all_green(),
+                        branch="main", checks=all_green(),
                         log=["abc1234 A change", "def5678 Another"], pins=PINS,
                         supported=SUPPORTED, batch_image=BATCH_IMAGE)
 
@@ -251,7 +223,7 @@ class Notes(unittest.TestCase):
         self.assertIn("# platform-2026.10.10-rc.1", text)
         self.assertIn("platform-2026.10.10", text)
         self.assertIn("c" * 40, text)
-        self.assertIn("candidate/", text)
+        self.assertIn("from `main`", text)
 
     def test_names_the_gate_kubernetes_and_its_node_image_digest(self):
         text = self.notes()
@@ -325,46 +297,6 @@ class ShouldCandidate(unittest.TestCase):
         self.assertEqual(rt.should_candidate(["v1", "platform-x"], self.FINAL, 1), (True, ""))
 
 
-class CiDone(unittest.TestCase):
-    def wf(self, name="Static", event="push", status="completed", conclusion="success"):
-        return {"name": name, "event": event, "status": status, "conclusion": conclusion}
-
-    def test_a_finished_passing_run_is_ready(self):
-        self.assertEqual(rt.ci_done([self.wf()], ["Static"]), "ready")
-
-    def test_skipped_and_neutral_runs_are_ready(self):
-        self.assertEqual(rt.ci_done([self.wf(conclusion="skipped"), self.wf(conclusion="neutral")],
-                                    ["Static"]), "ready")
-
-    def test_an_unfinished_run_is_waiting(self):
-        runs = [self.wf(), self.wf(status="in_progress", conclusion=None)]
-        self.assertEqual(rt.ci_done(runs, ["Static"]), "waiting")
-
-    def test_another_workflows_unfinished_run_is_ignored(self):
-        runs = [self.wf(), self.wf("Auto-merge", "workflow_run", "in_progress", None)]
-        self.assertEqual(rt.ci_done(runs, ["Static"]), "ready")
-
-    def test_a_failed_run_is_red_even_beside_an_unfinished_one(self):
-        for conclusion in ("failure", "cancelled", "timed_out"):
-            with self.subTest(conclusion=conclusion):
-                runs = [self.wf(conclusion=conclusion), self.wf(status="queued", conclusion=None)]
-                self.assertEqual(rt.ci_done(runs, ["Static"]), "red")
-
-    def test_no_run_is_waiting(self):
-        self.assertEqual(rt.ci_done([], ["Static"]), "waiting")
-        self.assertEqual(rt.ci_done([self.wf("Gate check")], ["Static"]), "waiting")
-
-    def test_a_workflow_run_event_counts_as_does_a_dispatch(self):
-        self.assertEqual(rt.ci_done([self.wf(event="workflow_run", conclusion="failure")],
-                                    ["Static"]), "red")
-        self.assertEqual(rt.ci_done([self.wf(event="workflow_dispatch")], ["Static"]), "ready")
-
-    def test_pull_request_and_schedule_runs_do_not_count(self):
-        runs = [self.wf(event="pull_request", conclusion="failure"),
-                self.wf(event="schedule", status="in_progress", conclusion=None)]
-        self.assertEqual(rt.ci_done(runs, ["Static"]), "waiting")
-
-
 class Main(unittest.TestCase):
     def run_main(self, argv):
         out = io.StringIO()
@@ -423,23 +355,11 @@ class Main(unittest.TestCase):
             with open(log, "w", encoding="utf-8") as f:
                 f.write("abc1234 A change\n")
             code, out = self.run_main(["notes", "platform-2026.10.10", "c" * 40, "-",
-                                       "candidate/cccccccccccc", checks, log])
+                                       "main", checks, log])
         self.assertEqual(code, 0)
         self.assertIn("node image `kindest/node:v1.36.4@sha256:", out)
         self.assertIn("First release", out)
         self.assertIn(f"`{release.batch_image()}@{rt.DIGEST_PLACEHOLDER}`", out)
-
-    def test_ci_done_reads_the_api_json_on_stdin(self):
-        body = json.dumps({"workflow_runs": [{"name": "Static", "event": "workflow_run",
-                                              "status": "completed", "conclusion": "success"}]})
-        stdin = sys.stdin
-        try:
-            sys.stdin = io.StringIO(body)
-            self.assertEqual(self.run_main(["ci-done", "Static"]), (0, "ready\n"))
-            sys.stdin = io.StringIO(body)
-            self.assertEqual(self.run_main(["ci-done", "Other"]), (0, "waiting\n"))
-        finally:
-            sys.stdin = stdin
 
     def test_check_main_prints_nothing_on_main_and_exits_1_elsewhere(self):
         self.assertEqual(self.run_main(["check-main", "refs/heads/main"]), (0, ""))

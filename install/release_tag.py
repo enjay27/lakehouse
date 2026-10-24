@@ -1,7 +1,8 @@
 """Release tags (ADR-080, ADR-051): their names, the checks a candidate reads, and the notes.
 
 A release is the tag `platform-YYYY.MM.DD`, `.N` appended (from 2) for a later release the
-same day. A candidate of it is `platform-YYYY.MM.DD-rc.N` on the same `main` commit, with the
+same day. A candidate of it is `platform-YYYY.MM.DD-rc.N` on the `main` commit Candidate was
+started on (a run on refs/heads/main only, plan section 9 of agent-config), with the
 branch `rc/<rc tag>` for Promote to run from; a candidate tag is never a release, so a date with
 only candidates is still free. The gates upgrade from the latest release the commit they test
 contains (gates/gate.py).
@@ -13,22 +14,16 @@ Usage:
       prints the name of the next release on that date.
   python3 install/release_tag.py rc FINAL [TAG...]
       prints the next candidate tag of the release FINAL.
-  python3 install/release_tag.py check-candidate BRANCH
-      exits 1 unless BRANCH is candidate/<12 characters of HEAD>, HEAD is on origin/main and
-      origin has no other candidate/* branch.
+  python3 install/release_tag.py check-main REF
+      exits 1 unless REF is refs/heads/main (GITHUB_REF of a Candidate run).
   python3 install/release_tag.py checks-passed RUN_ID
       reads a commit's check runs (the API's JSON) on stdin; exits 1 with the problems unless
       all finished, none failed and static succeeded, leaving out run RUN_ID's own jobs and
       the candidate workflows' jobs.
   python3 install/release_tag.py should-candidate
-      prints true when HEAD carries no platform-* tag (final or candidate) and a file under
-      charts/, images/ or install/ changed since the latest release (every file when there is
-      none); else false, the reason on stderr. Those paths are what install/release.py
-      installs (auto-candidate.yml, ADR-080).
-  python3 install/release_tag.py ci-done NAME...
-      reads a commit's workflow runs (the API's JSON) on stdin; prints red when a run of a
-      workflow NAME finished other than success, skipped or neutral, else waiting when one is
-      unfinished or none exists, else ready.
+      prints true when HEAD carries no platform-* tag (final or candidate) and has at least one
+      commit since the latest release (every commit when there is none); else false, the
+      reason on stderr ("nothing to release" at the release's own commit).
   python3 install/release_tag.py check-promote RC_TAG [TAG...]
       prints the final tag; exits 1 unless RC_TAG is the highest candidate of a release that
       does not exist yet and is above the latest release.
@@ -60,13 +55,14 @@ DIGEST_PLACEHOLDER = "BATCH_IMAGE_DIGEST"
 TAG_RE = re.compile(r"^platform-(\d{4})\.(\d{2})\.(\d{2})(?:\.(\d+))?$")
 RC_RE = re.compile(r"^(platform-\d{4}\.\d{2}\.\d{2}(?:\.\d+)?)-rc\.(\d+)$")
 RC_BRANCH_RE = re.compile(r"^rc/(platform-\d{4}\.\d{2}\.\d{2}(?:\.\d+)?-rc\.\d+)$")
-CANDIDATE_BRANCH_RE = re.compile(r"^candidate/([0-9a-f]{12})$")
+MAIN_REF = "refs/heads/main"
 DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
 # The checks the notes link, from the commit a candidate was made at (ADR-080): static from
 # main's own run, the others the gates candidate.yml calls.
 GATE_CHECKS = ("static", "dry-run / dry-run", "smoke upgrade / smoke", "smoke fresh / smoke")
-# Check runs that are not the commit's CI: the jobs of candidate.yml, candidate-guard.yml and
-# auto-candidate.yml (AC4b), from this run or an earlier candidate on the commit.
+# Check runs that are not the commit's CI: the jobs of candidate.yml and candidate-guard.yml,
+# from this run or an earlier candidate on the commit. The last three belong to workflows that
+# are gone (auto-candidate.yml, the cleanup job); a commit they ran on still carries them.
 CANDIDATE_JOBS = frozenset([
     "check the candidate",
     "the log batch's image on GHCR",
@@ -80,12 +76,6 @@ CANDIDATE_JOBS = frozenset([
 # The jobs candidate.yml calls from its own jobs (workflow `dry-run`, `smoke upgrade`, `smoke
 # fresh`): a check run is "<job> / <called job>". Candidate reads their result itself.
 CANDIDATE_GATE_PREFIXES = ("dry-run / ", "smoke upgrade / ", "smoke fresh / ")
-# What a release ships (install/release.py installs it): a change under these decides a candidate.
-SHIPPED_DIRS = ("charts/", "images/", "install/")
-# The events whose runs of a workflow are main's CI: a push, a dispatch and, for Static after
-# Auto-merge (auto-merge pushes with GITHUB_TOKEN, which starts no push run, ADR-055),
-# a workflow_run.
-CI_EVENTS = frozenset(["push", "workflow_dispatch", "workflow_run"])
 FAILED = frozenset(["failure", "timed_out", "cancelled", "action_required", "stale",
                     "startup_failure"])
 
@@ -124,18 +114,11 @@ def rc_tag(final, tags):
     return f"{final}-rc.{max([0] + _candidates(final, tags)) + 1}"
 
 
-def check_candidate(branch, head, on_main, others):
-    """Refuses unless the branch names HEAD, HEAD is on origin/main and no other candidate
-    branch is left over."""
-    m = CANDIDATE_BRANCH_RE.match(branch)
-    if not m:
-        raise ValueError(f"{branch} is not candidate/<12-character sha>")
-    if not head.startswith(m.group(1)):
-        raise ValueError(f"{branch} names {m.group(1)}, not HEAD {head}")
-    if not on_main:
-        raise ValueError(f"{head} is not on origin/main")
-    if others:
-        raise ValueError(f"{', '.join(others)} is left over; Kade deletes it first")
+def check_main(ref):
+    """Refuses unless the run is on `main` itself: a candidate is made from refs/heads/main."""
+    if ref != MAIN_REF:
+        raise ValueError(f"a candidate is made from {MAIN_REF} only (ADR-080); this run is on "
+                         f"{ref or '(no ref)'}")
 
 
 def checks_passed(runs, run_id):
@@ -158,28 +141,16 @@ def checks_passed(runs, run_id):
         raise ValueError(f"checks not passed: {'; '.join(bad)}")
 
 
-def should_candidate(head_tags, final, changed):
-    """(True, "") when HEAD has no platform-* tag and a shipped file changed since the release
-    `final` (`changed` is every file at HEAD when `final` is None); else (False, reason)."""
+def should_candidate(head_tags, final, since):
+    """(True, "") when HEAD has at least one commit since the release `final` (`since` is the
+    count; every commit of HEAD when `final` is None) and no platform-* tag; else
+    (False, reason)."""
+    if final and since == 0:
+        return False, f"nothing to release: HEAD is the commit of {final}"
     tagged = [t for t in head_tags if _key(t) or RC_RE.match(t)]
     if tagged:
         return False, f"HEAD already carries {', '.join(tagged)}"
-    if any(f.startswith(SHIPPED_DIRS) for f in changed):
-        return True, ""
-    since = f"since {final}" if final else "(no release yet)"
-    return False, f"no file under {', '.join(SHIPPED_DIRS)} changed {since}"
-
-
-def ci_done(runs, names):
-    """The state of main's CI from a commit's workflow runs: only runs of the workflows
-    `names` by CI_EVENTS count. Others (Auto-merge, Main status) run after them and may
-    still be going when the last one finishes."""
-    ours = [r for r in runs if r.get("name") in names and r.get("event") in CI_EVENTS]
-    if any(r.get("status") == "completed" and r.get("conclusion") in FAILED for r in ours):
-        return "red"
-    if not ours or any(r.get("status") != "completed" for r in ours):
-        return "waiting"
-    return "ready"
+    return True, ""
 
 
 def check_promote(rc, tags):
@@ -284,22 +255,12 @@ def _git(*args):
     return subprocess.run(["git", *args], capture_output=True, text=True, check=False)
 
 
-def _check_candidate_here(branch):
-    head = _git("rev-parse", "HEAD").stdout.strip()
-    on_main = _git("merge-base", "--is-ancestor", head, "origin/main").returncode == 0
-    listed = _git("ls-remote", "--heads", "origin", "candidate/*").stdout.splitlines()
-    others = [line.split("refs/heads/", 1)[1] for line in listed if "refs/heads/" in line]
-    check_candidate(branch, head, on_main, [b for b in others if b != branch])
-
-
 def _should_candidate_here():
     head_tags = _git("tag", "--points-at", "HEAD").stdout.split()
     final = previous(_git("tag", "--list", "platform-*").stdout.split())
-    if final:
-        changed = _git("diff", "--name-only", final, "HEAD").stdout.splitlines()
-    else:
-        changed = _git("ls-files").stdout.splitlines()
-    return should_candidate(head_tags, final, changed)
+    span = f"{final}..HEAD" if final else "HEAD"
+    since = int(_git("rev-list", "--count", span).stdout.strip() or 0)
+    return should_candidate(head_tags, final, since)
 
 
 def main(argv):
@@ -323,8 +284,8 @@ def _main(argv):
     if cmd == "rc" and rest:
         print(rc_tag(rest[0], rest[1:]))
         return 0
-    if cmd == "check-candidate" and len(rest) == 1:
-        _check_candidate_here(rest[0])
+    if cmd == "check-main" and len(rest) == 1:
+        check_main(rest[0])
         return 0
     if cmd == "checks-passed" and len(rest) == 1:
         checks_passed(json.load(sys.stdin).get("check_runs") or [], rest[0])
@@ -334,9 +295,6 @@ def _main(argv):
         if why:
             print(why, file=sys.stderr)
         print("true" if ok else "false")
-        return 0
-    if cmd == "ci-done" and rest:
-        print(ci_done(json.load(sys.stdin).get("workflow_runs") or [], rest))
         return 0
     if cmd == "check-promote" and rest:
         print(check_promote(rest[0], rest[1:]))
