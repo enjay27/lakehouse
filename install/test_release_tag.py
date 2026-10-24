@@ -283,39 +283,46 @@ class Notes(unittest.TestCase):
         self.assertIn("First release: nothing to upgrade from.", self.notes(previous=None))
 
 
+class CheckMain(unittest.TestCase):
+    def test_main_passes(self):
+        rt.check_main("refs/heads/main")
+
+    def test_any_other_ref_is_refused(self):
+        for ref in ("refs/heads/candidate/0123456789ab", "refs/heads/rc/platform-2026.10.23-rc.1",
+                    "refs/heads/claude/x", "refs/heads/main2", "refs/heads/feature/main",
+                    "refs/tags/main", "main", ""):
+            with self.subTest(ref=ref), self.assertRaisesRegex(ValueError, "refs/heads/main"):
+                rt.check_main(ref)
+
+
 class ShouldCandidate(unittest.TestCase):
     FINAL = "platform-2026.10.10"
 
-    def test_a_shipped_file_changed_since_the_latest_release_is_a_candidate(self):
-        for path in ("charts/polaris/values-lakehouse.yaml", "images/polaris-log-batch/Dockerfile",
-                     "install/release.py"):
-            with self.subTest(path=path):
-                self.assertEqual(rt.should_candidate([], self.FINAL, ["docs/x.md", path]),
-                                 (True, ""))
+    def test_a_commit_since_the_latest_release_is_a_candidate(self):
+        for since in (1, 7):
+            with self.subTest(since=since):
+                self.assertEqual(rt.should_candidate([], self.FINAL, since), (True, ""))
 
-    def test_nothing_shipped_changed_is_not(self):
-        ok, why = rt.should_candidate([], self.FINAL, ["docs/adr/README.md", "gates/gate.py",
-                                                       "scripts/x.py", ".github/workflows/a.yml",
-                                                       "installer/x", "charts"])
-        self.assertFalse(ok)
-        self.assertIn(self.FINAL, why)
+    def test_head_at_the_latest_releases_commit_is_nothing_to_release(self):
+        for tags in ([], ["platform-2026.10.10"]):
+            with self.subTest(tags=tags):
+                ok, why = rt.should_candidate(tags, self.FINAL, 0)
+                self.assertFalse(ok)
+                self.assertIn("nothing to release", why)
+                self.assertIn(self.FINAL, why)
 
-    def test_no_final_tag_counts_every_file(self):
-        self.assertEqual(rt.should_candidate([], None, ["install/release.py"]), (True, ""))
-        ok, why = rt.should_candidate([], None, ["docs/x.md"])
-        self.assertFalse(ok)
-        self.assertIn("no release", why)
+    def test_no_final_tag_is_the_first_release_of_any_commit(self):
+        self.assertEqual(rt.should_candidate([], None, 3), (True, ""))
 
     def test_a_platform_tag_on_head_final_or_candidate_is_not(self):
         for tag in ("platform-2026.10.10", "platform-2026.10.23-rc.1"):
             with self.subTest(tag=tag):
-                ok, why = rt.should_candidate([tag], self.FINAL, ["install/release.py"])
+                ok, why = rt.should_candidate([tag], self.FINAL, 2)
                 self.assertFalse(ok)
                 self.assertIn(tag, why)
 
     def test_other_tags_on_head_do_not_stop_it(self):
-        self.assertEqual(rt.should_candidate(["v1", "platform-x"], self.FINAL,
-                                             ["charts/a"]), (True, ""))
+        self.assertEqual(rt.should_candidate(["v1", "platform-x"], self.FINAL, 1), (True, ""))
 
 
 class CiDone(unittest.TestCase):
@@ -433,6 +440,12 @@ class Main(unittest.TestCase):
             self.assertEqual(self.run_main(["ci-done", "Other"]), (0, "waiting\n"))
         finally:
             sys.stdin = stdin
+
+    def test_check_main_prints_nothing_on_main_and_exits_1_elsewhere(self):
+        self.assertEqual(self.run_main(["check-main", "refs/heads/main"]), (0, ""))
+        code, out = self.run_main(["check-main", "refs/heads/candidate/0123456789ab"])
+        self.assertEqual(code, 1)
+        self.assertIn("refs/heads/main", out)
 
     def test_should_candidate_prints_a_verdict(self):
         code, out = self.run_main(["should-candidate"])
