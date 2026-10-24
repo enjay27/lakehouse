@@ -131,6 +131,34 @@ Candidate and Promote share `concurrency: release`.
   names are already left out of the check read (§3).
 - **Supersedes ADR-033 and ADR-042.** ADR-074's image name is kept in §4.
 
+### 8. Amendment (2026-10-24): Candidate runs on `main` itself
+
+Plan section 9 of `kade-agent/agent-config` (`docs/release-flow-plan.md`, 9.1 and 9.4, accepted
+by Kade on 2026-10-24) replaces the candidate branch. This section changes §1, §3, §5 and §7
+and nothing else.
+
+- **§1 step 1 goes.** Nobody pushes `candidate/<sha>`. Candidate is started by hand on `main`
+  (the Actions dropdown already has it selected). `GITHUB_SHA` is fixed when Kade clicks; a
+  push to `main` during the run changes nothing, the run keeps its commit, which is on `main`.
+- **§3 checks, now on `GITHUB_SHA`:** the run is on `refs/heads/main` and nothing else
+  (`release_tag.py check-main`); every check run passed and `static` succeeded
+  (`checks-passed`, unchanged); there is at least one commit since the latest final
+  `platform-*` tag, else "nothing to release" (`should-candidate`, now a commit count and no
+  longer a read of changed paths; 9.4 decision 2, the default); no `platform-*` tag is on the
+  commit. `check-candidate` and its "no other candidate branch" refusal are removed.
+- **§5:** the last job that deleted `candidate/<sha>` is removed, and so is the `candidate/**`
+  half of `candidate-guard.yml`; `rc/**` stays.
+- **§7 "Not here" is closed the other way:** there is no automatic candidate.
+  `auto-candidate.yml` and its job names are removed (they stay in the check read's list only
+  for commits they already ran on).
+- **The version stays computed** from the UTC date (`release_tag.py next`), so plan 9.2's
+  version floor and stamp commit do not apply to this repository, as before.
+- **The called gates** run on the same commit. Their delete jobs skip every ref but
+  `refs/heads/gate/*` (ADR-049), so `main` is never deleted; `scripts/test_release_workflows.py`
+  now asserts it.
+- **Sessions** push nothing outside `claude/*` and `agent/*` for a release; `CLAUDE.md`'s
+  mentions of `auto-candidate.yml` and `candidate/<sha>` are stale until a follow-up edits them.
+
 ## Diagram
 
 ```mermaid
