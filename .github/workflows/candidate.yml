@@ -1,31 +1,34 @@
-# Candidate (ADR-080). An agent pushes candidate/<12-character sha> at a commit on main, adding
-# no commit; Kade runs this workflow on that branch. It
-#   - refuses unless the branch names HEAD, HEAD is on origin/main, no other candidate branch is
-#     left over, the branch has not moved, every check run on HEAD passed and static succeeded
-#     (install/release_tag.py check-candidate, checks-passed), and no platform-* tag is on HEAD,
+# Candidate (ADR-080, amended by its section 8; plan section 9 of kade-agent/agent-config).
+# Kade runs this workflow on main itself (Actions > Candidate > Run workflow, main is already
+# selected); there is no candidate branch. GITHUB_SHA is fixed when he clicks, and a push to main
+# during the run changes nothing: the run keeps its commit. It
+#   - refuses unless it runs on refs/heads/main (install/release_tag.py check-main), there is at
+#     least one commit since the latest release (should-candidate: "nothing to release"
+#     otherwise), every check run on the commit passed and static succeeded (checks-passed; a
+#     refusal because checks are still running is run again later), and no platform-* tag is
+#     on the commit,
 #   - picks the final tag platform-YYYY.MM.DD from the UTC date (.2, .3 once that date is
-#     released) and the next candidate number, which ignores candidate tags as releases,
+#     released) and the next candidate number, which ignores candidate tags as releases; the
+#     version is computed, so no stamp commit and no version floor (plan 9.2 does not apply),
 #   - runs the gates on that very commit: dry-run and smoke, upgrade and fresh, called as
 #     release-gate.yml called them (ADR-033). They are called, not copied; a gate workflow
-#     deletes its gate branch only when the ref is one (ADR-049), so none is touched here,
+#     deletes its gate branch only when the ref is one (ADR-049), never main, so none is
+#     touched here (scripts/test_release_workflows.py checks that),
 #   - builds the log batch's image once (ADR-042, now ADR-080 section 4): content-hash tag,
 #     never overwritten, read back without credentials,
-#   - tags the same main commit <final>-rc.N (this repository has no version file, so no stamp
-#     commit), makes a GitHub prerelease whose notes name the image with its digest, makes the
-#     branch rc/<rc tag> at that commit, for Promote (promote.yml) to run from (the GitHub app
-#     lists branches only), and deletes the same version's lower rc branches.
-# A successful run deletes the candidate/<sha> branch; a failed or refused one keeps it, so
-# Candidate can run again on it (a kind gate can flake). auto-candidate deletes it when main gets
-# a newer candidate, or Kade does. Only the called gates' delete jobs, the image job
-# (packages) and the tag and cleanup jobs can write; the tag and cleanup jobs run none of the
-# repository's code.
+#   - tags the same main commit <final>-rc.N, makes a GitHub prerelease whose notes name the
+#     image with its digest, makes the branch rc/<rc tag> at that commit, for Promote
+#     (promote.yml) to run from (the GitHub app lists branches only), and deletes the same
+#     version's lower rc branches.
+# Nothing is deleted at the end: main is never touched. Only the called gates' delete jobs, the
+# image job (packages) and the tag job can write; the tag job runs none of the repository's code.
 # A called workflow's jobs get at most what the calling job grants. The gates' own jobs ask for
 # contents: read; only their delete job asks for write, and it skips any ref but a gate branch
-# (ADR-049). smoke.yml's main-status job asks for issues: write and skips any ref but main
-# (ADR-055), but GitHub refuses to start a called workflow whose jobs ask for more than the
-# caller grants. Check run names `dry-run / dry-run`, `smoke upgrade / smoke` and `smoke fresh /
-# smoke` are left out of the commit's check read (install/release_tag.py), as are this
-# workflow's own jobs: the tag job needs the gates themselves.
+# (ADR-049). smoke.yml's main-status job asks for issues: write and runs only on a schedule or
+# a workflow_run (ADR-055), but GitHub refuses to start a called workflow whose jobs ask for
+# more than the caller grants. Check run names `dry-run / dry-run`, `smoke upgrade / smoke` and
+# `smoke fresh / smoke` are left out of the commit's check read (install/release_tag.py), as are
+# this workflow's own jobs: the tag job needs the gates themselves.
 name: Candidate
 
 on:
@@ -50,33 +53,23 @@ jobs:
       rc: ${{ steps.names.outputs.rc }}
       superseded: ${{ steps.names.outputs.superseded }}
     steps:
-      - name: Only a candidate branch is a candidate
-        run: |
-          case "$GITHUB_REF" in
-            refs/heads/candidate/*) ;;
-            *) echo "::error::a candidate is made from a candidate/* branch only (ADR-080); this run is on $GITHUB_REF"; exit 1 ;;
-          esac
-
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: The branch names a commit on main, has not moved, and its checks passed
+      - name: Main only, something to release, and the commit's checks passed
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          python3 install/release_tag.py check-candidate "$GITHUB_REF_NAME"
-          head=$(gh api "repos/$REPO/git/ref/heads/$GITHUB_REF_NAME" --jq .object.sha)
-          if [ "$head" != "$GITHUB_SHA" ]; then
-            echo "::error::$GITHUB_REF_NAME moved from $GITHUB_SHA to $head"
+          python3 install/release_tag.py check-main "$GITHUB_REF"
+          if [ "$(python3 install/release_tag.py should-candidate 2> "$RUNNER_TEMP/why.txt")" != true ]; then
+            echo "::error::$(cat "$RUNNER_TEMP/why.txt")"
             exit 1
           fi
-          gh api --paginate "repos/$REPO/commits/$GITHUB_SHA/check-runs?per_page=100" \
-            --jq '.check_runs[]' | jq -s '{check_runs: .}' \
-            | python3 install/release_tag.py checks-passed "$GITHUB_RUN_ID"
+          gh api --paginate "repos/$REPO/commits/$GITHUB_SHA/check-runs?per_page=100"             --jq '.check_runs[]' | jq -s '{check_runs: .}'             | python3 install/release_tag.py checks-passed "$GITHUB_RUN_ID"
 
       - name: Name the final tag and the candidate tag
         id: names
@@ -241,11 +234,6 @@ jobs:
           DIGEST: ${{ needs.image.outputs.digest }}
         run: |
           set -euo pipefail
-          head=$(gh api "repos/$REPO/git/ref/heads/$GITHUB_REF_NAME" --jq .object.sha)
-          if [ "$head" != "$GITHUB_SHA" ]; then
-            echo "::error::$GITHUB_REF_NAME moved from $GITHUB_SHA to $head"
-            exit 1
-          fi
           base64 -d <<<"$NOTES" > "$RUNNER_TEMP/notes.md"
           # The notes name the image the image job pushed or found; its digest replaces the
           # placeholder (install/release_tag.py DIGEST_PLACEHOLDER).
@@ -261,31 +249,7 @@ jobs:
             gh api -X DELETE "repos/$REPO/git/refs/heads/$b" > /dev/null || echo "::warning::could not delete $b"
           done
           {
-            echo "Candidate $RC of $FINAL at $GITHUB_SHA (on main)."
+            echo "Candidate $RC of $FINAL at $GITHUB_SHA (on main, run from main)."
             if [ -n "$SUPERSEDED" ]; then echo "Deleted the superseded $SUPERSEDED."; fi
             echo "Try it, then Actions > Promote > Run workflow > branch rc/$RC."
           } >> "$GITHUB_STEP_SUMMARY"
-
-  cleanup:
-    name: delete the candidate branch
-    needs: [check, dry-run, smoke-upgrade, smoke-fresh, notes, image, tag]
-    if: needs.tag.result == 'success' && startsWith(github.ref, 'refs/heads/candidate/')
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: write  # deleting the branch
-    steps:
-      - name: Delete the branch of a candidate that was tagged
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-        run: |
-          if gh api -X DELETE "repos/$REPO/git/refs/heads/$GITHUB_REF_NAME" > /dev/null; then
-            echo "Deleted $GITHUB_REF_NAME." >> "$GITHUB_STEP_SUMMARY"
-          elif [ "$(gh api "repos/$REPO/git/matching-refs/heads/$GITHUB_REF_NAME" \
-                      --jq 'map(select(.ref == "refs/heads/" + env.GITHUB_REF_NAME)) | length')" = 0 ]; then
-            echo "$GITHUB_REF_NAME was already deleted." >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "::error::could not delete $GITHUB_REF_NAME; Kade deletes it"
-            exit 1
-          fi
